@@ -27,3 +27,4 @@
 {"date": "2026-06-28", "quality_signal": 5220, "health": {"coupling": 0.035997, "cycles": 2, "god_files": 2, "max_depth": 8, "complex_fn": 962}, "files": 5592, "bottleneck": "complexity", "rules_violations": 0}
 {"date": "2026-06-29", "quality_signal": 5220, "health": {"coupling": 0.03709, "cycles": 2, "god_files": 2, "max_depth": 8, "complex_fn": 964}, "files": 5612, "bottleneck": "complexity", "rules_violations": 0}
 {"date": "2026-06-30", "quality_signal": 5215, "health": {"coupling": 0.03798, "cycles": 2, "god_files": 2, "max_depth": 8, "complex_fn": 981}, "files": 5668, "bottleneck": "complexity", "rules_violations": 0}
+{"date": "2026-07-01", "quality_signal": 5218, "health": {"coupling": 0.03828, "cycles": 2, "god_files": 2, "max_depth": 8, "complex_fn": 976}, "files": 5659, "bottleneck": "complexity", "rules_violations": 0}
