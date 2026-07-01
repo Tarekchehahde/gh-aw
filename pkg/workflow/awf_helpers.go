@@ -608,8 +608,7 @@ func BuildAWFArgs(config AWFCommandConfig) []string {
 		awfLogLevel = firewallConfig.LogLevel
 	}
 	awfArgs = append(awfArgs, "--log-level", awfLogLevel)
-	awfArgs = append(awfArgs, "--proxy-logs-dir", string(constants.AWFProxyLogsDir))
-	awfArgs = append(awfArgs, "--audit-dir", string(constants.AWFAuditDir))
+	// Note: --proxy-logs-dir and --audit-dir are now set via config (logging.proxyLogsDir, logging.auditDir).
 	if isFeatureEnabled(constants.AwfDiagnosticLogsFeatureFlag, config.WorkflowData) {
 		awfArgs = append(awfArgs, "--diagnostic-logs")
 		awfHelpersLog.Print("Added --diagnostic-logs because awf-diagnostic-logs feature flag is enabled")

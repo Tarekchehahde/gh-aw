@@ -520,10 +520,10 @@ func TestAWFBasePathFlags(t *testing.T) {
 	})
 }
 
-// TestBuildAWFArgsAuditDir tests that BuildAWFArgs always includes --audit-dir
+// TestBuildAWFArgsAuditDir tests that audit-dir is passed via config (logging.auditDir)
 // pointing to the AWF audit directory for policy-manifest.json and other audit files
 func TestBuildAWFArgsAuditDir(t *testing.T) {
-	t.Run("includes --audit-dir flag with correct path", func(t *testing.T) {
+	t.Run("audit-dir and proxy-logs-dir are in config, not CLI flags", func(t *testing.T) {
 		workflowData := &WorkflowData{
 			Name: "test-workflow",
 			EngineConfig: &EngineConfig{
@@ -545,8 +545,9 @@ func TestBuildAWFArgsAuditDir(t *testing.T) {
 		args := BuildAWFArgs(config)
 		argsStr := strings.Join(args, " ")
 
-		assert.Contains(t, argsStr, "--audit-dir", "Should include --audit-dir flag")
-		assert.Contains(t, argsStr, "/tmp/gh-aw/sandbox/firewall/audit", "Should include the audit directory path")
+		// These flags should NOT be in CLI args — they are now in config JSON
+		assert.NotContains(t, argsStr, "--audit-dir", "audit-dir should be in config, not CLI flags")
+		assert.NotContains(t, argsStr, "--proxy-logs-dir", "proxy-logs-dir should be in config, not CLI flags")
 	})
 }
 
