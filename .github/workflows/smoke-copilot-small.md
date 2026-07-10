@@ -19,6 +19,10 @@ engine:
   id: copilot
   model: small
   bare: true
+  env:
+    # gpt-5-mini class models are not accessible via the legacy /chat/completions
+    # endpoint. Force the "messages" wire API instead.
+    COPILOT_PROVIDER_WIRE_API: messages
 tools:
   bash:
     - "*"
