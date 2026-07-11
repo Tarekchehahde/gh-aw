@@ -123,7 +123,12 @@ func (c *Compiler) validateSecretsSerializationExpressions(workflowData *Workflo
 	)
 
 	if effectiveStrict {
-		return fmt.Errorf("strict mode: %s", msg)
+		return NewValidationError(
+			"expressions",
+			strings.Join(allFound, ", "),
+			"strict mode: "+msg,
+			"Use specific secret references (e.g. secrets.MY_SECRET) instead of passing the entire secrets context.",
+		)
 	}
 
 	fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Warning: "+msg))
