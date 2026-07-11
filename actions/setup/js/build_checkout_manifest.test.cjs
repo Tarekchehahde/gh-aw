@@ -71,6 +71,8 @@ describe("build_checkout_manifest.cjs", () => {
     fs.mkdirSync(repoDir, { recursive: true });
 
     execGit(["init", "-q"], { cwd: repoDir });
+    execGit(["config", "user.email", "test@example.com"], { cwd: repoDir });
+    execGit(["config", "user.name", "Test User"], { cwd: repoDir });
     execGit(["checkout", "-b", "main"], { cwd: repoDir });
     fs.writeFileSync(path.join(repoDir, "README.md"), "base\n");
     execGit(["add", "README.md"], { cwd: repoDir });

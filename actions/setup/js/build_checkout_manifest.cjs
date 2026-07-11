@@ -168,9 +168,7 @@ function buildCheckoutManifest(entries, options = {}) {
       default_branch: defaultBranch,
       checked_out_ref: checkedOutRef,
     };
-    core.info(
-      `checkout-manifest: ${repository} -> path=${checkoutPath} default_branch=${defaultBranch || "<unresolved>"} checked_out_ref=${checkedOutRef || "<unresolved>"}`
-    );
+    core.info(`checkout-manifest: ${repository} -> path=${checkoutPath} default_branch=${defaultBranch || "<unresolved>"} checked_out_ref=${checkedOutRef || "<unresolved>"}`);
   }
 
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");

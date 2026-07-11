@@ -1235,9 +1235,7 @@ describe("safe_outputs_handlers", () => {
 
       expect(result.isError).toBeUndefined();
       expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining(`Found repo checkout at: ${targetRepoDir}`));
-      expect(mockServer.debug).toHaveBeenCalledWith(
-        expect.stringContaining("Using checkout-manifest base branch for test-owner/test-repo: release-1.12.x")
-      );
+      expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining("Using checkout-manifest base branch for test-owner/test-repo: release-1.12.x"));
       expect(mockAppendSafeOutput).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "create_pull_request",
