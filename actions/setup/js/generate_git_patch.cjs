@@ -12,7 +12,16 @@ const path = require("path");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ensureOriginRemoteTrackingRef, execGitSync } = require("./git_helpers.cjs");
 const { ERR_SYSTEM } = require("./error_codes.cjs");
-const { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize, isValidGitBranchName } = require("./git_patch_utils.cjs");
+const {
+  sanitizeForFilename,
+  sanitizeBranchNameForPatch,
+  sanitizeRepoSlugForPatch,
+  getPatchPathForBranch,
+  getPatchPathForBranchInRepo,
+  buildExcludePathspecs,
+  computeIncrementalDiffSize,
+  isValidGitBranchName,
+} = require("./git_patch_utils.cjs");
 
 // sanitizeForFilename is re-exported below for backward compatibility with
 // existing callers that imported it from this module.

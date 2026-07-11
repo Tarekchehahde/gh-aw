@@ -187,10 +187,7 @@ async function resolveSafeOutputBaseBranch({ config, repoSlug, repoParts, repoCw
  */
 function patchGenerationFailureDetails(errorMsg) {
   if (/merge-base|ERR_SYSTEM|Invalid baseBranch|base branch/i.test(errorMsg)) {
-    return (
-      "Patch generation failed while resolving the pull request base branch or computing a merge-base. " +
-      "Verify allowed-base-branches, side-repo checkout ref, and create-pull-request.github-token for private repos."
-    );
+    return "Patch generation failed while resolving the pull request base branch or computing a merge-base. " + "Verify allowed-base-branches, side-repo checkout ref, and create-pull-request.github-token for private repos.";
   }
   return "No commits were found to create a pull request. Make sure you have committed your changes using git add and git commit before calling create_pull_request.";
 }
