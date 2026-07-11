@@ -1063,9 +1063,9 @@ func TestCopilotEngineComputeToolArguments(t *testing.T) {
 		{
 			name: "github gh-proxy with wildcard bash allows gh cli and web_fetch",
 			tools: map[string]any{
-				"bash":       []any{"*"},
-				"github":     map[string]any{"mode": "gh-proxy"},
-				"web-fetch":  map[string]any{},
+				"bash":      []any{"*"},
+				"github":    map[string]any{"mode": "gh-proxy"},
+				"web-fetch": map[string]any{},
 			},
 			workflowData: &WorkflowData{
 				Tools: map[string]any{
