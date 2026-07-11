@@ -10,7 +10,7 @@ const { estimateTokens } = require("./estimate_tokens.cjs");
 const { writeLargeContentToFile } = require("./write_large_content_to_file.cjs");
 const { getCurrentBranch } = require("./get_current_branch.cjs");
 const { getBaseBranch } = require("./get_base_branch.cjs");
-const { lookupCheckout } = require("./checkout_manifest.cjs");
+const { lookupCheckout, resolveManifestBaseBranch } = require("./checkout_manifest.cjs");
 const { generateGitPatch } = require("./generate_git_patch.cjs");
 const { generateGitBundle } = require("./generate_git_bundle.cjs");
 const { hasMergeCommitsInRange, execGitSync } = require("./git_helpers.cjs");
@@ -661,9 +661,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       baseBranch = configuredBaseBranch;
     } else {
       const manifestEntry = lookupCheckout(repoResult.repo);
-      if (manifestEntry && manifestEntry.default_branch) {
-        baseBranch = manifestEntry.default_branch;
-        server.debug(`Using checkout-manifest default_branch for ${repoResult.repo}: ${baseBranch}`);
+      const manifestBaseBranch = resolveManifestBaseBranch(manifestEntry);
+      if (manifestBaseBranch) {
+        baseBranch = manifestBaseBranch;
+        server.debug(`Using checkout-manifest base branch for ${repoResult.repo}: ${baseBranch}`);
       } else {
         baseBranch = await getBaseBranch(repoParts, {
           preferLocalDefaultBranchMetadata: Boolean(repoCwd),
@@ -1093,9 +1094,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       server.debug(`Using configured base_branch for push_to_pull_request_branch: ${baseBranch}`);
     } else {
       const manifestEntry = lookupCheckout(itemRepo);
-      if (manifestEntry && manifestEntry.default_branch) {
-        baseBranch = manifestEntry.default_branch;
-        server.debug(`Using checkout-manifest default_branch for ${itemRepo}: ${baseBranch}`);
+      const manifestBaseBranch = resolveManifestBaseBranch(manifestEntry);
+      if (manifestBaseBranch) {
+        baseBranch = manifestBaseBranch;
+        server.debug(`Using checkout-manifest base branch for ${itemRepo}: ${baseBranch}`);
       } else {
         baseBranch = await getBaseBranch(repoParts, {
           preferLocalDefaultBranchMetadata: Boolean(repoCwd),

@@ -130,6 +130,7 @@ func (cm *CheckoutManager) GenerateCheckoutManifestStep(getActionPin func(string
 		repository string
 		path       string
 		token      string
+		ref        string
 	}
 	var entries []manifestEntry
 	for checkoutIndex, entry := range cm.ordered {
@@ -143,6 +144,7 @@ func (cm *CheckoutManager) GenerateCheckoutManifestStep(getActionPin func(string
 			repository: entry.key.repository,
 			path:       entry.key.path,
 			token:      resolveCheckoutTokenExpression(entry, checkoutIndex, false),
+			ref:        entry.ref,
 		})
 	}
 	if len(entries) == 0 {
@@ -176,6 +178,14 @@ func (cm *CheckoutManager) GenerateCheckoutManifestStep(getActionPin func(string
 				fmt.Fprintf(&sb, "          %s: %s\n", tokenKey, githubExpressionWhitespaceReplacer.Replace(e.token))
 			} else {
 				writeYAMLEnv(&sb, "          ", tokenKey, e.token)
+			}
+		}
+		if e.ref != "" {
+			refKey := fmt.Sprintf("GH_AW_CHECKOUT_REF_%d", manifestIndex)
+			if strings.Contains(e.ref, "${{") {
+				fmt.Fprintf(&sb, "          %s: %s\n", refKey, githubExpressionWhitespaceReplacer.Replace(e.ref))
+			} else {
+				writeYAMLEnv(&sb, "          ", refKey, e.ref)
 			}
 		}
 	}

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
 import { createHandlers, hasUpdatePullRequestFields } from "./safe_outputs_handlers.cjs";
+import { _resetCache as resetCheckoutManifestCache } from "./checkout_manifest.cjs";
 import {
   looksLikeExploratoryBranch,
   normalizeProbeValue,
@@ -84,6 +85,7 @@ describe("safe_outputs_handlers", () => {
     delete process.env.GITHUB_SERVER_URL;
     delete process.env.GITHUB_REPOSITORY;
     delete process.env.GH_AW_WORKFLOW_ID;
+    delete process.env.GH_AW_CHECKOUT_MANIFEST;
     delete process.env.GH_AW_ASSETS_BRANCH;
     delete process.env.GH_AW_ASSETS_MAX_SIZE_KB;
     delete process.env.GH_AW_ASSETS_ALLOWED_EXTS;
@@ -605,6 +607,13 @@ describe("safe_outputs_handlers", () => {
      * origin/release-1.12.x instead of origin/main, so only the local fix
      * ends up in the generated patch.
      */
+    function writeCheckoutManifest(manifest) {
+      const manifestPath = path.join(testWorkspaceDir, `checkout-manifest-${Date.now()}.json`);
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+      process.env.GH_AW_CHECKOUT_MANIFEST = manifestPath;
+      resetCheckoutManifestCache();
+    }
+
     function createSideRepoOnReleaseBranchWithLocalCommit() {
       const targetRepoDir = path.join(testWorkspaceDir, "target-repo");
       fs.mkdirSync(targetRepoDir, { recursive: true });
@@ -638,6 +647,7 @@ describe("safe_outputs_handlers", () => {
       fs.writeFileSync(path.join(targetRepoDir, "README.md"), "release local only\n");
       execSync("git add README.md", { cwd: targetRepoDir, stdio: "pipe" });
       execSync("git commit -m 'local only fix'", { cwd: targetRepoDir, stdio: "pipe" });
+      execSync("git checkout -b feature/release-fix", { cwd: targetRepoDir, stdio: "pipe" });
 
       return { targetRepoDir };
     }
@@ -1199,8 +1209,16 @@ describe("safe_outputs_handlers", () => {
       }
     });
 
-    it("should use side-repo origin/HEAD base branch so patch includes branch commits since main", async () => {
+    it("should use checkout-manifest checked_out_ref as base branch for side-repo PRs", async () => {
       const { targetRepoDir } = createSideRepoOnReleaseBranchWithLocalCommit();
+      writeCheckoutManifest({
+        "test-owner/test-repo": {
+          repository: "test-owner/test-repo",
+          path: "target-repo",
+          default_branch: "main",
+          checked_out_ref: "release-1.12.x",
+        },
+      });
 
       handlers = createHandlers(mockServer, mockAppendSafeOutput, {
         create_pull_request: {
@@ -1210,28 +1228,26 @@ describe("safe_outputs_handlers", () => {
       });
 
       const result = await handlers.createPullRequestHandler({
-        branch: "release-1.12.x",
+        branch: "feature/release-fix",
         title: "Release fix",
         body: "Prepare release branch fix",
       });
 
       expect(result.isError).toBeUndefined();
       expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining(`Found repo checkout at: ${targetRepoDir}`));
-      // No base-branch override is configured. The checked-out branch is release-1.12.x,
-      // but origin/HEAD points to origin/main, so base_branch must resolve to main.
+      expect(mockServer.debug).toHaveBeenCalledWith(
+        expect.stringContaining("Using checkout-manifest base branch for test-owner/test-repo: release-1.12.x")
+      );
       expect(mockAppendSafeOutput).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "create_pull_request",
-          base_branch: "main",
-          branch: "release-1.12.x",
+          base_branch: "release-1.12.x",
+          branch: "feature/release-fix",
         })
       );
       const responseData = JSON.parse(result.content[0].text);
       const patchContent = fs.readFileSync(responseData.patch.path, "utf8");
-      // Diffing release-1.12.x against base main includes both release-only commits:
-      // the tracked release commit and the local-only fix.
       expect(patchContent).toContain("local only fix");
-      expect(patchContent).toContain("release tracked commit");
       expect(patchContent).not.toContain("MAIN_ONLY.md");
     });
 
