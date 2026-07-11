@@ -24,6 +24,14 @@ set -euo pipefail
 
 CACHE_DIR="${GH_AW_CACHE_DIR:-/tmp/gh-aw/cache-memory}"
 INTEGRITY="${GH_AW_MIN_INTEGRITY:-none}"
+QUARANTINE_DIR=".gh-aw-quarantine"
+PROVENANCE_FILE=".gh-aw-migrate-provenance.json"
+
+# Lowest-trust runs: block unexpected executable/script types when the workflow did not
+# configure an explicit allowed-extensions list (GH_AW_ALLOWED_EXTENSIONS).
+if [ "$INTEGRITY" = "none" ] && [ -z "${GH_AW_ALLOWED_EXTENSIONS:-}" ]; then
+  GH_AW_ALLOWED_EXTENSIONS=".json:.jsonl:.md:.txt:.csv"
+fi
 
 # All integrity levels in descending order (highest first)
 LEVELS=("merged" "approved" "unapproved" "none")
@@ -62,6 +70,76 @@ ensure_writable_dir() {
   rm -f "$probe_file" "$mkdir_err" "$chmod_err" "$write_err" 2>/dev/null || true
 }
 
+is_instruction_shaped_file() {
+  local file="$1"
+  # Skip non-text or empty files.
+  if ! grep -Iq . "$file" 2>/dev/null; then
+    return 1
+  fi
+  if grep -Eqi \
+    '^(#[[:space:]]{0,1}#{0,1}[[:space:]]*(instruction|system|new instruction|override|ignore previous)[[:space:]]|$)|^(SYSTEM|INSTRUCTION|ASSISTANT|USER):[[:space:]]|(ignore previous|new instruction|you are now)' \
+    "$file" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+quarantine_instruction_shaped_legacy_files() {
+  local quarantined=0
+  while IFS= read -r -d '' file; do
+    if is_instruction_shaped_file "$file"; then
+      rel="${file#./}"
+      target="${QUARANTINE_DIR}/${rel}"
+      mkdir -p "$(dirname "$target")"
+      mv "$file" "$target"
+      quarantined=$((quarantined + 1))
+      echo "::warning::Quarantined suspicious cache-memory file restored from prior run: ${rel}"
+    fi
+  done < <(find . -mindepth 1 -not -path './.git/*' -not -path "./${QUARANTINE_DIR}/*" -type f -print0 2>/dev/null || true)
+  if [ "$quarantined" -gt 0 ]; then
+    echo "Quarantined ${quarantined} instruction-shaped file(s) before migrate-legacy-files"
+  fi
+}
+
+write_migrate_provenance_sidecar() {
+  local migrated_at source integrity
+  migrated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  source="cache-restore-prefix-fallback"
+  integrity="none"
+  python3 - "$PROVENANCE_FILE" "$migrated_at" "$source" "$integrity" "$QUARANTINE_DIR" <<'PY'
+import json
+import os
+import sys
+
+provenance_path, migrated_at, source, integrity, quarantine_dir = sys.argv[1:6]
+files = []
+for root, _dirs, names in os.walk("."):
+    if root.startswith("./.git") or root.startswith(f"./{quarantine_dir}"):
+        continue
+    for name in names:
+        if name == os.path.basename(provenance_path):
+            continue
+        rel = os.path.relpath(os.path.join(root, name), ".")
+        files.append(rel)
+files.sort()
+payload = {
+    "migrated_at": migrated_at,
+    "source": source,
+    "files": files,
+    "integrity_level": integrity,
+}
+with open(provenance_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2)
+    handle.write("\n")
+print(len(files))
+PY
+  echo "Wrote migrate provenance sidecar: ${PROVENANCE_FILE}"
+}
+
+has_legacy_flat_files_to_migrate() {
+  find . -mindepth 1 -not -path './.git/*' -not -path "./${QUARANTINE_DIR}/*" -type f -print -quit 2>/dev/null | grep -q .
+}
+
 initialize_cache_memory_git_repo() {
   # No git repo yet — either a fresh cache or a legacy flat-file cache.
   # Initialize a git repository with an empty baseline commit on the highest-trust
@@ -89,6 +167,14 @@ initialize_cache_memory_git_repo() {
   # Switching to 'none' before staging ensures legacy data cannot be read by
   # higher-integrity runs via the merge-down step.
   git checkout -q none
+  quarantine_instruction_shaped_legacy_files
+  if has_legacy_flat_files_to_migrate; then
+    write_migrate_provenance_sidecar
+  fi
+  if [ -d "$QUARANTINE_DIR" ]; then
+    mkdir -p .git/info
+    printf '%s\n' "${QUARANTINE_DIR}/" >> .git/info/exclude
+  fi
   git add -A
   git commit --allow-empty -m "migrate-legacy-files" -q
 
