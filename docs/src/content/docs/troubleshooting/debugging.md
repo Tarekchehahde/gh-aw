@@ -158,10 +158,11 @@ Workflow runs produce several artifacts useful for debugging:
 
 | Artifact | Location | Contents |
 |----------|----------|----------|
-| `prompt.txt` | `/tmp/gh-aw/aw-prompts/` | Full prompt sent to the AI agent |
-| `agent_output.json` | `/tmp/gh-aw/safeoutputs/` | Structured safe-output data |
-| `agent-stdio.log` | `/tmp/gh-aw/` | Raw agent stdin/stdout log |
-| `firewall-logs/` | `/tmp/gh-aw/firewall-logs/` | Network access logs |
+| `prompt.txt` | `/tmp/gh-aw/aw-prompts/` (GitHub-hosted); `${{ runner.temp }}/gh-aw/aw-prompts/` when `runner.topology: arc-dind` | Full prompt sent to the AI agent |
+| `agent_output.json` | `/tmp/gh-aw/safeoutputs/` (GitHub-hosted); `${{ runner.temp }}/gh-aw/safeoutputs/` on `arc-dind` | Structured safe-output data |
+| `agent-stdio.log` | `/tmp/gh-aw/` (GitHub-hosted); `${{ runner.temp }}/gh-aw/` on `arc-dind` | Raw agent stdin/stdout log |
+| `firewall-logs/` | `/tmp/gh-aw/firewall-logs/` or `/tmp/gh-aw/sandbox/firewall/logs/` (GitHub-hosted); `${{ runner.temp }}/gh-aw/sandbox/firewall/logs/` on `arc-dind` | Network access logs |
+| `cli-proxy-logs/` | `${{ runner.temp }}/gh-aw/sandbox/firewall/logs/cli-proxy-logs/` on `arc-dind` (when CLI proxy enabled) | CLI proxy sidecar logs; empty if container failed before writing |
 
 Download from the Actions run page or `gh run download <run-id> --repo OWNER/REPO`.
 

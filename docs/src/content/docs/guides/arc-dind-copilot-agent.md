@@ -7,6 +7,8 @@ sidebar:
 
 Use this guide to run GitHub Copilot coding agent on an [Actions Runner Controller (ARC)](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) runner scale set with Docker-in-Docker (DinD).
 
+The same **Kubernetes pod prerequisites** (shared `_work` volume, privileged DinD sidecar only, no host `iptables`, `$RUNNER_TEMP` paths) apply if you run a **custom runner pod** without ARC — set `runner.topology: arc-dind` in frontmatter. See [Self-Hosted Runners — Kubernetes pod prerequisites](/gh-aw/reference/self-hosted-runners/#kubernetes-pod-prerequisites-runner--dind).
+
 ## Prerequisites
 
 Before starting, confirm you have a Kubernetes cluster, `helm` and `kubectl` installed, and credentials for runner registration (a GitHub PAT or GitHub App credentials).
@@ -117,7 +119,7 @@ Use versions at or above these minimums:
 | `ghcr.io/actions/actions-runner:latest` | Recommended | Use the official runner image, or a compatible custom image with equivalent runner requirements. |
 | Runner user | **Yes** | Non-root runner users are supported. `sudo` must remain available on the runner container for the Copilot CLI install script (binary installation and file ownership operations). |
 | DinD sidecar privilege | **Yes** | ARC DinD mode configures a privileged sidecar for Docker daemon operation. |
-| Shared work volume (`/home/runner/_work`) | **Yes** | Runner and Docker daemon share this volume in ARC DinD mode, so workspace mounts work without host path translation. |
+| Shared work volume (`/home/runner/_work`) | **Yes** | Runner and Docker daemon share this volume in ARC DinD mode, so workspace mounts work without host path translation. Includes `_temp` — do **not** mount a separate emptyDir at `/tmp` and expect gh-aw paths to be visible to both containers. |
 | Specific Kubernetes distribution | **No** | Any conformant cluster works (for example minikube, EKS, AKS, or GKE). |
 | Specific namespace names | **No** | `arc-system` and `arc-runners` are conventions only. |
 
@@ -171,6 +173,29 @@ volumeMounts:
   - name: dind-sock
     mountPath: /var/run
 ```
+
+If the socket lives at a non-default path, set `GH_AW_DOCKER_SOCK_PATH` and `GH_AW_DOCKER_SOCK_GID` on the runner (see [Self-Hosted Runners](/gh-aw/reference/self-hosted-runners/#docker-socket-override)).
+
+### `awf-cli-proxy is unhealthy` or empty cli-proxy log directory
+
+When `tools.github.mode: gh-proxy` or `features.cli-proxy` is enabled, AWF starts an `awf-cli-proxy` sidecar. Startup failures are surfaced in the **job log** (last 50 lines of sidecar stdout/stderr). On-disk logs are written under:
+
+```
+/home/runner/_work/_temp/<run-id>/gh-aw/sandbox/firewall/logs/cli-proxy-logs/
+```
+
+(that is `$RUNNER_TEMP/gh-aw/sandbox/firewall/logs/cli-proxy-logs/`). Searching `/tmp/gh-aw/sandbox/firewall/logs/cli-proxy-logs` on an `arc-dind` runner usually finds nothing because gh-aw does not use host `/tmp` for these paths.
+
+If the log directory is empty, the sidecar likely failed before writing files — rely on the job log and `docker logs awf-cli-proxy` on the DinD daemon.
+
+Typical causes on Kubernetes:
+
+- **External proxy / DIFC unreachable** — the CLI proxy must connect to the MCP gateway's CLI proxy (`awmg-cli-proxy`) on the AWF Docker network. Verify pod networking and that topology attach completed (check earlier AWF startup steps in the job log).
+- **Legacy host iptables mode** — a job log line `[SUCCESS] Host-level iptables rules configured successfully` means `sandbox.agent.sudo: true` (host `iptables`). That is not the default for `arc-dind`; remove explicit `sudo: true` unless you intentionally run legacy mode and have `iptables` on the runner host.
+
+### Host `iptables` confusion
+
+With default network-isolation on `runner.topology: arc-dind`, AWF does **not** require `iptables` on the runner host or `NET_ADMIN` on the runner container. Egress is enforced inside the DinD daemon (internal Docker network + Squid). Host `iptables` messages indicate legacy sudo mode, not the recommended Kubernetes setup.
 
 ## Related documentation
 

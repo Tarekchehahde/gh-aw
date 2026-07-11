@@ -48,6 +48,49 @@ env:
 
 When both overrides are set, the MCP gateway will mount the specified socket path and add the specified group to the container without attempting automatic detection. If either variable is omitted, the gateway falls back to auto-detection from `DOCKER_HOST` and `stat`, and will fail with an actionable error if resolution fails.
 
+### Kubernetes pod prerequisites (runner + DinD)
+
+These requirements apply to **ARC DinD** and to **custom Kubernetes pods** that run a runner container plus a DinD sidecar. Set `runner.topology: arc-dind` in workflow frontmatter in both cases so compiled workflows enable split-filesystem handling, `$RUNNER_TEMP`-scoped paths, and topology attach for MCP gateway / CLI proxy sidecars.
+
+| Requirement | Runner container | DinD sidecar | Notes |
+| --- | --- | --- | --- |
+| `privileged: true` | **No** | **Yes** | Only the Docker daemon sidecar needs privilege. |
+| `NET_ADMIN` | **No** | **No** | Default network-isolation mode does not configure host `iptables`. |
+| Host `iptables` binary | **No** (default) | Inside daemon | Required on the **runner host** only when using legacy `sandbox.agent.sudo: true`. |
+| Shared `_work` volume | **Yes** | **Yes** | Runner and DinD must share `/home/runner/_work` (includes `_temp`). |
+| Separate `/tmp` emptyDir | **No** | **No** | Do not rely on sharing `/tmp` between containers. gh-aw redirects transient state to `$RUNNER_TEMP` on `arc-dind`. |
+| Docker socket emptyDir | Mount at agreed path | Same emptyDir | Set `GH_AW_DOCKER_SOCK_PATH` / `GH_AW_DOCKER_SOCK_GID` when the socket is not at `/var/run/docker.sock`. |
+| `sudo` on runner | **Yes** | N/A | Copilot CLI install uses `sudo` for binary install and ownership fixes. |
+
+> [!NOTE]
+> A log line such as `[SUCCESS] Host-level iptables rules configured successfully` indicates **legacy host-iptables mode** (`sandbox.agent.sudo: true`), not the default network-isolation path. On Kubernetes with DinD, prefer the default (`sudo: false` / omitted) so AWF enforces egress inside the Docker daemon.
+
+### Path map: GitHub-hosted vs `arc-dind`
+
+On GitHub-hosted runners, gh-aw uses `/tmp/gh-aw/...`. With `runner.topology: arc-dind`, compiled workflows redirect many paths to **`${{ runner.temp }}/gh-aw/...`** (for example `/home/runner/_work/_temp/<run-id>/gh-aw/...`) so both the runner and the DinD daemon can see the same files.
+
+| Purpose | GitHub-hosted default | `runner.topology: arc-dind` |
+| --- | --- | --- |
+| Prompts | `/tmp/gh-aw/aw-prompts/` | `${{ runner.temp }}/gh-aw/aw-prompts/` |
+| Safe outputs staging | `/tmp/gh-aw/safeoutputs/` | `${{ runner.temp }}/gh-aw/safeoutputs/` |
+| Firewall logs (Squid) | `/tmp/gh-aw/sandbox/firewall/logs/` | `${{ runner.temp }}/gh-aw/sandbox/firewall/logs/` |
+| CLI proxy sidecar logs | `/tmp/gh-aw/sandbox/firewall/logs/cli-proxy-logs/` | `${{ runner.temp }}/gh-aw/sandbox/firewall/logs/cli-proxy-logs/` |
+
+### Debugging AWF sidecars on self-hosted runners
+
+When AWF fails to start (for example `awf-cli-proxy is unhealthy`), check these sources **in order**:
+
+1. **Job log stdout** — the workflow step prints the last 50 lines of `awf-cli-proxy` (and related) container logs when startup fails.
+2. **On-disk sidecar logs** — only exist after containers start writing. Use the path from the table above for your topology (`/tmp/gh-aw/...` vs `${{ runner.temp }}/gh-aw/...`). If the directory is empty, the container likely exited before creating log files.
+3. **`docker logs awf-cli-proxy`** (or the container name shown in the job log) on the DinD daemon — run from a step with access to `DOCKER_HOST`.
+
+Common `awf-cli-proxy` failures on Kubernetes:
+
+- **DIFC / external proxy unreachable** — when `tools.github.mode: gh-proxy` or `features.cli-proxy` is enabled, the CLI proxy sidecar must reach the MCP gateway CLI proxy (`awmg-cli-proxy` on the AWF Docker network). Ensure pod DNS/CNI allows AWF containers to resolve and connect to topology-attached peers.
+- **Wrong log path** — searching `/tmp/gh-aw/sandbox/firewall/logs/cli-proxy-logs` on an `arc-dind` runner often finds nothing; use `$RUNNER_TEMP/gh-aw/sandbox/firewall/logs/cli-proxy-logs` instead.
+
+See [ARC DinD troubleshooting](/gh-aw/guides/arc-dind-copilot-agent/#troubleshooting) for ARC-specific walkthroughs.
+
 ## runs-on formats
 
 **String** — single runner label:
@@ -260,23 +303,6 @@ network:
 
 ## ARC (Actions Runner Controller)
 
-GitHub Copilot coding agent **requires** Docker-in-Docker (DinD) mode on ARC. Set `containerMode.type="dind"` in your ARC Helm configuration. The `containerMode.type="kubernetes"` mode is not supported.
+GitHub Copilot coding agent **requires** Docker-in-Docker (DinD) on ARC. Set `containerMode.type="dind"` in your ARC Helm configuration; `containerMode.type="kubernetes"` is not supported.
 
-Set `runner.topology: arc-dind` in workflow frontmatter to enable ARC DinD split-filesystem handling. See the [ARC with Docker-in-Docker (DinD)](#arc-with-docker-in-docker-dind) section above and the [ARC DinD setup guide](/gh-aw/guides/arc-dind-copilot-agent/) for a complete walkthrough.
-
-### Docker-in-Docker (dind) sidecar
-
-The MCP gateway:
-
-1. Resolves the Docker socket path from `DOCKER_HOST` (supports `unix://` paths and bare absolute paths)
-2. Auto-detects the socket's group ID for correct permissions
-3. Retries the socket check for up to 10 seconds to handle the race condition where the gateway starts before `dockerd`
-
-### Pod security
-
-The dind sidecar requires `privileged: true` so `dockerd` can run. The runner container does **not** need `privileged: true` or `NET_ADMIN`.
-
-In network-isolation mode (the default for `topology: arc-dind`), AWF enforces egress via Docker network topology — an internal Docker network with no internet route and a dual-homed Squid proxy. All network enforcement happens inside the Docker daemon's domain (the dind sidecar). The runner container only issues Docker API commands via the socket; it never manipulates host `iptables` or network namespaces.
-
-> [!NOTE]
-> If your cluster enforces `allowPrivilegeEscalation: false` or `no-new-privileges` on the runner container, the Copilot CLI install script will fail. See [Known limitations](/gh-aw/guides/arc-dind-copilot-agent/#known-limitations) in the ARC DinD guide.
+Set `runner.topology: arc-dind` in workflow frontmatter and see [Kubernetes pod prerequisites](#kubernetes-pod-prerequisites-runner--dind) above. For a full walkthrough, see the [ARC DinD setup guide](/gh-aw/guides/arc-dind-copilot-agent/).
