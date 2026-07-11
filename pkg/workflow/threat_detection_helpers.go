@@ -118,3 +118,28 @@ func engineCoreSecretVarNames(engineID string) []string {
 		return []string{}
 	}
 }
+
+// buildThreatDetectionAgentConfig creates an AgentSandboxConfig for the detection job,
+// inheriting network-isolation and version settings from the parent workflow agent sandbox.
+func buildThreatDetectionAgentConfig(parent *WorkflowData, extraMounts ...string) *AgentSandboxConfig {
+	agent := &AgentSandboxConfig{
+		Type:             SandboxTypeAWF,
+		NetworkIsolation: true,
+	}
+	if parent != nil {
+		if parentAgent := getAgentConfig(parent); parentAgent != nil {
+			agent.NetworkIsolation = parentAgent.NetworkIsolation
+			agent.SudoExplicitlyEnabled = parentAgent.SudoExplicitlyEnabled
+			agent.Version = parentAgent.Version
+			agent.Runtime = parentAgent.Runtime
+			agent.Platform = parentAgent.Platform
+			if len(parentAgent.Mounts) > 0 {
+				agent.Mounts = append([]string(nil), parentAgent.Mounts...)
+			}
+		}
+	}
+	if len(extraMounts) > 0 {
+		agent.Mounts = append(agent.Mounts, extraMounts...)
+	}
+	return agent
+}
