@@ -144,14 +144,53 @@ func buildGitHubExpressionNonEmptyCheck(value string) ConditionNode {
 	return BuildNotEquals(BuildStringLiteral(strings.TrimSpace(githubExpressionWhitespaceReplacer.Replace(trimmed))), BuildStringLiteral(""))
 }
 
-// buildIgnoreIfMissingCondition returns a GitHub Actions if-expression that requires
-// both GitHub App credential inputs to be non-empty.
-func buildIgnoreIfMissingCondition(app *GitHubAppConfig) string {
-	condition := BuildAnd(
-		buildGitHubExpressionNonEmptyCheck(app.AppID),
-		buildGitHubExpressionNonEmptyCheck(app.PrivateKey),
-	)
-	return wrapGitHubExpression(RenderCondition(condition))
+const githubAppCredentialsPresentOutput = "present"
+
+// buildGitHubAppCredentialsProbeStepID returns a stable probe step id for a mint step.
+func buildGitHubAppCredentialsProbeStepID(mintStepID string) string {
+	return "check-" + mintStepID + "-credentials"
+}
+
+// buildIgnoreIfMissingMintIfCondition gates token minting on a prior probe step output.
+// GitHub Actions rejects secrets.* references in if: expressions; the probe step reads
+// credentials from env instead (see buildGitHubAppCredentialsProbeSteps).
+func buildIgnoreIfMissingMintIfCondition(probeStepID string) string {
+	return fmt.Sprintf("${{ steps.%s.outputs.%s == 'true' }}", probeStepID, githubAppCredentialsPresentOutput)
+}
+
+func gitHubAppCredentialEnvYAML(fieldName, value string) string {
+	trimmed := strings.TrimSpace(value)
+	if _, ok := extractWrappedGitHubExpression(trimmed); ok {
+		return fmt.Sprintf("          %s: %s\n", fieldName, trimmed)
+	}
+	return fmt.Sprintf("          %s: %q\n", fieldName, strings.TrimSpace(githubExpressionWhitespaceReplacer.Replace(trimmed)))
+}
+
+// buildGitHubAppCredentialsProbeSteps emits a bash probe that checks credential inputs via env.
+func buildGitHubAppCredentialsProbeSteps(app *GitHubAppConfig, probeStepID string) []string {
+	return []string{
+		"      - name: Check GitHub App credentials\n",
+		fmt.Sprintf("        id: %s\n", probeStepID),
+		"        shell: bash\n",
+		"        env:\n",
+		gitHubAppCredentialEnvYAML("APP_ID", app.AppID),
+		gitHubAppCredentialEnvYAML("PRIVATE_KEY", app.PrivateKey),
+		"        run: |\n",
+		"          if [ -n \"${APP_ID}\" ] && [ -n \"${PRIVATE_KEY}\" ]; then\n",
+		fmt.Sprintf("            echo \"%s=true\" >> \"$GITHUB_OUTPUT\"\n", githubAppCredentialsPresentOutput),
+		"          else\n",
+		fmt.Sprintf("            echo \"%s=false\" >> \"$GITHUB_OUTPUT\"\n", githubAppCredentialsPresentOutput),
+		"          fi\n",
+	}
+}
+
+func appendGitHubAppCredentialsProbeIfNeeded(steps []string, app *GitHubAppConfig, mintStepID string) ([]string, string) {
+	if app == nil || !app.shouldIgnoreMissingKey() {
+		return steps, ""
+	}
+	probeStepID := buildGitHubAppCredentialsProbeStepID(mintStepID)
+	steps = append(steps, buildGitHubAppCredentialsProbeSteps(app, probeStepID)...)
+	return steps, buildIgnoreIfMissingMintIfCondition(probeStepID)
 }
 
 // ========================================
@@ -223,10 +262,12 @@ func (c *Compiler) buildGitHubAppTokenMintStepWithMeta(app *GitHubAppConfig, per
 
 	owner, ownerSteps := resolveGitHubAppOwner(app, ownerSourceRepository, stepName, stepID)
 	steps = append(steps, ownerSteps...)
+	var ignoreIfMissingIf string
+	steps, ignoreIfMissingIf = appendGitHubAppCredentialsProbeIfNeeded(steps, app, stepID)
 	steps = append(steps, fmt.Sprintf("      - name: %s\n", stepName))
 	steps = append(steps, fmt.Sprintf("        id: %s\n", stepID))
-	if app.shouldIgnoreMissingKey() {
-		steps = append(steps, fmt.Sprintf("        if: %s\n", buildIgnoreIfMissingCondition(app)))
+	if ignoreIfMissingIf != "" {
+		steps = append(steps, fmt.Sprintf("        if: %s\n", ignoreIfMissingIf))
 	}
 	steps = append(steps, fmt.Sprintf("        uses: %s\n", getActionPin("actions/create-github-app-token")))
 	steps = append(steps, "        with:\n")
@@ -485,8 +526,10 @@ func (c *Compiler) buildActivationAppTokenMintStep(app *GitHubAppConfig, permiss
 
 	steps = append(steps, "      - name: Generate GitHub App token for activation\n")
 	steps = append(steps, "        id: activation-app-token\n")
-	if app.shouldIgnoreMissingKey() {
-		steps = append(steps, fmt.Sprintf("        if: %s\n", buildIgnoreIfMissingCondition(app)))
+	var ignoreIfMissingIf string
+	steps, ignoreIfMissingIf = appendGitHubAppCredentialsProbeIfNeeded(steps, app, "activation-app-token")
+	if ignoreIfMissingIf != "" {
+		steps = append(steps, fmt.Sprintf("        if: %s\n", ignoreIfMissingIf))
 	}
 	steps = append(steps, fmt.Sprintf("        uses: %s\n", getActionPin("actions/create-github-app-token")))
 	steps = append(steps, "        with:\n")
