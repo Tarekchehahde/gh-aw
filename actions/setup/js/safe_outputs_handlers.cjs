@@ -19,6 +19,7 @@ const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_CONFIG, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
 const { findRepoCheckout } = require("./find_repo_checkout.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo } = require("./repo_helpers.cjs");
+const { resolveSafeOutputBaseBranch, patchGenerationFailureDetails } = require("./create_pull_request_helpers.cjs");
 const { getOrGenerateTemporaryId } = require("./temporary_id.cjs");
 const { parseAllowedExtensionsEnv } = require("./allowed_extensions_helpers.cjs");
 const { sanitizeTitle, applyTitlePrefix } = require("./sanitize_title.cjs");
@@ -651,26 +652,30 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
 
     // Get base branch for the resolved target repository.
-    // Priority:
-    //   1. Explicit `base-branch` from the workflow config (no I/O, no fetch).
-    //   2. Checkout manifest written by the workflow's setup phase (no network).
-    //   3. Local origin/HEAD metadata + payload/API fallbacks via getBaseBranch.
-    let baseBranch;
-    const configuredBaseBranch = typeof prConfig.base_branch === "string" ? prConfig.base_branch.trim() : "";
-    if (configuredBaseBranch) {
-      baseBranch = configuredBaseBranch;
-    } else {
-      const manifestEntry = lookupCheckout(repoResult.repo);
-      if (manifestEntry && manifestEntry.default_branch) {
-        baseBranch = manifestEntry.default_branch;
-        server.debug(`Using checkout-manifest default_branch for ${repoResult.repo}: ${baseBranch}`);
-      } else {
-        baseBranch = await getBaseBranch(repoParts, {
-          preferLocalDefaultBranchMetadata: Boolean(repoCwd),
-          cwd: repoCwd || undefined,
-        });
-      }
+    const baseBranchResult = await resolveSafeOutputBaseBranch({
+      config: prConfig,
+      repoSlug: repoResult.repo,
+      repoParts,
+      repoCwd,
+      lookupCheckout,
+      getBaseBranch,
+    });
+    if (!baseBranchResult.ok) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: baseBranchResult.error,
+            }),
+          },
+        ],
+        isError: true,
+      };
     }
+    const baseBranch = baseBranchResult.baseBranch;
+    server.debug(`Resolved base branch for create_pull_request on ${repoResult.repo}: ${baseBranch}`);
 
     // Store the resolved base branch in the entry so the apply-time checkout step
     // can use it directly instead of inferring from event context.
@@ -843,7 +848,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
             text: JSON.stringify({
               result: "error",
               error: errorMsg,
-              details: "No commits were found to create a pull request. Make sure you have committed your changes using git add and git commit before calling create_pull_request.",
+              details: patchGenerationFailureDetails(errorMsg),
             }),
           },
         ],
@@ -880,7 +885,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
               text: JSON.stringify({
                 result: "error",
                 error: errorMsg,
-                details: "No commits were found to create a pull request. Make sure you have committed your changes using git add and git commit before calling create_pull_request.",
+                details: patchGenerationFailureDetails(errorMsg),
               }),
             },
           ],
@@ -1086,23 +1091,30 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     //   2. Checkout manifest written by the workflow's setup phase (no network).
     //   3. Local origin/HEAD metadata in the side-repo checkout (when available).
     //   4. Payload / GitHub API fallbacks via getBaseBranch.
-    let baseBranch;
-    const configuredBaseBranch = typeof pushConfig.base_branch === "string" ? pushConfig.base_branch.trim() : "";
-    if (configuredBaseBranch) {
-      baseBranch = configuredBaseBranch;
-      server.debug(`Using configured base_branch for push_to_pull_request_branch: ${baseBranch}`);
-    } else {
-      const manifestEntry = lookupCheckout(itemRepo);
-      if (manifestEntry && manifestEntry.default_branch) {
-        baseBranch = manifestEntry.default_branch;
-        server.debug(`Using checkout-manifest default_branch for ${itemRepo}: ${baseBranch}`);
-      } else {
-        baseBranch = await getBaseBranch(repoParts, {
-          preferLocalDefaultBranchMetadata: Boolean(repoCwd),
-          cwd: repoCwd || undefined,
-        });
-      }
+    const baseBranchResult = await resolveSafeOutputBaseBranch({
+      config: pushConfig,
+      repoSlug: itemRepo,
+      repoParts,
+      repoCwd,
+      lookupCheckout,
+      getBaseBranch,
+    });
+    if (!baseBranchResult.ok) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: baseBranchResult.error,
+            }),
+          },
+        ],
+        isError: true,
+      };
     }
+    const baseBranch = baseBranchResult.baseBranch;
+    server.debug(`Resolved base branch for push_to_pull_request_branch on ${itemRepo}: ${baseBranch}`);
 
     // Store the resolved base branch in the entry so the apply-time checkout step
     // can use it directly instead of inferring from event context.

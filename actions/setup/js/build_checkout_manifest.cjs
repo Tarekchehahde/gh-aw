@@ -8,6 +8,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
+const { isValidGitBranchName } = require("./git_patch_utils.cjs");
 
 function parseManifestEntries(entriesJSON = process.env.GH_AW_CHECKOUT_MANIFEST_ENTRIES || "[]") {
   let parsed;
@@ -113,12 +114,15 @@ function buildCheckoutManifest(entries, options = {}) {
       continue;
     }
     const checkoutPath = String(entry.path || "");
-    const defaultBranch = resolveDefaultBranch(repository, checkoutPath, {
+    let defaultBranch = resolveDefaultBranch(repository, checkoutPath, {
       workspace: options.workspace,
       runGit,
       runGH,
       checkoutToken: entry.token || "",
     });
+    if (!isValidGitBranchName(defaultBranch)) {
+      defaultBranch = "";
+    }
     manifest[repository.toLowerCase()] = {
       repository,
       path: checkoutPath,

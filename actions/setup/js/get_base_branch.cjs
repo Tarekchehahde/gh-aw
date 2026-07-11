@@ -141,7 +141,13 @@ async function getBaseBranch(targetRepo = null, options = null) {
           owner: repoOwner,
           repo: repoName,
         });
-        return repoData.default_branch;
+        const defaultBranch = typeof repoData.default_branch === "string" ? repoData.default_branch.trim() : "";
+        if (defaultBranch !== "") {
+          const { isValidGitBranchName } = require("./git_patch_utils.cjs");
+          if (isValidGitBranchName(defaultBranch)) {
+            return defaultBranch;
+          }
+        }
       } catch (/** @type {any} */ error) {
         // Fall through to default if API call fails
         if (typeof core !== "undefined") {

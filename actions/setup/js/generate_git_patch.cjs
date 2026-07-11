@@ -12,7 +12,16 @@ const path = require("path");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ensureOriginRemoteTrackingRef, execGitSync } = require("./git_helpers.cjs");
 const { ERR_SYSTEM } = require("./error_codes.cjs");
-const { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize } = require("./git_patch_utils.cjs");
+const {
+  sanitizeForFilename,
+  sanitizeBranchNameForPatch,
+  sanitizeRepoSlugForPatch,
+  getPatchPathForBranch,
+  getPatchPathForBranchInRepo,
+  buildExcludePathspecs,
+  computeIncrementalDiffSize,
+  isValidGitBranchName,
+} = require("./git_patch_utils.cjs");
 
 // sanitizeForFilename is re-exported below for backward compatibility with
 // existing callers that imported it from this module.
@@ -105,17 +114,17 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
   }
 
   // Validate baseBranch early to avoid confusing git errors (e.g., origin/undefined)
-  if (typeof baseBranch !== "string" || baseBranch.trim() === "") {
-    const errorMessage = "baseBranch is required and must be a non-empty string (received: " + String(baseBranch) + ")";
+  if (!isValidGitBranchName(baseBranch)) {
+    const errorMessage = "Invalid baseBranch for patch generation (must be a plain git branch name, received: " + String(baseBranch).slice(0, 120) + ")";
     debugLog(`Invalid baseBranch: ${errorMessage}`);
     return {
+      success: false,
+      error: errorMessage,
       patchPath,
-      patchGenerated: false,
-      errorMessage,
     };
   }
 
-  const defaultBranch = baseBranch;
+  const defaultBranch = baseBranch.trim();
   const githubSha = process.env.GITHUB_SHA;
 
   debugLog(`Starting patch generation: mode=${mode}, branch=${branchName}, defaultBranch=${defaultBranch}`);

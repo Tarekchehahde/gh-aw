@@ -25,6 +25,9 @@ const {
   isLabelTransientError,
   parseAllowedBaseBranches,
   isBaseBranchAllowed,
+  resolveStaticAllowedBaseBranch,
+  resolveSafeOutputBaseBranch,
+  patchGenerationFailureDetails,
   parseStringListConfig,
   mergeFallbackIssueLabels,
   sanitizeFallbackAssignees,
@@ -478,5 +481,54 @@ describe("buildManifestProtectionCreatePrUrl", () => {
   it("uses the provided github server URL", () => {
     const url = buildManifestProtectionCreatePrUrl("https://github.example.com", repoParts, "main", "feat", "T");
     expect(url.startsWith("https://github.example.com/")).toBe(true);
+  });
+});
+
+describe("resolveStaticAllowedBaseBranch", () => {
+  it("returns the sole literal branch when exactly one is configured", () => {
+    expect(resolveStaticAllowedBaseBranch(["master"])).toBe("master");
+  });
+
+  it("returns empty string for globs or multiple entries", () => {
+    expect(resolveStaticAllowedBaseBranch(["release/*"])).toBe("");
+    expect(resolveStaticAllowedBaseBranch(["main", "develop"])).toBe("");
+  });
+});
+
+describe("resolveSafeOutputBaseBranch", () => {
+  it("uses allowed-base-branches when manifest default is poisoned", async () => {
+    const result = await resolveSafeOutputBaseBranch({
+      config: { allowed_base_branches: ["master"] },
+      repoSlug: "org/side",
+      repoParts: { owner: "org", repo: "side" },
+      repoCwd: "/tmp/side",
+      lookupCheckout: () => ({
+        default_branch: '{"message":"Not Found","status":"404"}',
+      }),
+      getBaseBranch: async () => '{"message":"Not Found","status":"404"}',
+    });
+    expect(result).toEqual({ ok: true, baseBranch: "master" });
+  });
+
+  it("fails closed when no valid branch can be resolved", async () => {
+    const result = await resolveSafeOutputBaseBranch({
+      config: {},
+      repoSlug: "org/side",
+      repoParts: { owner: "org", repo: "side" },
+      repoCwd: null,
+      lookupCheckout: () => null,
+      getBaseBranch: async () => '{"message":"Not Found","status":"404"}',
+    });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("patchGenerationFailureDetails", () => {
+  it("returns base-branch guidance for merge-base failures", () => {
+    expect(patchGenerationFailureDetails("ERR_SYSTEM: No remote refs available for merge-base calculation")).toMatch(/base branch/i);
+  });
+
+  it("returns commit guidance for other failures", () => {
+    expect(patchGenerationFailureDetails("No changes to commit")).toMatch(/committed your changes/i);
   });
 });

@@ -151,6 +151,31 @@ function computeIncrementalDiffSize({ baseRef, headRef, cwd, tmpPath, excludedFi
   return diffSize;
 }
 
+/**
+ * Returns true when value looks like a plain git branch/ref name (not JSON/API errors).
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isValidGitBranchName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "undefined") {
+    return false;
+  }
+  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.includes('"message"')) {
+    return false;
+  }
+  if (trimmed.length > 255 || /[\x00-\x1f\x7f]/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes("..") || trimmed.endsWith(".lock") || trimmed.endsWith("/")) {
+    return false;
+  }
+  return true;
+}
+
 module.exports = {
   sanitizeForFilename,
   sanitizeBranchNameForPatch,
@@ -159,4 +184,5 @@ module.exports = {
   getPatchPathForBranchInRepo,
   buildExcludePathspecs,
   computeIncrementalDiffSize,
+  isValidGitBranchName,
 };
