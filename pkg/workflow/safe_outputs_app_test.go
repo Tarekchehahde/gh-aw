@@ -117,7 +117,9 @@ safe-outputs:
 	require.NotNil(t, job, "Job should not be nil")
 
 	stepsStr := strings.Join(job.Steps, "")
-	assert.Contains(t, stepsStr, "if: ${{ secrets.GH_AW_APP_ID != '' && secrets.GH_AW_APP_PRIVATE_KEY != '' }}")
+	assert.Contains(t, stepsStr, "id: check-safe-outputs-app-token-credentials")
+	assert.Contains(t, stepsStr, "if: ${{ steps.check-safe-outputs-app-token-credentials.outputs.present == 'true' }}")
+	assert.NotContains(t, stepsStr, "secrets.GH_AW_APP_ID != ''")
 	assert.NotContains(t, stepsStr, "GH_AW_APP_CLIENT_ID:")
 	assert.NotContains(t, stepsStr, "GH_AW_APP_PRIVATE_KEY:")
 	assert.Contains(t, stepsStr, "github-token: ${{ steps.safe-outputs-app-token.outputs.token || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}")
@@ -135,36 +137,24 @@ func TestSafeOutputsAppIgnoreIfMissingInvalidType(t *testing.T) {
 	assert.False(t, app.shouldIgnoreMissingKey())
 }
 
-func TestBuildIgnoreIfMissingCondition(t *testing.T) {
-	tests := []struct {
-		name       string
-		appID      string
-		privateKey string
-		expected   string
-	}{
-		{
-			name:       "wrapped expressions",
-			appID:      "${{ secrets.GH_AW_APP_ID }}",
-			privateKey: "${{ secrets.GH_AW_APP_PRIVATE_KEY }}",
-			expected:   "${{ secrets.GH_AW_APP_ID != '' && secrets.GH_AW_APP_PRIVATE_KEY != '' }}",
-		},
-		{
-			name:       "literal values",
-			appID:      "  id value  ",
-			privateKey: "key'value",
-			expected:   "${{ 'id value' != '' && 'key''value' != '' }}",
-		},
-	}
+func TestBuildIgnoreIfMissingMintIfCondition(t *testing.T) {
+	assert.Equal(t,
+		"${{ steps.check-safe-outputs-app-token-credentials.outputs.present == 'true' }}",
+		buildIgnoreIfMissingMintIfCondition("check-safe-outputs-app-token-credentials"),
+	)
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			app := &GitHubAppConfig{
-				AppID:      tt.appID,
-				PrivateKey: tt.privateKey,
-			}
-			assert.Equal(t, tt.expected, buildIgnoreIfMissingCondition(app))
-		})
+func TestBuildGitHubAppCredentialsProbeSteps(t *testing.T) {
+	app := &GitHubAppConfig{
+		AppID:      "${{ vars.MYAPP_CLIENT_ID }}",
+		PrivateKey: "${{ secrets.MYAPP_PRIVATE_KEY }}",
 	}
+	steps := strings.Join(buildGitHubAppCredentialsProbeSteps(app, "check-app-credentials"), "")
+	assert.Contains(t, steps, "id: check-app-credentials")
+	assert.Contains(t, steps, "APP_ID: ${{ vars.MYAPP_CLIENT_ID }}")
+	assert.Contains(t, steps, "PRIVATE_KEY: ${{ secrets.MYAPP_PRIVATE_KEY }}")
+	assert.Contains(t, steps, `present=true`)
+	assert.NotContains(t, steps, "if: ${{ secrets.")
 }
 
 // TestSafeOutputsAppWithoutSafeOutputs tests that app without safe outputs doesn't break

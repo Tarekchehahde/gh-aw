@@ -485,8 +485,14 @@ engine: claude
 		}
 
 		lockContentStr := string(lockContent)
-		if !strings.Contains(lockContentStr, "if: ${{ secrets.WORKFLOW_APP_ID != '' && secrets.WORKFLOW_APP_PRIVATE_KEY != '' }}") {
-			t.Error("Expected guard to check app secrets directly when ignore-if-missing is enabled")
+		if !strings.Contains(lockContentStr, "id: check-pre-activation-app-token-credentials") {
+			t.Error("Expected credential probe step when ignore-if-missing is enabled")
+		}
+		if !strings.Contains(lockContentStr, "if: ${{ steps.check-pre-activation-app-token-credentials.outputs.present == 'true' }}") {
+			t.Error("Expected mint step to gate on probe output when ignore-if-missing is enabled")
+		}
+		if strings.Contains(lockContentStr, "if: ${{ secrets.WORKFLOW_APP_ID != ''") {
+			t.Error("Did not expect secrets context in if: expression")
 		}
 		if strings.Contains(lockContentStr, "GH_AW_APP_CLIENT_ID:") {
 			t.Error("Did not expect step-local GH_AW_APP_CLIENT_ID env in mint step guard")

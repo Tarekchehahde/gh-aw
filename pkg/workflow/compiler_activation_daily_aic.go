@@ -24,9 +24,12 @@ func (c *Compiler) buildDailyAICAppTokenMintStep(app *GitHubAppConfig) []string 
 	var steps []string
 	steps = append(steps, "      - name: Generate GitHub App token for daily AIC guardrail\n")
 	steps = append(steps, fmt.Sprintf("        id: %s\n", dailyAICAppTokenStepID))
-	if app.shouldIgnoreMissingKey() {
-		steps = append(steps, fmt.Sprintf("        if: %s && %s\n", maxDailyAICreditsConfiguredIfExpr, buildIgnoreIfMissingCondition(app)))
-	} else {
+	var ignoreIfMissingIf string
+	steps, ignoreIfMissingIf = appendGitHubAppCredentialsProbeIfNeeded(steps, app, dailyAICAppTokenStepID)
+	switch {
+	case ignoreIfMissingIf != "":
+		steps = append(steps, fmt.Sprintf("        if: %s && %s\n", maxDailyAICreditsConfiguredIfExpr, ignoreIfMissingIf))
+	default:
 		steps = append(steps, fmt.Sprintf("        if: %s\n", maxDailyAICreditsConfiguredIfExpr))
 	}
 	steps = append(steps, fmt.Sprintf("        uses: %s\n", getActionPin("actions/create-github-app-token")))
