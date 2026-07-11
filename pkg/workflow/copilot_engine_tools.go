@@ -75,7 +75,14 @@ func (e *CopilotEngine) computeCopilotToolArguments(tools map[string]any, safeOu
 					if cmdStr == ":*" || cmdStr == "*" {
 						// Use --allow-all-tools flag instead of individual tool permissions
 						copilotEngineToolsLog.Print("Bash wildcard detected, using --allow-all-tools")
-						return []string{"--allow-all-tools"}
+						wildcardArgs := []string{"--allow-all-tools"}
+						if _, hasWebFetch := tools["web-fetch"]; hasWebFetch {
+							wildcardArgs = append(wildcardArgs, "--allow-tool", "web_fetch")
+						}
+						if isGitHubCLIModeEnabled(workflowData) {
+							wildcardArgs = append(wildcardArgs, "--allow-tool", "shell(gh:*)")
+						}
+						return wildcardArgs
 					}
 				}
 			}
@@ -187,6 +194,10 @@ func (e *CopilotEngine) computeCopilotToolArguments(tools map[string]any, safeOu
 		// GitHub is a special case - it's an MCP server but doesn't have explicit MCP config in the workflow
 		// It gets MCP configuration through the parser's processBuiltinMCPTool
 		if toolName == "github" {
+			if isGitHubCLIModeEnabled(workflowData) {
+				// gh-proxy mode registers no GitHub MCP server; GitHub access is via shell(gh:*).
+				continue
+			}
 			if toolConfigMap, ok := toolConfig.(map[string]any); ok {
 				if allowed, hasAllowed := toolConfigMap["allowed"]; hasAllowed {
 					if allowedList, ok := allowed.([]any); ok {
