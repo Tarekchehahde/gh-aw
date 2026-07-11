@@ -15,7 +15,16 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 
-import { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize } from "./git_patch_utils.cjs";
+import {
+  sanitizeForFilename,
+  sanitizeBranchNameForPatch,
+  sanitizeRepoSlugForPatch,
+  getPatchPathForBranch,
+  getPatchPathForBranchInRepo,
+  buildExcludePathspecs,
+  computeIncrementalDiffSize,
+  rewriteCrossRepoCreatePatches,
+} from "./git_patch_utils.cjs";
 
 // computeIncrementalDiffSize delegates to execGitSync from git_helpers.cjs,
 // which calls the GitHub Actions `core.debug` / `core.error` globals. Stub
@@ -218,5 +227,78 @@ describe("git_patch_utils.computeIncrementalDiffSize - real git repo", () => {
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "", cwd: "/tmp", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "/tmp", tmpPath: "" })).toBeNull();
+  });
+});
+
+describe("rewriteCrossRepoCreatePatches", () => {
+  const tempDirs = [];
+
+  function execGit(args, cwd) {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    }
+    return result.stdout;
+  }
+
+  function initRepo(dir, branch = "main") {
+    execGit(["init", "-q"], dir);
+    execGit(["config", "user.email", "test@example.com"], dir);
+    execGit(["config", "user.name", "Test User"], dir);
+    execGit(["checkout", "-b", branch], dir);
+  }
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
+    }
+  });
+
+  it("rewrites create hunks to modify when the file exists on the target base branch", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-patch-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const docPath = path.join(targetDir, "docs", "guide.md");
+    fs.mkdirSync(path.dirname(docPath), { recursive: true });
+    fs.writeFileSync(docPath, "original target content\n");
+    execGit(["add", "docs/guide.md"], targetDir);
+    execGit(["commit", "-m", "target base"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "docs", "guide.md"), "agent edited content\n");
+    execGit(["add", "docs/guide.md"], agentDir);
+    execGit(["commit", "-m", "agent edit"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("new file mode");
+
+    const rewritten = rewriteCrossRepoCreatePatches(rawPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toContain("--- a/docs/guide.md");
+    expect(rewritten).toContain("+agent edited content");
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(docPath, "utf8")).toBe("agent edited content\n");
   });
 });

@@ -12,7 +12,16 @@ const path = require("path");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ensureOriginRemoteTrackingRef, execGitSync } = require("./git_helpers.cjs");
 const { ERR_SYSTEM } = require("./error_codes.cjs");
-const { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize } = require("./git_patch_utils.cjs");
+const {
+  sanitizeForFilename,
+  sanitizeBranchNameForPatch,
+  sanitizeRepoSlugForPatch,
+  getPatchPathForBranch,
+  getPatchPathForBranchInRepo,
+  buildExcludePathspecs,
+  computeIncrementalDiffSize,
+  rewriteCrossRepoCreatePatches,
+} = require("./git_patch_utils.cjs");
 
 // sanitizeForFilename is re-exported below for backward compatibility with
 // existing callers that imported it from this module.
@@ -463,7 +472,20 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
 
   // Check if patch was generated and has content
   if (patchGenerated && fs.existsSync(patchPath)) {
-    const patchContent = fs.readFileSync(patchPath, "utf8");
+    let patchContent = fs.readFileSync(patchPath, "utf8");
+    if (options.targetTreeCwd && options.targetTreeCwd !== cwd) {
+      const rewritten = rewriteCrossRepoCreatePatches(patchContent, {
+        agentCwd: cwd,
+        targetTreeCwd: options.targetTreeCwd,
+        baseBranch: defaultBranch,
+        pinnedSha: options.pinnedSha,
+      });
+      if (rewritten !== patchContent) {
+        patchContent = rewritten;
+        fs.writeFileSync(patchPath, patchContent, "utf8");
+        debugLog("Rewrote cross-repo create patches to modify diffs where target file already exists");
+      }
+    }
     const patchSize = Buffer.byteLength(patchContent, "utf8");
     const patchLines = patchContent.split("\n").length;
 

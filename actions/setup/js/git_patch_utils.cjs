@@ -151,6 +151,143 @@ function computeIncrementalDiffSize({ baseRef, headRef, cwd, tmpPath, excludedFi
   return diffSize;
 }
 
+/**
+ * Returns true when value looks like a plain git branch/ref name.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isValidGitBranchName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("{") || trimmed.includes('"message"')) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Rewrite format-patch "new file" hunks to modify diffs when the path already exists
+ * on origin/<baseBranch> in a separate target-repo checkout (cross-repo safe outputs).
+ *
+ * @param {string} patchContent
+ * @param {{ agentCwd: string, targetTreeCwd: string, baseBranch: string, pinnedSha?: string, execGit?: typeof execGitSync }} options
+ * @returns {string}
+ */
+function rewriteCrossRepoCreatePatches(patchContent, options) {
+  const { agentCwd, targetTreeCwd, baseBranch, pinnedSha, execGit = execGitSync } = options;
+  if (!patchContent || !agentCwd || !targetTreeCwd || agentCwd === targetTreeCwd || !isValidGitBranchName(baseBranch)) {
+    return patchContent;
+  }
+
+  const targetBaseRef = `refs/remotes/origin/${baseBranch}`;
+  try {
+    execGit(["show-ref", "--verify", "--quiet", targetBaseRef], { cwd: targetTreeCwd });
+  } catch {
+    return patchContent;
+  }
+
+  const parts = patchContent.split(/(?=^diff --git )/m);
+  if (parts.length <= 1) {
+    return patchContent;
+  }
+
+  const rewritten = [parts[0]];
+  for (let i = 1; i < parts.length; i += 1) {
+    const block = parts[i];
+    const pathMatch = block.match(/^diff --git a\/(\S+) b\/(\S+)\n(?:new file mode \d+\n)?/m);
+    if (!pathMatch || !block.includes("new file mode")) {
+      rewritten.push(block);
+      continue;
+    }
+
+    const filePath = pathMatch[1];
+    try {
+      execGit(["cat-file", "-e", `${targetBaseRef}:${filePath}`], { cwd: targetTreeCwd });
+    } catch {
+      rewritten.push(block);
+      continue;
+    }
+
+    const modifyDiff = buildCrossRepoModifyDiff(filePath, {
+      agentCwd,
+      targetTreeCwd,
+      targetBaseRef,
+      pinnedSha,
+      execGit,
+    });
+    rewritten.push(modifyDiff || block);
+  }
+
+  return rewritten.join("");
+}
+
+/**
+ * @param {string} filePath
+ * @param {{ agentCwd: string, targetTreeCwd: string, targetBaseRef: string, pinnedSha?: string, execGit: typeof execGitSync }} options
+ * @returns {string | null}
+ */
+function buildCrossRepoModifyDiff(filePath, options) {
+  const { agentCwd, targetTreeCwd, targetBaseRef, pinnedSha, execGit } = options;
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+
+  let oldSha;
+  let newSha;
+  try {
+    oldSha = execGit(["rev-parse", `${targetBaseRef}:${filePath}`], { cwd: targetTreeCwd }).trim();
+  } catch {
+    return null;
+  }
+
+  const agentRef = pinnedSha || "HEAD";
+  try {
+    newSha = execGit(["rev-parse", `${agentRef}:${filePath}`], { cwd: agentCwd }).trim();
+  } catch {
+    return null;
+  }
+
+  if (oldSha === newSha) {
+    return null;
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-cross-repo-patch-"));
+  try {
+    const oldFile = path.join(tmpDir, "old");
+    const newFile = path.join(tmpDir, "new");
+    fs.writeFileSync(oldFile, execGit(["cat-file", "blob", oldSha], { cwd: targetTreeCwd }));
+    fs.writeFileSync(newFile, execGit(["cat-file", "blob", newSha], { cwd: agentCwd }));
+
+    let diffBody = "";
+    const diffResult = require("child_process").spawnSync("git", ["diff", "--no-index", "--no-color", "old", "new"], {
+      cwd: tmpDir,
+      encoding: "utf8",
+    });
+    if (diffResult.status !== 0 && diffResult.status !== 1) {
+      return null;
+    }
+    diffBody = diffResult.stdout || "";
+    if (!diffBody.trim()) {
+      return null;
+    }
+
+    const diffLines = diffBody.split("\n");
+    const hunkStart = diffLines.findIndex(line => line.startsWith("@@"));
+    if (hunkStart === -1) {
+      return null;
+    }
+    const hunkBody = diffLines.slice(hunkStart).join("\n");
+
+    return `diff --git a/${filePath} b/${filePath}\nindex ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)} 100644\n--- a/${filePath}\n+++ b/${filePath}\n${hunkBody}`;
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 module.exports = {
   sanitizeForFilename,
   sanitizeBranchNameForPatch,
@@ -159,4 +296,6 @@ module.exports = {
   getPatchPathForBranchInRepo,
   buildExcludePathspecs,
   computeIncrementalDiffSize,
+  isValidGitBranchName,
+  rewriteCrossRepoCreatePatches,
 };

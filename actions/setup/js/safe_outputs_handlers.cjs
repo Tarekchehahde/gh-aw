@@ -827,6 +827,14 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (pinnedSha) {
       patchOptions.pinnedSha = pinnedSha;
     }
+    const workflowRepo = process.env.GITHUB_REPOSITORY;
+    if (repoResult.repo && workflowRepo && repoResult.repo !== workflowRepo) {
+      const targetCheckout = findRepoCheckout(repoResult.repo);
+      if (targetCheckout.success && targetCheckout.path && targetCheckout.path !== gitCwd) {
+        patchOptions.targetTreeCwd = targetCheckout.path;
+        server.debug(`Cross-repo patch rewrite enabled: agent cwd=${gitCwd}, target tree=${targetCheckout.path}`);
+      }
+    }
     const patchResult = await generateGitPatch(entry.branch, baseBranch, patchOptions);
 
     if (!patchResult.success) {
