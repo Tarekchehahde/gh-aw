@@ -64,8 +64,10 @@ jobs:
             > /tmp/gh-aw/agent/geo-optimizer/docs-sitemap-audit.json 2>&1 || true
 
       - name: Audit README via GitHub repository page
+        env:
+          GEO_README_REPO: ${{ github.repository }}
         run: |
-          geo audit --url https://github.com/${{ github.repository }} --format json \
+          geo audit --url "https://github.com/${GEO_README_REPO}" --format json \
             > /tmp/gh-aw/agent/geo-optimizer/readme-audit.json 2>&1 || true
 
       - name: Write audit metadata

@@ -35,7 +35,7 @@ pre-agent-steps:
     run: |
       set -euo pipefail
       mkdir -p /tmp/gh-aw/agent
-      { gh pr diff "$PR_NUMBER" --repo $EXPR_GITHUB_REPOSITORY \
+      { gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" \
           --exclude '**/*.lock.yml' \
           --exclude '**/generated/**' \
           --exclude '**/dist/**' \
@@ -43,7 +43,7 @@ pre-agent-steps:
           || true; } | head -n "${PR_DIFF_MAX_LINES}" > /tmp/gh-aw/agent/pr-diff.patch
       LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
       gh pr view "$PR_NUMBER" \
-        --repo $EXPR_GITHUB_REPOSITORY \
+        --repo "$EXPR_GITHUB_REPOSITORY" \
         --json number,title,body,headRefName,additions,deletions,changedFiles,files \
         > /tmp/gh-aw/agent/pr-meta.json
       echo "Pre-fetched PR diff (${LINES} lines) and metadata"
