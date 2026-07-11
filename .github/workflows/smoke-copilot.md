@@ -188,11 +188,13 @@ Talk like a caveman in all your responses and outputs. Use short, broken sentenc
 
 Run these checks and mark each as ✅/❌:
 
-1. `github` tool (configured with `mode: gh-proxy`): review 2 merged PRs in `${{ github.repository }}`.
+1. **GH CLI (via `gh-proxy`)**: Use `bash` to list and review 2 merged PRs in `${{ github.repository }}`:
+   `gh pr list --repo ${{ github.repository }} --state merged --limit 2 --json number,title,author`
+   and `gh pr view <number> --json title,mergedAt` for each.
 2. `mcpscripts-gh`: query 2 PRs using `pr list --repo ${{ github.repository }} --limit 2 --json number,title,author`.
 3. Serena CLI (bash only): run `serena activate_project --path ${{ github.workspace }}`, then `serena find_symbol --name_path <symbol>` and confirm at least 3 symbols.
 4. Playwright CLI (bash only): run `playwright-cli open https://github.com` then `playwright-cli screenshot`; confirm successful GitHub navigation.
-5. `web-fetch` tool: fetch `https://github.com` and confirm response contains `GitHub`.
+5. **Web fetch (`web_fetch` or curl)**: Try `web_fetch` on `https://github.com` and confirm the response contains `GitHub`. If `web_fetch` is unavailable, use `curl -sL https://github.com` via bash. Mark ✅ if either succeeds; ❌ only if both fail (do not emit `missing_tool` when curl works).
 6. File + bash: create `/tmp/gh-aw/agent/smoke-test-copilot-${{ github.run_id }}.txt` with timestamped success text, then `cat` it.
 7. Discussion interaction: get latest discussion with `github-discussion-query` (`limit=1`, `jq=".[0]"`), extract number, then `add_comment` to that discussion.
 8. Build: run `GOCACHE=/tmp/gh-aw/agent/go-cache GOMODCACHE=/tmp/gh-aw/agent/go-mod make build`.

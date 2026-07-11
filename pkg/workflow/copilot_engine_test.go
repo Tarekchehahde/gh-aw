@@ -1058,7 +1058,23 @@ func TestCopilotEngineComputeToolArguments(t *testing.T) {
 					},
 				},
 			},
-			expected: []string{"--allow-tool", "github", "--allow-tool", "shell(echo)", "--allow-tool", "shell(gh:*)"},
+			expected: []string{"--allow-tool", "shell(echo)", "--allow-tool", "shell(gh:*)"},
+		},
+		{
+			name: "github gh-proxy with wildcard bash allows gh cli and web_fetch",
+			tools: map[string]any{
+				"bash":      []any{"*"},
+				"github":    map[string]any{"mode": "gh-proxy"},
+				"web-fetch": map[string]any{},
+			},
+			workflowData: &WorkflowData{
+				Tools: map[string]any{
+					"bash":      []any{"*"},
+					"github":    map[string]any{"mode": "gh-proxy"},
+					"web-fetch": map[string]any{},
+				},
+			},
+			expected: []string{"--allow-all-tools", "--allow-tool", "web_fetch", "--allow-tool", "shell(gh:*)"},
 		},
 		// Playwright CLI mode tests - playwright-cli must be auto-allowed when bash is restricted.
 		{

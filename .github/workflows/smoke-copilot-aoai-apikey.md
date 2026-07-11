@@ -152,7 +152,7 @@ features:
 
 # Smoke Test: Copilot Engine Validation (AOAI apikey BYOK)
 
-> **⚡ EXECUTE IMMEDIATELY**: You are the test runner. Begin executing the tests below right now using bash and the available tools. Do NOT analyze the task, do NOT propose creating files, do NOT say "no action needed". Your first action MUST be a real tool call (bash, `github` tool, or safeoutputs). Jump directly to the "Tests to Execute" section and start with test 1.
+> **⚡ EXECUTE IMMEDIATELY**: You are the test runner. Begin executing the tests below right now using bash and the available tools. Do NOT analyze the task, do NOT propose creating files, do NOT say "no action needed". Your first action MUST be a real tool call (bash, `gh` CLI via bash, or safeoutputs). Jump directly to the "Tests to Execute" section and start with test 1.
 
 This variant routes the Copilot engine through Azure OpenAI (AOAI) using BYOK
 mode with an API key, via the `FOUNDRY_API_KEY` and `FOUNDRY_OPENAI_ENDPOINT`
@@ -183,7 +183,7 @@ This workflow uses `cli-proxy: true`. The following MCP servers are **NOT availa
 - **`safeoutputs`** — use `safeoutputs <tool> [--param value...]` in bash (e.g. `safeoutputs add_comment --body "..."`)
 - **`mcpscripts`** — use `mcpscripts <tool> [--param value...]` in bash (e.g. `mcpscripts mcpscripts-gh --args "..."`)
 
-The `github` MCP server is **NOT** CLI-mounted — it remains available as a normal MCP tool.
+The `github` MCP server is **not registered** when `tools.github.mode: gh-proxy` is set — use `gh` via bash for GitHub reads/writes.
 
 Run `<server> --help` to list all available tools for a server, or `<server> <tool> --help` for detailed parameter info.
 
@@ -193,11 +193,13 @@ These are **not** MCP protocol tools — they are bash executables. Call them wi
 
 Run each check NOW and mark as ✅/❌. Do NOT create files to automate this — execute directly using bash and tools:
 
-1. `github` tool (configured with `mode: gh-proxy`): review 2 merged PRs in `${{ github.repository }}`.
+1. **GH CLI (via `gh-proxy`)**: Use `bash` to list and review 2 merged PRs in `${{ github.repository }}`:
+   `gh pr list --repo ${{ github.repository }} --state merged --limit 2 --json number,title,author`
+   and `gh pr view <number> --json title,mergedAt` for each.
 2. `mcpscripts-gh`: query 2 PRs using `pr list --repo ${{ github.repository }} --limit 2 --json number,title,author`.
 3. Serena CLI (bash only): run `serena activate_project --path ${{ github.workspace }}`, then `serena find_symbol --name_path <symbol>` and confirm at least 3 symbols.
 4. Playwright CLI (bash only): run `playwright-cli open https://github.com` then `playwright-cli screenshot`; confirm successful GitHub navigation.
-5. `web-fetch` tool: fetch `https://github.com` and confirm response contains `GitHub`.
+5. **Web fetch (`web_fetch` or curl)**: Try `web_fetch` on `https://github.com` and confirm the response contains `GitHub`. If `web_fetch` is unavailable, use `curl -sL https://github.com` via bash. Mark ✅ if either succeeds; ❌ only if both fail (do not emit `missing_tool` when curl works).
 6. File + bash: create `/tmp/gh-aw/agent/smoke-test-copilot-${{ github.run_id }}.txt` with timestamped success text, then `cat` it.
 7. Discussion interaction: get latest discussion with `github-discussion-query` (`limit=1`, `jq=".[0]"`), extract number, then `add_comment` to that discussion.
 8. Build: run `GOCACHE=/tmp/gh-aw/agent/go-cache GOMODCACHE=/tmp/gh-aw/agent/go-mod make build`.

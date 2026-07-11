@@ -360,7 +360,9 @@ func TestCompiledLockFiles_SmokeWorkflowsHaveDetectionJobWithAgenticRunCall(t *t
 					agenticStepSection = agenticStepSection[:nextStepIdx]
 				}
 
-				assert.Contains(t, agenticStepSection, "sudo -E awf",
+				assert.NotContains(t, agenticStepSection, "sudo -E awf",
+					"detection_agentic_execution should use rootless awf when network isolation is enabled")
+				assert.Contains(t, agenticStepSection, "awf --config",
 					"detection_agentic_execution step should use awf for sandboxed execution")
 			})
 		})
