@@ -34,6 +34,7 @@ function readManifestEntriesFromEnv() {
       repository: process.env[`GH_AW_CHECKOUT_REPO_${i}`] || "",
       path: process.env[`GH_AW_CHECKOUT_PATH_${i}`] || "",
       token: process.env[`GH_AW_CHECKOUT_TOKEN_${i}`] || "",
+      ref: process.env[`GH_AW_CHECKOUT_REF_${i}`] || "",
     });
   }
   return entries;
@@ -84,6 +85,43 @@ function resolveDefaultBranch(repository, checkoutPath, options = {}) {
   return defaultBranch;
 }
 
+function normalizeCheckoutRef(ref) {
+  const trimmed = String(ref || "").trim();
+  if (trimmed === "") {
+    return "";
+  }
+  if (trimmed.startsWith("refs/heads/")) {
+    return trimmed.slice("refs/heads/".length);
+  }
+  return trimmed;
+}
+
+function resolveCheckedOutRef(repository, checkoutPath, configuredRef, options = {}) {
+  const workspace = options.workspace || process.env.GITHUB_WORKSPACE || "";
+  const runGit = options.runGit || ((args, execOptions = {}) => execFileSync("git", args, { encoding: "utf8", ...execOptions }));
+  const repoPath = checkoutPath ? path.join(workspace, checkoutPath) : workspace;
+
+  if (repoPath && fs.existsSync(path.join(repoPath, ".git"))) {
+    try {
+      const head = runGit(["-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      if (head && head !== "HEAD") {
+        core.debug(`build_checkout_manifest: git resolved checked-out ref for ${repository}: ${head}`);
+        return head;
+      }
+    } catch (error) {
+      core.debug(`build_checkout_manifest: git checked-out ref lookup failed for ${repository}: ${getErrorMessage(error)}`);
+    }
+  }
+
+  const normalizedRef = normalizeCheckoutRef(configuredRef);
+  if (normalizedRef !== "") {
+    core.debug(`build_checkout_manifest: using configured checkout ref for ${repository}: ${normalizedRef}`);
+  }
+  return normalizedRef;
+}
+
 function buildCheckoutManifest(entries, options = {}) {
   const runnerTemp = options.runnerTemp || process.env.RUNNER_TEMP;
   if (!runnerTemp) {
@@ -113,18 +151,24 @@ function buildCheckoutManifest(entries, options = {}) {
       continue;
     }
     const checkoutPath = String(entry.path || "");
+    const configuredRef = String(entry.ref || "");
     const defaultBranch = resolveDefaultBranch(repository, checkoutPath, {
       workspace: options.workspace,
       runGit,
       runGH,
       checkoutToken: entry.token || "",
     });
+    const checkedOutRef = resolveCheckedOutRef(repository, checkoutPath, configuredRef, {
+      workspace: options.workspace,
+      runGit,
+    });
     manifest[repository.toLowerCase()] = {
       repository,
       path: checkoutPath,
       default_branch: defaultBranch,
+      checked_out_ref: checkedOutRef,
     };
-    core.info(`checkout-manifest: ${repository} -> path=${checkoutPath} default_branch=${defaultBranch || "<unresolved>"}`);
+    core.info(`checkout-manifest: ${repository} -> path=${checkoutPath} default_branch=${defaultBranch || "<unresolved>"} checked_out_ref=${checkedOutRef || "<unresolved>"}`);
   }
 
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
@@ -145,7 +189,9 @@ async function main(options = {}) {
 module.exports = {
   buildCheckoutManifest,
   main,
+  normalizeCheckoutRef,
   parseManifestEntries,
   readManifestEntriesFromEnv,
+  resolveCheckedOutRef,
   resolveDefaultBranch,
 };

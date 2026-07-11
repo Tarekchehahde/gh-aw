@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 
-import { buildCheckoutManifest, readManifestEntriesFromEnv, resolveDefaultBranch } from "./build_checkout_manifest.cjs";
+import { buildCheckoutManifest, readManifestEntriesFromEnv, resolveCheckedOutRef, resolveDefaultBranch } from "./build_checkout_manifest.cjs";
 
 function execGit(args, options = {}) {
   const result = spawnSync("git", args, { encoding: "utf8", ...options });
@@ -58,9 +58,31 @@ describe("build_checkout_manifest.cjs", () => {
     setEnv("GH_AW_CHECKOUT_PATH_1", "");
 
     expect(readManifestEntriesFromEnv()).toEqual([
-      { repository: "owner/a", path: "./a", token: "${{ secrets.REPO_A_TOKEN }}" },
-      { repository: "owner/b", path: "", token: "" },
+      { repository: "owner/a", path: "./a", token: "${{ secrets.REPO_A_TOKEN }}", ref: "" },
+      { repository: "owner/b", path: "", token: "", ref: "" },
     ]);
+  });
+
+  it("resolves checked-out ref from local git HEAD before configured ref fallback", () => {
+    const workspace = createTempDir("checkout-manifest-ref-workspace-");
+    tempDirs.push(workspace);
+    const checkoutPath = "target";
+    const repoDir = path.join(workspace, checkoutPath);
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    execGit(["init", "-q"], { cwd: repoDir });
+    execGit(["config", "user.email", "test@example.com"], { cwd: repoDir });
+    execGit(["config", "user.name", "Test User"], { cwd: repoDir });
+    execGit(["checkout", "-b", "main"], { cwd: repoDir });
+    fs.writeFileSync(path.join(repoDir, "README.md"), "base\n");
+    execGit(["add", "README.md"], { cwd: repoDir });
+    execGit(["commit", "-m", "base"], { cwd: repoDir });
+    execGit(["checkout", "-b", "release-1.12.x"], { cwd: repoDir });
+
+    const checkedOutRef = resolveCheckedOutRef("owner/repo", checkoutPath, "main", {
+      workspace,
+    });
+    expect(checkedOutRef).toBe("release-1.12.x");
   });
 
   it("resolves default branch from local git checkout before gh fallback", () => {
@@ -127,6 +149,7 @@ describe("build_checkout_manifest.cjs", () => {
         repository: "Owner/Repo",
         path: "./repo",
         default_branch: "main",
+        checked_out_ref: "",
       },
     });
 

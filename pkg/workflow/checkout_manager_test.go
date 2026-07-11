@@ -1659,6 +1659,16 @@ func TestGenerateCheckoutManifestStep(t *testing.T) {
 		assert.NotContains(t, out, "./local-only", "path-only entries must not be in the manifest step")
 	})
 
+	t.Run("cross-repo checkout with explicit ref emits ref env var", func(t *testing.T) {
+		cm := NewCheckoutManager([]*CheckoutConfig{
+			{Repository: "owner/other", Path: "./other", Ref: "release/v1.0"},
+		})
+		steps := cm.GenerateCheckoutManifestStep(getActionPin)
+		require.Len(t, steps, 1)
+		out := steps[0]
+		assert.Contains(t, out, `GH_AW_CHECKOUT_REF_0: "release/v1.0"`)
+	})
+
 	t.Run("repository names containing single quotes are yaml-escaped", func(t *testing.T) {
 		cm := NewCheckoutManager([]*CheckoutConfig{
 			{Repository: "weird'owner/repo", Path: "./x"},
