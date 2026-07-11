@@ -137,7 +137,9 @@ function buildCatalogFromReflect(reflectData) {
     if (!endpoint || endpoint.configured !== true || !Array.isArray(endpoint.models)) {
       continue;
     }
-    const providerRaw = String(endpoint.provider || "").trim().toLowerCase();
+    const providerRaw = String(endpoint.provider || "")
+      .trim()
+      .toLowerCase();
     const provider = providerRaw === "github-copilot" ? "copilot" : providerRaw;
     for (const model of endpoint.models) {
       const modelId = String(model || "").trim();

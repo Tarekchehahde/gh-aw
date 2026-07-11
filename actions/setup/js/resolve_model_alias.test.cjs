@@ -4,27 +4,12 @@ import path from "path";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-const {
-  buildCatalogFromReflect,
-  globMatch,
-  normalizeForCopilotCLI,
-  resolveConfiguredCopilotModel,
-  resolveModelAlias,
-  selectLatestGlobMatch,
-} = require("./resolve_model_alias.cjs");
+const { buildCatalogFromReflect, globMatch, normalizeForCopilotCLI, resolveConfiguredCopilotModel, resolveModelAlias, selectLatestGlobMatch } = require("./resolve_model_alias.cjs");
 
-const ALIAS_MAP = JSON.parse(
-  fs.readFileSync(path.join(process.cwd(), "../../../pkg/workflow/data/model_aliases.json"), "utf8")
-).aliases;
+const ALIAS_MAP = JSON.parse(fs.readFileSync(path.join(process.cwd(), "../../../pkg/workflow/data/model_aliases.json"), "utf8")).aliases;
 
 describe("resolve_model_alias", () => {
-  const catalog = [
-    "copilot/claude-haiku-4.5",
-    "copilot/claude-sonnet-4.6",
-    "copilot/gpt-5-mini",
-    "copilot/gpt-5-nano",
-    "copilot/gemini-2.5-flash-lite",
-  ];
+  const catalog = ["copilot/claude-haiku-4.5", "copilot/claude-sonnet-4.6", "copilot/gpt-5-mini", "copilot/gpt-5-nano", "copilot/gemini-2.5-flash-lite"];
 
   it("matches provider-scoped glob patterns case-insensitively", () => {
     expect(globMatch("copilot/*haiku*", "copilot/claude-haiku-4.5")).toBe(true);
