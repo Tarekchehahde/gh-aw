@@ -591,10 +591,10 @@ func resolveMCPGatewayValues(workflowData *WorkflowData, gatewayConfig *MCPGatew
 	if domain == "" {
 		if workflowData.SandboxConfig.Agent != nil && workflowData.SandboxConfig.Agent.Disabled {
 			domain = "localhost"
-		} else if isAWFNetworkIsolationEnabled(workflowData) {
-			domain = "awmg-mcpg"
 		} else {
-			domain = "host.docker.internal"
+			// Bridge networking publishes the gateway port on localhost; in-container
+			// clients reach the named gateway container on the default bridge network.
+			domain = "awmg-mcpg"
 		}
 	}
 	payloadDir := gatewayConfig.PayloadDir
@@ -642,7 +642,7 @@ func writeMCPGatewayExports(yaml *strings.Builder, opts writeMCPGatewayExportsOp
 	// or when network isolation is active (gateway on bridge; host reaches it via the
 	// published 127.0.0.1 port), use localhost instead; otherwise inherit the domain.
 	hostDomain := domain
-	if domain == "host.docker.internal" || isAWFNetworkIsolationEnabled(workflowData) {
+	if domain == "host.docker.internal" || domain == "awmg-mcpg" {
 		hostDomain = "localhost"
 	}
 	yaml.WriteString("          export MCP_GATEWAY_HOST_DOMAIN=\"" + hostDomain + "\"\n")
@@ -717,25 +717,18 @@ func buildMCPGatewayContainerCommand(opts buildMCPGatewayContainerCommandOptions
 	// 2048 bytes upfront covers the common case without overcommitting.
 	containerCmd.Grow(2048)
 	containerCmd.WriteString("docker run -i --rm")
-	if isAWFNetworkIsolationEnabled(workflowData) {
-		containerCmd.WriteString(" --network bridge")
-		// Publish the gateway port to the host so host-side clients (e.g. Gemini CLI)
-		// can reach the gateway at localhost:${MCP_GATEWAY_PORT}.
-		containerCmd.WriteString(" -p 127.0.0.1:${MCP_GATEWAY_PORT}:${MCP_GATEWAY_PORT}")
-	} else {
-		containerCmd.WriteString(" --network host")
-	}
-	containerCmd.WriteString(" --name awmg-mcpg")
-	if !isAWFNetworkIsolationEnabled(workflowData) {
-		containerCmd.WriteString(" --add-host host.docker.internal:127.0.0.1")
-	} else if shouldRewriteLocalhostToDocker(workflowData) {
-		// In bridge (network-isolation) mode the container's loopback differs from the
-		// host's, so host.docker.internal:127.0.0.1 would not resolve to the host.
-		// Use host-gateway (Docker 20.10+) instead so the gateway container can reach
-		// any host-side server (mcp-scripts HTTP server, custom HTTP MCP tools with
-		// localhost URLs) that is running directly on the runner host.
+	// gh-aw-mcpg validates published ports when it can detect its container ID (Linux/DinD).
+	// Host networking leaves NetworkSettings.Ports empty, so always publish the gateway port
+	// on bridge instead of using --network host (fixes #39692).
+	containerCmd.WriteString(" --network bridge")
+	containerCmd.WriteString(" -p 127.0.0.1:${MCP_GATEWAY_PORT}:${MCP_GATEWAY_PORT}")
+	if shouldRewriteLocalhostToDocker(workflowData) {
+		// In bridge mode the container loopback differs from the host loopback, so
+		// host.docker.internal:127.0.0.1 would not resolve to the host. Use host-gateway
+		// (Docker 20.10+) so the gateway can reach host-side MCP servers.
 		containerCmd.WriteString(" --add-host host.docker.internal:host-gateway")
 	}
+	containerCmd.WriteString(" --name awmg-mcpg")
 	containerCmd.WriteString(" --user ${MCP_GATEWAY_UID}:${MCP_GATEWAY_GID}")
 	containerCmd.WriteString(" --group-add ${DOCKER_SOCK_GID}")
 	containerCmd.WriteString(" -v ${DOCKER_SOCK_PATH}:/var/run/docker.sock")
