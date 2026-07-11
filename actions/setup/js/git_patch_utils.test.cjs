@@ -15,7 +15,7 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 
-import { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize } from "./git_patch_utils.cjs";
+import { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize, isValidGitBranchName } from "./git_patch_utils.cjs";
 
 // computeIncrementalDiffSize delegates to execGitSync from git_helpers.cjs,
 // which calls the GitHub Actions `core.debug` / `core.error` globals. Stub
@@ -218,5 +218,22 @@ describe("git_patch_utils.computeIncrementalDiffSize - real git repo", () => {
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "", cwd: "/tmp", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "/tmp", tmpPath: "" })).toBeNull();
+  });
+});
+
+describe("isValidGitBranchName", () => {
+  it("accepts plain branch names", () => {
+    expect(isValidGitBranchName("main")).toBe(true);
+    expect(isValidGitBranchName("release-1.12.x")).toBe(true);
+  });
+
+  it("rejects JSON API error bodies used as branch names", () => {
+    expect(isValidGitBranchName('{"message":"Not Found","documentation_url":"https://docs.github.com/rest/repos/repos#get-a-repository","status":"404"}')).toBe(false);
+  });
+
+  it("rejects empty, undefined-like, and malformed values", () => {
+    expect(isValidGitBranchName("")).toBe(false);
+    expect(isValidGitBranchName("undefined")).toBe(false);
+    expect(isValidGitBranchName("feature..branch")).toBe(false);
   });
 });

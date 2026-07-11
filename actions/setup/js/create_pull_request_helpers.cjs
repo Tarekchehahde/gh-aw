@@ -110,6 +110,92 @@ function isBaseBranchAllowed(baseBranch, allowedBaseBranches) {
 }
 
 /**
+ * When allowed-base-branches lists exactly one literal branch (no globs), use it
+ * for merge-base resolution without a GitHub API round-trip.
+ *
+ * @param {string[]|string|undefined} allowedBaseBranchesValue
+ * @returns {string}
+ */
+function resolveStaticAllowedBaseBranch(allowedBaseBranchesValue) {
+  const patterns = parseAllowedBaseBranches(allowedBaseBranchesValue);
+  if (patterns.size !== 1) {
+    return "";
+  }
+  const [only] = patterns;
+  if (!only || only.includes("*")) {
+    return "";
+  }
+  return only;
+}
+
+/**
+ * Resolve PR base branch for safe-output MCP handlers (create/push).
+ *
+ * @param {{
+ *   config: Record<string, any>,
+ *   repoSlug: string,
+ *   repoParts: { owner: string, repo: string },
+ *   repoCwd?: string | null,
+ *   lookupCheckout: (slug: string) => { default_branch?: string } | null,
+ *   getBaseBranch: (parts: any, opts?: any) => Promise<string>,
+ * }} params
+ * @returns {Promise<{ ok: true, baseBranch: string } | { ok: false, error: string }>}
+ */
+async function resolveSafeOutputBaseBranch({ config, repoSlug, repoParts, repoCwd, lookupCheckout, getBaseBranch }) {
+  const { isValidGitBranchName } = require("./git_patch_utils.cjs");
+
+  const configured = typeof config.base_branch === "string" ? config.base_branch.trim() : "";
+  if (configured) {
+    if (!isValidGitBranchName(configured)) {
+      return { ok: false, error: "Invalid base-branch in workflow configuration." };
+    }
+    return { ok: true, baseBranch: configured };
+  }
+
+  const manifestEntry = lookupCheckout(repoSlug);
+  const manifestBranch = typeof manifestEntry?.default_branch === "string" ? manifestEntry.default_branch.trim() : "";
+  if (manifestBranch && isValidGitBranchName(manifestBranch)) {
+    return { ok: true, baseBranch: manifestBranch };
+  }
+
+  const staticAllowed = resolveStaticAllowedBaseBranch(config.allowed_base_branches);
+  if (staticAllowed && isValidGitBranchName(staticAllowed)) {
+    return { ok: true, baseBranch: staticAllowed };
+  }
+
+  const resolved = await getBaseBranch(repoParts, {
+    preferLocalDefaultBranchMetadata: Boolean(repoCwd),
+    cwd: repoCwd || undefined,
+  });
+  const trimmed = typeof resolved === "string" ? resolved.trim() : "";
+  if (!isValidGitBranchName(trimmed)) {
+    return {
+      ok: false,
+      error:
+        "Failed to resolve a valid base branch for patch generation. " +
+        "For private SideRepoOps workflows, configure create-pull-request.allowed-base-branches " +
+        "and ensure the side-repo checkout includes the base ref locally (or set create-pull-request.github-token).",
+    };
+  }
+  return { ok: true, baseBranch: trimmed };
+}
+
+/**
+ * Choose user-facing details when patch generation fails.
+ * @param {string} errorMsg
+ * @returns {string}
+ */
+function patchGenerationFailureDetails(errorMsg) {
+  if (/merge-base|ERR_SYSTEM|Invalid baseBranch|base branch/i.test(errorMsg)) {
+    return (
+      "Patch generation failed while resolving the pull request base branch or computing a merge-base. " +
+      "Verify allowed-base-branches, side-repo checkout ref, and create-pull-request.github-token for private repos."
+    );
+  }
+  return "No commits were found to create a pull request. Make sure you have committed your changes using git add and git commit before calling create_pull_request.";
+}
+
+/**
  * Parse config values that may be arrays or comma-separated strings.
  * @param {string[]|string|undefined} value
  * @returns {string[]}
@@ -263,6 +349,9 @@ module.exports = {
   isLabelTransientError,
   parseAllowedBaseBranches,
   isBaseBranchAllowed,
+  resolveStaticAllowedBaseBranch,
+  resolveSafeOutputBaseBranch,
+  patchGenerationFailureDetails,
   parseStringListConfig,
   mergeFallbackIssueLabels,
   sanitizeFallbackAssignees,
