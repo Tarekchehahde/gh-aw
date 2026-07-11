@@ -61,6 +61,9 @@ function debugLog(message) {
  * @param {string} [options.pinnedSha] - SECURITY: When set, use this SHA as the branch tip instead
  *   of resolving refs/heads/<branchName>. Prevents TOCTOU races where the agent flips the branch
  *   ref between patch and bundle generation.
+ * @param {string} [options.targetTreeCwd] - Absolute path to a target-repo checkout used to rewrite
+ *   cross-repo "new file" format-patch hunks into modify diffs when the path already exists on
+ *   origin/<baseBranch> in the target tree (fixes #17969).
  * @returns {Promise<Object>} Object with patch info or error
  */
 async function generateGitPatch(branchName, baseBranch, options = {}) {
