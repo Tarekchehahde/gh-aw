@@ -138,4 +138,60 @@ This workflow verifies that sudo is omitted by default when sudo is not set (net
 			t.Error("Expected no 'sudo chmod -R a+rX' permission-fix step when sudo is not set (network isolation is the default)")
 		}
 	})
+
+	t.Run("detection job inherits network isolation rootless awf", func(t *testing.T) {
+		workflowsDir := t.TempDir()
+
+		markdown := `---
+on:
+  workflow_dispatch:
+engine: copilot
+strict: false
+network:
+  allowed:
+    - github.com
+sandbox:
+  agent:
+    id: awf
+    sudo: false
+safe-outputs:
+  create-issue:
+---
+
+# Test Detection Rootless
+
+Threat detection should inherit rootless AWF settings from the parent workflow.
+`
+
+		workflowPath := filepath.Join(workflowsDir, "test-detection-rootless.md")
+		if err := os.WriteFile(workflowPath, []byte(markdown), 0644); err != nil {
+			t.Fatalf("Failed to write workflow file: %v", err)
+		}
+
+		compiler := NewCompiler()
+		if err := compiler.CompileWorkflow(workflowPath); err != nil {
+			t.Fatalf("Compilation failed: %v", err)
+		}
+
+		lockPath := filepath.Join(workflowsDir, "test-detection-rootless.lock.yml")
+		lockContent, err := os.ReadFile(lockPath)
+		if err != nil {
+			t.Fatalf("Failed to read compiled workflow: %v", err)
+		}
+		lockStr := string(lockContent)
+
+		detectionJob := extractDetectionJobSection(lockStr)
+		if detectionJob == "" {
+			t.Fatal("Expected detection job in compiled workflow")
+		}
+		if strings.Contains(detectionJob, "sudo -E awf") {
+			t.Error("Expected no 'sudo -E awf' in detection job when network isolation is enabled")
+		}
+		if !strings.Contains(detectionJob, "awf --config ") {
+			t.Error("Expected rootless 'awf --config' in detection job")
+		}
+		if !strings.Contains(detectionJob, "--rootless") {
+			t.Error("Expected '--rootless' in detection job AWF install step")
+		}
+	})
 }

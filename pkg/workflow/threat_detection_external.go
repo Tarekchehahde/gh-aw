@@ -81,9 +81,7 @@ func (c *Compiler) buildPullAWFContainersStep(data *WorkflowData) []string {
 		Tools: map[string]any{},
 		AI:    engineSetting,
 		SandboxConfig: &SandboxConfig{
-			Agent: &AgentSandboxConfig{
-				Type: SandboxTypeAWF,
-			},
+			Agent: buildThreatDetectionAgentConfig(data),
 		},
 		ActionCache: data.ActionCache, // Propagate cache so container digest pins are applied
 		Features:    data.Features,    // Propagate features so cli-proxy image is included when enabled
@@ -155,7 +153,7 @@ func (c *Compiler) buildInstallAWFForExternalDetectorStep(data *WorkflowData) []
 		version = firewallConfig.Version
 	}
 
-	step := generateAWFInstallationStep(version, nil)
+	step := generateAWFInstallationStep(version, buildThreatDetectionAgentConfig(data))
 	if len(step) == 0 {
 		return nil
 	}
@@ -190,9 +188,7 @@ func (c *Compiler) buildInstallDetectionEngineForExternalDetectorStep(data *Work
 		CachedPermissions: data.CachedPermissions,
 		IsDetectionRun:    true,
 		SandboxConfig: &SandboxConfig{
-			Agent: &AgentSandboxConfig{
-				Type: SandboxTypeAWF,
-			},
+			Agent: buildThreatDetectionAgentConfig(data),
 		},
 	}
 
@@ -275,15 +271,9 @@ func (c *Compiler) buildExternalDetectorExecutionStep(data *WorkflowData) []stri
 			Allowed: getThreatDetectionAdditionalAllowedDomains(data),
 		},
 		SandboxConfig: &SandboxConfig{
-			Agent: &AgentSandboxConfig{
-				Type: SandboxTypeAWF,
-				// Add a read-write mount so the threat-detect binary can write
-				// detection_result.json inside the container and it becomes visible
-				// on the host through the bind mount.
-				Mounts: []string{
-					constants.ThreatDetectionDir + ":" + constants.ThreatDetectionDir + ":rw",
-				},
-			},
+			Agent: buildThreatDetectionAgentConfig(data,
+				constants.ThreatDetectionDir+":"+constants.ThreatDetectionDir+":rw",
+			),
 		},
 	}
 

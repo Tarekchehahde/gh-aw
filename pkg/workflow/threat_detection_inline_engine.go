@@ -134,9 +134,7 @@ func (c *Compiler) buildDetectionEngineExecutionStep(data *WorkflowData) []strin
 			Allowed: getThreatDetectionAdditionalAllowedDomains(data),
 		},
 		SandboxConfig: &SandboxConfig{
-			Agent: &AgentSandboxConfig{
-				Type: SandboxTypeAWF,
-			},
+			Agent: buildThreatDetectionAgentConfig(data),
 		},
 	}
 
