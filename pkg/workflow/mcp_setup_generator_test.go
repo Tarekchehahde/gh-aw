@@ -617,6 +617,51 @@ tools:
 		"MCP gateway host domain should be localhost in network isolation mode so host-side clients can connect")
 }
 
+func TestMCPGatewayDockerCommandUsesBridgeWithExplicitSudoTrue(t *testing.T) {
+	frontmatter := `---
+on: workflow_dispatch
+engine: copilot
+strict: false
+sandbox:
+  agent:
+    sudo: true
+tools:
+  github:
+    mode: remote
+    toolsets: [repos]
+---
+
+# Test MCP gateway bridge mode with sudo true
+`
+
+	compiler := NewCompiler()
+
+	tmpDir := t.TempDir()
+	inputFile := filepath.Join(tmpDir, "test.md")
+
+	err := os.WriteFile(inputFile, []byte(frontmatter), 0644)
+	require.NoError(t, err, "Failed to write test input file")
+
+	err = compiler.CompileWorkflow(inputFile)
+	require.NoError(t, err, "Compilation should succeed")
+
+	outputFile := stringutil.MarkdownToLockFile(inputFile)
+	content, err := os.ReadFile(outputFile)
+	require.NoError(t, err, "Failed to read output file")
+	yamlStr := string(content)
+
+	require.Contains(t, yamlStr, `docker run -i --rm --network bridge`,
+		"Docker command should use bridge networking even when sandbox.agent.sudo is true")
+	require.Contains(t, yamlStr, `-p 127.0.0.1:`,
+		"Docker command should publish gateway port to host when sudo is true")
+	require.NotContains(t, yamlStr, `--network host`,
+		"Docker command should not use host networking when sudo is true")
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_DOMAIN="awmg-mcpg"`,
+		"MCP gateway domain should use the container name in bridge mode")
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_HOST_DOMAIN="localhost"`,
+		"Host-side clients should reach the published gateway port via localhost")
+}
+
 // TestMCPGatewayDockerCommandAddsHostGatewayForMCPScriptsInBridgeMode verifies that when
 // mcp-scripts are configured in network-isolation (bridge) mode, the gateway container command
 // includes --add-host host.docker.internal:host-gateway so the gateway can reach the
