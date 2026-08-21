@@ -16,6 +16,7 @@ const fs = require("fs");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { execGitSync } = require("./git_helpers.cjs");
+const { parseDiffGitHeader } = require("./patch_path_helpers.cjs");
 
 /**
  * Debug logging helper - logs to stderr when DEBUG env var matches
@@ -196,13 +197,19 @@ function rewriteCrossRepoCreatePatches(patchContent, options) {
   const rewritten = [parts[0]];
   for (let i = 1; i < parts.length; i += 1) {
     const block = parts[i];
-    const pathMatch = block.match(/^diff --git a\/(\S+) b\/(\S+)\n(?:new file mode \d+\n)?/m);
-    if (!pathMatch || !block.includes("new file mode")) {
+    const headerLine = (block.split(/\r?\n/, 1)[0] || "").trimEnd();
+    const parsed = parseDiffGitHeader(headerLine);
+    if (!parsed.parseable || !block.includes("new file mode")) {
       rewritten.push(block);
       continue;
     }
 
-    const filePath = pathMatch[1];
+    const filePath = parsed.newPath || parsed.oldPath;
+    if (!filePath || filePath === "dev/null") {
+      rewritten.push(block);
+      continue;
+    }
+
     try {
       execGit(["cat-file", "-e", `${targetBaseRef}:${filePath}`], { cwd: targetTreeCwd });
     } catch {
@@ -210,12 +217,14 @@ function rewriteCrossRepoCreatePatches(patchContent, options) {
       continue;
     }
 
+    const modeMatch = block.match(/^new file mode (\d{6})$/m);
     const modifyDiff = buildCrossRepoModifyDiff(filePath, {
       agentCwd,
       targetTreeCwd,
       targetBaseRef,
       pinnedSha,
       execGit,
+      patchMode: modeMatch ? modeMatch[1] : null,
     });
     rewritten.push(modifyDiff || block);
   }
@@ -224,13 +233,79 @@ function rewriteCrossRepoCreatePatches(patchContent, options) {
 }
 
 /**
+ * Quote a path the way format-patch does when it contains spaces or special characters.
  * @param {string} filePath
- * @param {{ agentCwd: string, targetTreeCwd: string, targetBaseRef: string, pinnedSha?: string, execGit: typeof execGitSync }} options
+ * @returns {string}
+ */
+function quoteGitPathIfNeeded(filePath) {
+  if (/[\s"\\\t]/.test(filePath) || /[^\x20-\x7e]/.test(filePath)) {
+    const escaped = filePath.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `"${escaped}"`;
+  }
+  return filePath;
+}
+
+/**
+ * @param {string} filePath
+ * @returns {string}
+ */
+function formatDiffGitHeaderLine(filePath) {
+  const quoted = quoteGitPathIfNeeded(filePath);
+  if (quoted.startsWith('"')) {
+    const inner = quoted.slice(1, -1);
+    return `diff --git "a/${inner}" "b/${inner}"`;
+  }
+  return `diff --git a/${filePath} b/${filePath}`;
+}
+
+/**
+ * @param {"---" | "+++"} marker
+ * @param {string} filePath
+ * @returns {string}
+ */
+function formatDiffPathLine(marker, filePath) {
+  const side = marker === "---" ? "a" : "b";
+  const quoted = quoteGitPathIfNeeded(filePath);
+  if (quoted.startsWith('"')) {
+    const inner = quoted.slice(1, -1);
+    return `${marker} "${side}/${inner}"`;
+  }
+  return `${marker} ${side}/${filePath}`;
+}
+
+/**
+ * @param {string} stdout
+ * @returns {string | null}
+ */
+function parseLsTreeMode(stdout) {
+  const match = String(stdout || "")
+    .trim()
+    .match(/^(\d{6})\s+/);
+  return match ? match[1] : null;
+}
+
+/**
+ * @param {typeof execGitSync} execGit
+ * @param {string} cwd
+ * @param {string} treeish
+ * @param {string} filePath
+ * @returns {string | null}
+ */
+function readGitFileMode(execGit, cwd, treeish, filePath) {
+  try {
+    return parseLsTreeMode(execGit(["ls-tree", treeish, "--", filePath], { cwd }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} filePath
+ * @param {{ agentCwd: string, targetTreeCwd: string, targetBaseRef: string, pinnedSha?: string, execGit: typeof execGitSync, patchMode?: string | null }} options
  * @returns {string | null}
  */
 function buildCrossRepoModifyDiff(filePath, options) {
-  const { agentCwd, targetTreeCwd, targetBaseRef, pinnedSha, execGit } = options;
-  const fs = require("fs");
+  const { agentCwd, targetTreeCwd, targetBaseRef, pinnedSha, execGit, patchMode } = options;
   const os = require("os");
   const path = require("path");
 
@@ -253,6 +328,9 @@ function buildCrossRepoModifyDiff(filePath, options) {
     return null;
   }
 
+  const oldMode = readGitFileMode(execGit, targetTreeCwd, targetBaseRef, filePath);
+  const newMode = readGitFileMode(execGit, agentCwd, agentRef, filePath) || patchMode || oldMode;
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-cross-repo-patch-"));
   try {
     const oldFile = path.join(tmpDir, "old");
@@ -260,7 +338,6 @@ function buildCrossRepoModifyDiff(filePath, options) {
     fs.writeFileSync(oldFile, execGit(["cat-file", "blob", oldSha], { cwd: targetTreeCwd }));
     fs.writeFileSync(newFile, execGit(["cat-file", "blob", newSha], { cwd: agentCwd }));
 
-    let diffBody = "";
     const diffResult = require("child_process").spawnSync("git", ["diff", "--no-index", "--no-color", "old", "new"], {
       cwd: tmpDir,
       encoding: "utf8",
@@ -268,7 +345,7 @@ function buildCrossRepoModifyDiff(filePath, options) {
     if (diffResult.status !== 0 && diffResult.status !== 1) {
       return null;
     }
-    diffBody = diffResult.stdout || "";
+    const diffBody = diffResult.stdout || "";
     if (!diffBody.trim()) {
       return null;
     }
@@ -280,7 +357,16 @@ function buildCrossRepoModifyDiff(filePath, options) {
     }
     const hunkBody = diffLines.slice(hunkStart).join("\n");
 
-    return `diff --git a/${filePath} b/${filePath}\nindex ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)} 100644\n--- a/${filePath}\n+++ b/${filePath}\n${hunkBody}`;
+    let modeHeader;
+    if (oldMode && newMode && oldMode !== newMode) {
+      modeHeader = `old mode ${oldMode}\nnew mode ${newMode}\nindex ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)}\n`;
+    } else if (newMode || oldMode) {
+      modeHeader = `index ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)} ${newMode || oldMode}\n`;
+    } else {
+      modeHeader = `index ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)}\n`;
+    }
+
+    return `${formatDiffGitHeaderLine(filePath)}\n${modeHeader}${formatDiffPathLine("---", filePath)}\n${formatDiffPathLine("+++", filePath)}\n${hunkBody}`;
   } catch {
     return null;
   } finally {

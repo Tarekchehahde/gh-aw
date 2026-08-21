@@ -301,4 +301,110 @@ describe("rewriteCrossRepoCreatePatches", () => {
     execGit(["am", "--3way", patchFile], targetDir);
     expect(fs.readFileSync(docPath, "utf8")).toBe("agent edited content\n");
   });
+
+  it("preserves executable mode (100755) instead of hardcoding 100644", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-exec-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const scriptPath = path.join(targetDir, "scripts", "run.sh");
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho target\n");
+    fs.chmodSync(scriptPath, 0o755);
+    execGit(["add", "scripts/run.sh"], targetDir);
+    execGit(["update-index", "--chmod=+x", "scripts/run.sh"], targetDir);
+    execGit(["commit", "-m", "target script"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "scripts", "run.sh"), "#!/bin/sh\necho agent\n");
+    fs.chmodSync(path.join(agentDir, "scripts", "run.sh"), 0o755);
+    execGit(["add", "scripts/run.sh"], agentDir);
+    execGit(["update-index", "--chmod=+x", "scripts/run.sh"], agentDir);
+    execGit(["commit", "-m", "agent script"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("new file mode 100755");
+
+    const rewritten = rewriteCrossRepoCreatePatches(rawPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toMatch(/index [0-9a-f]+\.\.[0-9a-f]+ 100755/);
+    expect(rewritten).not.toMatch(/index [0-9a-f]+\.\.[0-9a-f]+ 100644/);
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["reset", "--hard"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(scriptPath, "utf8")).toBe("#!/bin/sh\necho agent\n");
+    const mode = execGit(["ls-files", "-s", "scripts/run.sh"], targetDir);
+    expect(mode).toMatch(/^100755\s/);
+  });
+
+  it("rewrites create hunks for paths that contain spaces (quoted diff --git headers)", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-space-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const docPath = path.join(targetDir, "docs", "my guide.md");
+    fs.mkdirSync(path.dirname(docPath), { recursive: true });
+    fs.writeFileSync(docPath, "original target content\n");
+    execGit(["add", "docs/my guide.md"], targetDir);
+    execGit(["commit", "-m", "target base"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "docs", "my guide.md"), "agent edited content\n");
+    execGit(["add", "docs/my guide.md"], agentDir);
+    execGit(["commit", "-m", "agent edit"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("docs/my guide.md");
+    expect(rawPatch).toContain("new file mode");
+
+    const quotedPatch = rawPatch.replace("diff --git a/docs/my guide.md b/docs/my guide.md", 'diff --git "a/docs/my guide.md" "b/docs/my guide.md"').replace("+++ b/docs/my guide.md", '+++ "b/docs/my guide.md"');
+
+    const rewritten = rewriteCrossRepoCreatePatches(quotedPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toContain('--- "a/docs/my guide.md"');
+    expect(rewritten).toContain("+agent edited content");
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(docPath, "utf8")).toBe("agent edited content\n");
+  });
 });
