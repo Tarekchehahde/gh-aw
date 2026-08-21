@@ -55,117 +55,43 @@ func TestResolveEngineID(t *testing.T) {
 	}
 }
 
-func TestBuildStandardNpmEngineInstallSteps(t *testing.T) {
-	tests := []struct {
-		name           string
-		workflowData   *WorkflowData
-		expectedSteps  int // Number of steps expected (Node.js setup + npm install)
-		expectedInStep string
-	}{
-		{
-			name:           "with default version",
-			workflowData:   &WorkflowData{},
-			expectedSteps:  2, // Node.js setup + npm install
-			expectedInStep: string(constants.DefaultCopilotVersion),
-		},
-		{
-			name: "with custom version from engine config",
-			workflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{
-					Version: "1.2.3",
-				},
+func TestApplyEngineHarnessRetryEnv(t *testing.T) {
+	t.Run("injects harness policy env vars including watchdog timeout", func(t *testing.T) {
+		env := map[string]string{}
+		workflowData := &WorkflowData{
+			EngineConfig: &EngineConfig{
+				HarnessMaxRetries:        "6",
+				HarnessInitialDelayMs:    "10000",
+				HarnessBackoffMultiplier: "2",
+				HarnessMaxDelayMs:        "180000",
+				HarnessWatchdogTimeoutMs: "120000",
 			},
-			expectedSteps:  2,
-			expectedInStep: "1.2.3",
-		},
-		{
-			name: "with empty version in engine config (use default)",
-			workflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{
-					Version: "",
-				},
-			},
-			expectedSteps:  2,
-			expectedInStep: string(constants.DefaultCopilotVersion),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			steps := BuildStandardNpmEngineInstallSteps(
-				"@github/copilot",
-				string(constants.DefaultCopilotVersion),
-				"Install GitHub Copilot CLI",
-				"copilot",
-				tt.workflowData,
-			)
-
-			if len(steps) != tt.expectedSteps {
-				t.Errorf("Expected %d steps, got %d", tt.expectedSteps, len(steps))
-			}
-
-			// Verify that the expected version appears in the steps
-			found := false
-			for _, step := range steps {
-				for _, line := range step {
-					if strings.Contains(line, tt.expectedInStep) {
-						found = true
-						break
-					}
-				}
-			}
-
-			if !found {
-				t.Errorf("Expected version %s not found in steps", tt.expectedInStep)
-			}
-		})
-	}
-}
-
-func TestBuildStandardNpmEngineInstallSteps_RuntimeCooldownOverride(t *testing.T) {
-	t.Run("default cooldown enabled", func(t *testing.T) {
-		steps := BuildStandardNpmEngineInstallSteps(
-			"@github/copilot",
-			string(constants.DefaultCopilotVersion),
-			"Install GitHub Copilot CLI",
-			"copilot",
-			&WorkflowData{},
-		)
-
-		var content strings.Builder
-		for _, step := range steps {
-			content.WriteString(strings.Join(step, "\n"))
-			content.WriteString("\n")
 		}
 
-		if !strings.Contains(content.String(), "NPM_CONFIG_MIN_RELEASE_AGE: '3'") {
-			t.Fatalf("expected default npm cooldown env to be set")
-		}
+		applyEngineHarnessRetryEnv(env, workflowData)
+
+		assert.Equal(t, "6", env["GH_AW_HARNESS_MAX_RETRIES"])
+		assert.Equal(t, "10000", env["GH_AW_HARNESS_INITIAL_DELAY_MS"])
+		assert.Equal(t, "2", env["GH_AW_HARNESS_BACKOFF_MULTIPLIER"])
+		assert.Equal(t, "180000", env["GH_AW_HARNESS_MAX_DELAY_MS"])
+		assert.Equal(t, "120000", env["GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS"])
 	})
 
-	t.Run("runtimes.node.cooldown false disables cooldown", func(t *testing.T) {
-		steps := BuildStandardNpmEngineInstallSteps(
-			"@github/copilot",
-			string(constants.DefaultCopilotVersion),
-			"Install GitHub Copilot CLI",
-			"copilot",
-			&WorkflowData{
-				Runtimes: map[string]any{
-					"node": map[string]any{
-						"cooldown": false,
-					},
+	t.Run("engine.env override still wins after harness policy env injection", func(t *testing.T) {
+		env := map[string]string{}
+		workflowData := &WorkflowData{
+			EngineConfig: &EngineConfig{
+				HarnessWatchdogTimeoutMs: "120000",
+				Env: map[string]string{
+					"GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS": "90000",
 				},
 			},
-		)
+		}
 
-		var content strings.Builder
-		for _, step := range steps {
-			content.WriteString(strings.Join(step, "\n"))
-			content.WriteString("\n")
-		}
-		if strings.Contains(content.String(), "NPM_CONFIG_MIN_RELEASE_AGE") {
-			t.Fatalf("expected npm cooldown env to be omitted when runtimes.node.cooldown is false")
-		}
+		applyEngineHarnessRetryEnv(env, workflowData)
+		applyEngineAndAgentEnv(env, workflowData, nil)
+
+		assert.Equal(t, "90000", env["GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS"])
 	})
 }
 
@@ -185,71 +111,6 @@ func TestBuildStandardNpmEngineInstallStepsNoCooldown(t *testing.T) {
 	}
 	if strings.Contains(content.String(), "NPM_CONFIG_MIN_RELEASE_AGE") {
 		t.Fatalf("expected npm cooldown env to be omitted when no-cooldown helper is used")
-	}
-}
-
-func TestBuildStandardNpmEngineInstallSteps_AllEngines(t *testing.T) {
-	tests := []struct {
-		name           string
-		packageName    string
-		defaultVersion string
-		stepName       string
-		cacheKeyPrefix string
-	}{
-		{
-			name:           "copilot engine",
-			packageName:    "@github/copilot",
-			defaultVersion: string(constants.DefaultCopilotVersion),
-			stepName:       "Install GitHub Copilot CLI",
-			cacheKeyPrefix: "copilot",
-		},
-		{
-			name:           "codex engine",
-			packageName:    "@openai/codex",
-			defaultVersion: string(constants.DefaultCodexVersion),
-			stepName:       "Install Codex CLI",
-			cacheKeyPrefix: "codex",
-		},
-		{
-			name:           "claude engine",
-			packageName:    "@anthropic-ai/claude-code",
-			defaultVersion: string(constants.DefaultClaudeCodeVersion),
-			stepName:       "Install Claude Code CLI",
-			cacheKeyPrefix: "claude",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			workflowData := &WorkflowData{}
-
-			steps := BuildStandardNpmEngineInstallSteps(
-				tt.packageName,
-				tt.defaultVersion,
-				tt.stepName,
-				tt.cacheKeyPrefix,
-				workflowData,
-			)
-
-			if len(steps) < 1 {
-				t.Errorf("Expected at least 1 step, got %d", len(steps))
-			}
-
-			// Verify package name appears in steps
-			found := false
-			for _, step := range steps {
-				for _, line := range step {
-					if strings.Contains(line, tt.packageName) {
-						found = true
-						break
-					}
-				}
-			}
-
-			if !found {
-				t.Errorf("Expected package name %s not found in steps", tt.packageName)
-			}
-		})
 	}
 }
 
@@ -738,6 +599,63 @@ func TestNormalizeBashCommand(t *testing.T) {
 			}
 			if gotChanged != tt.expectedChanged {
 				t.Errorf("normalizeBashCommand(%q) changed = %v, want %v", tt.input, gotChanged, tt.expectedChanged)
+			}
+		})
+	}
+}
+
+func TestApplyEngineVersionEnv(t *testing.T) {
+	tests := []struct {
+		name         string
+		workflowData *WorkflowData
+		wantVersion  string
+		wantSet      bool
+	}{
+		{
+			name:         "nil workflow data",
+			workflowData: nil,
+			wantSet:      false,
+		},
+		{
+			name:         "nil engine config",
+			workflowData: &WorkflowData{},
+			wantSet:      false,
+		},
+		{
+			name: "empty version",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "goose"},
+			},
+			wantSet: false,
+		},
+		{
+			name: "explicit version string",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "goose", Version: "1.0.0"},
+			},
+			wantVersion: "1.0.0",
+			wantSet:     true,
+		},
+		{
+			name: "expression version",
+			workflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "goose", Version: "${{ inputs.engine-version }}"},
+			},
+			wantVersion: "${{ inputs.engine-version }}",
+			wantSet:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{}
+			applyEngineVersionEnv(env, tt.workflowData)
+			got, set := env["GH_AW_ENGINE_VERSION"]
+			if set != tt.wantSet {
+				t.Errorf("expected GH_AW_ENGINE_VERSION to be set=%v, got set=%v", tt.wantSet, set)
+			}
+			if tt.wantSet && got != tt.wantVersion {
+				t.Errorf("expected GH_AW_ENGINE_VERSION=%q, got %q", tt.wantVersion, got)
 			}
 		})
 	}

@@ -8,6 +8,7 @@ import (
 )
 
 func TestRemoveFieldFromOnTrigger(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		content     string
@@ -117,6 +118,7 @@ permissions:
 }
 
 func TestSetFieldInOnTrigger(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		content     string
@@ -208,6 +210,134 @@ permissions:
 				if !strings.Contains(result, tt.fieldValue) {
 					t.Errorf("Result doesn't contain expected value '%s':\n%s", tt.fieldValue, result)
 				}
+			}
+		})
+	}
+}
+
+func TestRemoveTopLevelFieldFromFrontmatter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		content   string
+		fieldName string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name: "removes existing top-level field",
+			content: `---
+name: my-workflow
+source: owner/repo/workflow.md@abc123
+features:
+  - foo
+---
+
+# Body`,
+			fieldName: "source",
+			want: `---
+name: my-workflow
+features:
+  - foo
+---
+
+# Body`,
+		},
+		{
+			name: "field absent returns content unchanged",
+			content: `---
+name: my-workflow
+features:
+  - foo
+---
+
+# Body`,
+			fieldName: "source",
+			want: `---
+name: my-workflow
+features:
+  - foo
+---
+
+# Body`,
+		},
+		{
+			name: "field name prefix does not match other fields",
+			content: `---
+source: owner/repo@abc
+source-extra: other
+---
+
+# Body`,
+			fieldName: "source",
+			want: `---
+source-extra: other
+---
+
+# Body`,
+		},
+		{
+			name: "no frontmatter returns content unchanged",
+			content: `# Just a heading
+
+Some text.`,
+			fieldName: "source",
+			want: `# Just a heading
+
+Some text.`,
+		},
+		{
+			name: "removes field with child lines",
+			content: `---
+name: wf
+source:
+  repo: owner/repo
+  ref: abc123
+evals:
+  - test
+---
+
+# Body`,
+			fieldName: "source",
+			want: `---
+name: wf
+evals:
+  - test
+---
+
+# Body`,
+		},
+		{
+			name: "preserves nested fields with same name",
+			content: `---
+steps:
+  - name: test
+    with:
+      source: nested-input
+source: owner/repo/workflow.md@abc123
+---
+
+# Body`,
+			fieldName: "source",
+			want: `---
+steps:
+  - name: test
+    with:
+      source: nested-input
+---
+
+# Body`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := RemoveTopLevelFieldFromFrontmatter(tt.content, tt.fieldName)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("RemoveTopLevelFieldFromFrontmatter() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("RemoveTopLevelFieldFromFrontmatter() mismatch\ngot:\n%s\nwant:\n%s", got, tt.want)
 			}
 		})
 	}

@@ -14,6 +14,7 @@ engine:
   id: copilot
   copilot-sdk: true
   bare: true
+max-tool-denials: 3
 imports:
   - uses: shared/skip-if-issue-open.md
     with:
@@ -45,9 +46,6 @@ steps:
   - name: Install deadcode analyzer
     run: go install golang.org/x/tools/cmd/deadcode@latest
 
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # Dead Code Removal Agent

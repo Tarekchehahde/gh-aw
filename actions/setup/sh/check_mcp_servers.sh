@@ -33,8 +33,8 @@ print_timing() {
 #   GATEWAY_API_KEY     : API key for gateway authentication
 #
 # Exit codes:
-#   0 - All HTTP servers successfully checked (skipped servers logged as warnings)
-#   1 - Invalid arguments, configuration file issues, or server connection failures
+#   0 - At least one server connected and no required servers failed (optional server failures logged as warnings)
+#   1 - Invalid arguments, configuration file issues, no successful connections, or required server failures
 
 if [ "$#" -ne 3 ]; then
   echo "Usage: $0 GATEWAY_CONFIG_PATH GATEWAY_URL GATEWAY_API_KEY" >&2
@@ -44,6 +44,30 @@ fi
 GATEWAY_CONFIG_PATH="$1"
 GATEWAY_URL="$2"
 GATEWAY_API_KEY="$3"
+
+# Optional comma-separated list of non-critical server names. The gateway output
+# does not echo the `required` flag from the input configuration, so the caller
+# forwards the names of servers declared with `required: false` here.
+OPTIONAL_SERVERS="${GH_AW_MCP_OPTIONAL_SERVERS:-}"
+
+# is_optional_server NAME → 0 when the server is declared non-critical
+is_optional_server() {
+  local name="$1"
+  local entry
+  local remaining="$OPTIONAL_SERVERS"
+  [ -z "$remaining" ] && return 1
+  while [ -n "$remaining" ]; do
+    entry="${remaining%%,*}"
+    if [ "$entry" = "$name" ]; then
+      return 0
+    fi
+    if [ "$remaining" = "$entry" ]; then
+      break
+    fi
+    remaining="${remaining#*,}"
+  done
+  return 1
+}
 
 # Start overall timing
 SCRIPT_START_TIME=$(date +%s%3N)
@@ -86,6 +110,7 @@ SERVERS_CHECKED=0
 SERVERS_SUCCEEDED=0
 SERVERS_FAILED=0
 SERVERS_SKIPPED=0
+REQUIRED_SERVERS_FAILED=0
 
 # Retry configuration for slow-starting servers
 # Gateway may take 40-50 seconds to start all MCP servers (per start_mcp_gateway.sh)
@@ -103,6 +128,16 @@ while IFS= read -r SERVER_NAME; do
     echo "⚠ $SERVER_NAME: configuration is null"
     SERVERS_FAILED=$((SERVERS_FAILED + 1))
     continue
+  fi
+
+  # Check whether server is marked optional in configuration JSON or via the
+  # GH_AW_MCP_OPTIONAL_SERVERS environment variable.
+  # Servers are required by default; set required: false to degrade failures to warnings.
+  REQUIRED=true
+  if echo "$SERVER_CONFIG" | jq -e '.required == false' >/dev/null 2>&1; then
+    REQUIRED=false
+  elif is_optional_server "$SERVER_NAME"; then
+    REQUIRED=false
   fi
   
   # Extract server URL (should be HTTP URL pointing to gateway)
@@ -220,7 +255,12 @@ while IFS= read -r SERVER_NAME; do
     echo "✓ $SERVER_NAME: connected"
     SERVERS_SUCCEEDED=$((SERVERS_SUCCEEDED + 1))
   else
-    echo "✗ $SERVER_NAME: failed to connect"
+    if [ "$REQUIRED" = true ]; then
+      echo "✗ $SERVER_NAME: failed to connect (required)"
+      REQUIRED_SERVERS_FAILED=$((REQUIRED_SERVERS_FAILED + 1))
+    else
+      echo "⚠ $SERVER_NAME: non-critical MCP server unavailable, continuing without it"
+    fi
     echo "  URL: ${SERVER_URL@Q}"
     echo "  Last error: ${LAST_ERROR@Q}"
     echo "  Retries attempted: $MAX_RETRIES"
@@ -235,24 +275,21 @@ done <<< "$SERVER_NAMES"
 # Print summary
 print_timing $SCRIPT_START_TIME "Overall MCP server checks"
 echo ""
-if [ $SERVERS_FAILED -gt 0 ]; then
-  echo "ERROR: $SERVERS_FAILED of $SERVERS_CHECKED server(s) failed connectivity check"
+if [ $REQUIRED_SERVERS_FAILED -gt 0 ]; then
+  echo "ERROR: $REQUIRED_SERVERS_FAILED required server(s) failed connectivity check"
   echo "Succeeded: $SERVERS_SUCCEEDED, Failed: $SERVERS_FAILED, Skipped: $SERVERS_SKIPPED"
   echo ""
-  echo "This indicates that one or more MCP servers failed to respond to MCP ping/initialize/tools/list requests"
+  echo "One or more startup-critical MCP servers failed ping/initialize/tools/list"
   echo "after multiple retry attempts with progressive timeouts (10s, 20s, 30s)."
   echo ""
   echo "Common causes:"
-  echo "  - MCP server container failed to start or crashed"
-  echo "  - Network connectivity issues between gateway and server"
-  echo "  - Server initialization taking longer than expected (>30s)"
-  echo "  - Server port not properly exposed or accessible"
+  echo "  - Invalid or expired credentials (for example HTTP 401/403 on initialize)"
+  echo "  - MCP server unavailable or rejecting requests"
+  echo "  - Network connectivity or DNS issues"
   echo ""
-  echo "Check the gateway logs and individual server logs for more details:"
-  echo "  /tmp/gh-aw/mcp-logs/stderr.log"
-  echo "  /tmp/gh-aw/mcp-logs/start-gateway.log"
+  echo "Check the MCP server output above and individual server logs for more details."
   exit 1
-elif [ $SERVERS_SUCCEEDED -eq 0 ]; then
+elif [ $SERVERS_SUCCEEDED -eq 0 ] && [ $SERVERS_FAILED -eq 0 ]; then
   echo "ERROR: No HTTP servers were successfully checked"
   echo "This could indicate:"
   echo "  - No HTTP-type MCP servers were configured"
@@ -260,7 +297,21 @@ elif [ $SERVERS_SUCCEEDED -eq 0 ]; then
   echo ""
   echo "If you expected HTTP servers to be configured, check the gateway configuration."
   exit 1
+elif [ $SERVERS_SUCCEEDED -eq 0 ]; then
+  echo "ERROR: All $SERVERS_FAILED optional server(s) failed; no successful connections"
+  echo "Succeeded: 0, Failed: $SERVERS_FAILED, Skipped: $SERVERS_SKIPPED"
+  echo ""
+  echo "All configured HTTP MCP servers are optional but none connected successfully."
+  echo "At least one server must connect for the gateway to be considered healthy."
+  echo ""
+  echo "Check the MCP server output above and individual server logs for more details."
+  exit 1
 else
-  echo "✓ All checks passed ($SERVERS_SUCCEEDED succeeded, $SERVERS_SKIPPED skipped)"
+  if [ $SERVERS_FAILED -gt 0 ]; then
+    echo "WARNING: $SERVERS_FAILED optional server(s) failed connectivity check; continuing startup"
+    echo "✓ Checks completed with warnings ($SERVERS_SUCCEEDED succeeded, $SERVERS_FAILED failed, $SERVERS_SKIPPED skipped)"
+  else
+    echo "✓ All checks passed ($SERVERS_SUCCEEDED succeeded, $SERVERS_SKIPPED skipped)"
+  fi
   exit 0
 fi

@@ -13,11 +13,16 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    id: awf
 tracker-id: daily-reliability-review
-engine: claude
+engine:
+  id: opencode
+model: copilot/claude-sonnet-4.5
 strict: true
+network:
+  allowed:
+    - defaults
+    - github
 tools:
   bash: true
   cli-proxy: true
@@ -35,6 +40,7 @@ safe-outputs:
     close-older-issues: true
 timeout-minutes: 30
 imports:
+  - shared/opencode.md
   - uses: shared/daily-issue-base.md
     with:
       title-prefix: "[reliability] "
@@ -42,8 +48,14 @@ imports:
       labels: [observability, automated-analysis]
   - shared/sentry.md
   - shared/mcp/sentry.md
+  - shared/reporting.md
 features:
   gh-aw-detection: true
+evals:
+  - id: failures_analyzed
+    question: Did the agent analyze agentic workflow failures and regressions using Sentry traces?
+  - id: reliability_report_created
+    question: Was a daily reliability review report created with actionable findings?
 ---
 
 # Daily Reliability Review

@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
+import { syncRuntimePromptTemplates } from "./test_prompt_templates.js";
+
+const { runtimePromptsDir } = syncRuntimePromptTemplates(import.meta.url);
 
 // Mock the global objects that GitHub Actions provides
 const mockCore = {
@@ -34,6 +37,20 @@ const { AGENT_LOGIN_NAMES, getAgentName, getAgentLogins, getAvailableAgentLogins
   await import("./assign_agent_helpers.cjs");
 
 describe("assign_agent_helpers.cjs", () => {
+  const originalPromptsDir = process.env.GH_AW_PROMPTS_DIR;
+
+  beforeAll(() => {
+    process.env.GH_AW_PROMPTS_DIR = runtimePromptsDir;
+  });
+
+  afterAll(() => {
+    if (originalPromptsDir === undefined) {
+      delete process.env.GH_AW_PROMPTS_DIR;
+      return;
+    }
+    process.env.GH_AW_PROMPTS_DIR = originalPromptsDir;
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -383,6 +400,20 @@ describe("assign_agent_helpers.cjs", () => {
       expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", expect.objectContaining({ owner: "myorg", repo: "myrepo", issue_number: 42 }));
     });
 
+    it("should include issue-intent metadata when enabled", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, null, null, null, null, restClient, taskContext, null, { rationale: "Agent owns the code path", confidence: "HIGH" }, true);
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: [{ login: "copilot-swe-agent[bot]", rationale: "Agent owns the code path", confidence: "HIGH" }],
+      });
+    });
+
     it("should return false and not call request when taskContext is missing", async () => {
       const mockRequest = vi.fn();
       const restClient = { request: mockRequest };
@@ -421,7 +452,99 @@ describe("assign_agent_helpers.cjs", () => {
       const result = await assignAgentToIssue("id", "agent", [], "copilot", null, null, null, null, null, restClient, taskContext);
 
       expect(result).toBe(false);
-      expect(mockCore.error).toHaveBeenCalledWith(expect.stringContaining("Insufficient permissions"));
+      expect(mockCore.error).toHaveBeenCalledWith(expect.stringContaining("Copilot assignment permission requirements not met"));
+      expect(mockCore.error).toHaveBeenCalledWith(expect.stringContaining("GH_AW_AGENT_TOKEN"));
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("github.github.com/gh-aw/reference/copilot-cloud-agent/#authentication"));
+    });
+
+    it("should not include agent_assignment when all optional fields are null", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, null, null, null, null, restClient, taskContext);
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: ["copilot-swe-agent[bot]"],
+      });
+    });
+
+    it("should include agent_assignment with all fields when all are provided", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, "claude-opus-4.6", "my-agent", "Follow the coding guidelines.", "feature-branch", restClient, taskContext, "otherorg/otherrepo");
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: ["copilot-swe-agent[bot]"],
+        agent_assignment: {
+          target_repo: "otherorg/otherrepo",
+          base_branch: "feature-branch",
+          custom_instructions: "Follow the coding guidelines.",
+          custom_agent: "my-agent",
+          model: "claude-opus-4.6",
+        },
+      });
+    });
+
+    it("should include agent_assignment with only the provided fields", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, null, null, "Always write tests.", null, restClient, taskContext);
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: ["copilot-swe-agent[bot]"],
+        agent_assignment: {
+          custom_instructions: "Always write tests.",
+        },
+      });
+    });
+
+    it("should include agent_assignment with target_repo when pullRequestRepoSlug is provided", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, null, null, null, null, restClient, taskContext, "otherorg/otherrepo");
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: ["copilot-swe-agent[bot]"],
+        agent_assignment: {
+          target_repo: "otherorg/otherrepo",
+        },
+      });
+    });
+
+    it("should include empty-string agent_assignment fields when explicitly provided", async () => {
+      const mockRequest = vi.fn().mockResolvedValue({ status: 201 });
+      const restClient = { request: mockRequest };
+
+      await assignAgentToIssue("id", "copilot-swe-agent[bot]", [], "copilot", null, "", "", "", "", restClient, taskContext, "");
+
+      expect(mockRequest).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
+        owner: "myorg",
+        repo: "myrepo",
+        issue_number: 42,
+        assignees: ["copilot-swe-agent[bot]"],
+        agent_assignment: {
+          target_repo: "",
+          base_branch: "",
+          custom_instructions: "",
+          custom_agent: "",
+          model: "",
+        },
+      });
     });
   });
 
@@ -429,10 +552,12 @@ describe("assign_agent_helpers.cjs", () => {
     it("should return markdown content with permission requirements", () => {
       const summary = generatePermissionErrorSummary();
 
-      expect(summary).toContain("### ⚠️ Permission Requirements");
-      expect(summary).toContain("Fine-grained personal access token");
+      expect(summary).toContain("### ⚠️ Copilot Assignment Permission Requirements");
+      expect(summary).toContain("GH_AW_AGENT_TOKEN");
+      expect(summary).toContain("GitHub App installation token");
       expect(summary).toContain("actions**, **contents**, **issues**");
       expect(summary).toContain("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees");
+      expect(summary).toContain("https://github.github.com/gh-aw/reference/copilot-cloud-agent/#authentication");
       expect(summary).toContain("https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api#using-the-issues-api");
     });
   });

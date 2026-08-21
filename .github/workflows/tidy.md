@@ -2,7 +2,7 @@
 private: true
 emoji: "🧹"
 name: Tidy
-description: Automatically formats and tidies code files (Go, JS, TypeScript) when code changes are pushed or on command
+description: Automatically formats and tidies code files (Go, JS, TypeScript) on schedule or command
 on:
   schedule:
     - cron: 'daily around 7:00'  # ~7 AM UTC
@@ -11,13 +11,6 @@ on:
     strategy: centralized
     events: [pull_request_comment]
   reaction: "eyes"
-  push:
-    branches: [main]
-    paths:
-      - '**/*.go'
-      - '**/*.js'
-      - '**/*.cjs'
-      - '**/*.ts'
 
 permissions:
   contents: read
@@ -29,13 +22,14 @@ concurrency:
   cancel-in-progress: true
 
 engine: copilot
-timeout-minutes: 10
+timeout-minutes: 20
 
 network:
   allowed: ["defaults", "go"]
 
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:
@@ -55,19 +49,24 @@ safe-outputs:
   missing-tool:
 steps:
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: "24"
       cache: npm
       cache-dependency-path: actions/setup/js/package-lock.json
   - name: Setup Go
-    uses: actions/setup-go@v6.5.0
+    uses: actions/setup-go@v7.0.0
     with:
       go-version-file: go.mod
       cache: true
   - name: Install development dependencies
     run: make deps-dev
 strict: true
+evals:
+  - id: tidy_completed
+    question: Did the agent run code formatting and tidying tools on the codebase?
+  - id: pr_created_or_noop
+    question: Was a pull request created with formatting and tidying fixes, or was noop used when no changes were needed?
 
 ---
 
@@ -93,6 +92,8 @@ Run `make fmt` to format all Go code according to the project standards.
 ### 2. Lint Code  
 Run `make lint` to check for linting issues across the entire codebase (Go and JavaScript).
 
+**Important — `golangci-lint` sandbox limitation**: `golangci-lint` is not preinstalled in this sandbox and network egress to fetch it is blocked by the firewall. If `make lint` (or `make golint`) reports `golangci-lint is not installed`, this is a known environment limitation — **do not** attempt to install it via `go install`, `curl`, or any other network call. Skip the `golangci-lint`-specific portion of linting and move on immediately; do not retry the install.
+
 ### 3. Fix Linting Issues
 If any linting issues are found, analyze and fix them:
 - Review the linting output carefully
@@ -109,10 +110,15 @@ After fixing issues:
 Run `make recompile` to recompile all agentic workflow files and ensure they are up to date.
 
 ### 6. Run Tests
-Run `make test` to ensure your changes don't break anything. If tests fail:
-- Analyze the test failures
-- Only fix test failures that are clearly related to your formatting/linting changes
-- Do not attempt to fix unrelated test failures
+Before running the full test suite, check if any changes were actually made so far:
+```bash
+git status --porcelain
+```
+- **If `git status --porcelain` shows no changes at all** (after steps 1-5): skip the test run entirely — there is nothing to validate and no risk of regression. Proceed directly to step 7/8 and report that everything is already tidy.
+- **Otherwise**: run `make test` to ensure your changes don't break anything. If tests fail:
+  - Analyze the test failures
+  - Only fix test failures that are clearly related to your formatting/linting changes
+  - Do not attempt to fix unrelated test failures
 
 ### 7. Exclude Workflow Files
 Before creating or updating a pull request, exclude any changes to files in `.github/workflows/`:

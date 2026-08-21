@@ -238,7 +238,8 @@ async function resolveProjectV2(projectInfo, projectNumberInt, github) {
     // Both direct query and fallback list query failed - this could be a transient API error
     const who = projectInfo.scope === "orgs" ? `org ${projectInfo.ownerLogin}` : `user ${projectInfo.ownerLogin}`;
     throw new Error(
-      `${ERR_NOT_FOUND}: Unable to resolve project #${projectNumberInt} for ${who}. Both direct projectV2 query and fallback projectsV2 list query failed. This may be a transient GitHub API error. Error: ${getErrorMessage(fallbackError)}`
+      `${ERR_NOT_FOUND}: Unable to resolve project #${projectNumberInt} for ${who}. Both direct projectV2 query and fallback projectsV2 list query failed. This may be a transient GitHub API error. Error: ${getErrorMessage(fallbackError)}`,
+      { cause: fallbackError }
     );
   }
 
@@ -325,6 +326,7 @@ function checkFieldTypeMismatch(fieldName, field, expectedDataType) {
  */
 async function findExistingDraftByTitle(github, projectId, targetTitle) {
   let hasNextPage = true;
+  /** @type {any} */
   let endCursor = null;
 
   while (hasNextPage) {
@@ -373,24 +375,28 @@ async function findExistingDraftByTitle(github, projectId, targetTitle) {
  */
 async function findExistingItemByContentId(github, projectId, contentId) {
   let hasNextPage = true;
+  /** @type {any} */
   let endCursor = null;
 
   while (hasNextPage) {
     const result = await github.graphql(
-      `query($projectId: ID!, $after: String) {
-        node(id: $projectId) {
-          ... on ProjectV2 {
-            items(first: 100, after: $after) {
+      `query($contentId: ID!, $after: String) {
+        node(id: $contentId) {
+          ... on Issue {
+            projectItems(first: 100, after: $after) {
               nodes {
-                id
-                content {
-                  ... on Issue {
-                    id
-                  }
-                  ... on PullRequest {
-                    id
-                  }
-                }
+                ...ProjectItemProject
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+          ... on PullRequest {
+            projectItems(first: 100, after: $after) {
+              nodes {
+                ...ProjectItemProject
               }
               pageInfo {
                 hasNextPage
@@ -399,20 +405,27 @@ async function findExistingItemByContentId(github, projectId, contentId) {
             }
           }
         }
+      }
+      fragment ProjectItemProject on ProjectV2Item {
+        id
+        project { id }
       }`,
-      { projectId, after: endCursor }
+      { contentId, after: endCursor }
     );
 
-    if (!result?.node?.items) {
-      core.warning(`Project ${projectId} not found or inaccessible; stopping item search.`);
+    if (!result?.node) {
+      core.warning(`Content ${contentId} not found or inaccessible; stopping project item search.`);
       break;
     }
 
-    const found = result.node.items.nodes.find(item => item.content?.id === contentId);
+    const projectItems = result.node.projectItems;
+    if (!projectItems) break;
+
+    const found = projectItems.nodes.find(item => item.project?.id === projectId);
     if (found) return found;
 
-    hasNextPage = result.node.items.pageInfo.hasNextPage;
-    endCursor = result.node.items.pageInfo.endCursor;
+    hasNextPage = projectItems.pageInfo.hasNextPage;
+    endCursor = projectItems.pageInfo.endCursor;
   }
 
   return null;
@@ -423,7 +436,7 @@ async function findExistingItemByContentId(github, projectId, contentId) {
  * @param {string} fieldName - Field name from YAML
  * @param {unknown} fieldValue - Field value from YAML
  * @param {RegExp} datePattern - Pattern to validate date values (YYYY-MM-DD)
- * @returns {"DATE" | "TEXT" | "SINGLE_SELECT"}
+ * @returns {"DATE" | "TEXT" | "NUMBER" | "SINGLE_SELECT"}
  */
 function inferFieldDataType(fieldName, fieldValue, datePattern) {
   const isDateField = fieldName.toLowerCase().includes("date");
@@ -436,7 +449,40 @@ function inferFieldDataType(fieldName, fieldValue, datePattern) {
   if (isTextField) {
     return "TEXT";
   }
+  if (typeof fieldValue === "number" && Number.isFinite(fieldValue)) {
+    return "NUMBER";
+  }
   return "SINGLE_SELECT";
+}
+
+/**
+ * Coerce an agent-supplied `fields` value to a plain object, or return null.
+ *
+ * Agents occasionally double-encode the value as a JSON string.  If that
+ * happens we parse it transparently.  Arrays, null, and other non-object
+ * types are rejected with a warning so that callers can skip field updates
+ * without silently iterating over character indices or array elements.
+ *
+ * @param {unknown} fields - Raw value from the agent output
+ * @returns {Record<string, unknown>|null} Plain object or null when unusable
+ */
+function resolveFieldsObject(fields) {
+  if (fields == null) return null;
+  if (typeof fields === "string") {
+    try {
+      fields = JSON.parse(fields);
+    } catch {
+      core.warning("update_project: `fields` was a string and could not be parsed as JSON; skipping field updates");
+      return null;
+    }
+    // JSON.parse of "null", "1", or a quoted string yields a non-object
+    if (fields == null) return null;
+  }
+  if (Array.isArray(fields) || typeof fields !== "object") {
+    core.warning("update_project: `fields` must be a JSON object; skipping field updates");
+    return null;
+  }
+  return Object.fromEntries(Object.entries(fields));
 }
 
 /**
@@ -465,13 +511,40 @@ async function applyFieldUpdates(github, projectId, itemId, fields) {
     const expectedDataType = inferFieldDataType(fieldName, fieldValue, datePattern);
     const isDateField = fieldName.toLowerCase().includes("date");
     const isTextField = expectedDataType === "TEXT";
+    const isNumberField = expectedDataType === "NUMBER";
 
     if (checkFieldTypeMismatch(fieldName, field, expectedDataType)) {
       continue;
     }
 
     if (!field) {
-      if (isDateField) {
+      if (isNumberField) {
+        try {
+          field = (
+            await github.graphql(
+              `mutation($projectId: ID!, $name: String!, $dataType: ProjectV2CustomFieldType!) {
+                createProjectV2Field(input: {
+                  projectId: $projectId,
+                  name: $name,
+                  dataType: $dataType
+                }) {
+                  projectV2Field {
+                    ... on ProjectV2Field {
+                      id
+                      name
+                      dataType
+                    }
+                  }
+                }
+              }`,
+              { projectId, name: normalizedFieldName, dataType: "NUMBER" }
+            )
+          ).createProjectV2Field.projectV2Field;
+        } catch (createError) {
+          core.warning(`Failed to create number field "${fieldName}": ${getErrorMessage(createError)}`);
+          continue;
+        }
+      } else if (isDateField) {
         if (typeof fieldValue === "string" && datePattern.test(fieldValue)) {
           try {
             field = (
@@ -576,7 +649,7 @@ async function applyFieldUpdates(github, projectId, itemId, fields) {
       valueToSet = { date: String(fieldValue) };
     } else if (field.dataType === "NUMBER") {
       const numValue = typeof fieldValue === "number" ? fieldValue : parseFloat(String(fieldValue));
-      if (isNaN(numValue)) {
+      if (Number.isNaN(numValue)) {
         core.warning(`Invalid number value "${fieldValue}" for field "${fieldName}"`);
         continue;
       }
@@ -632,6 +705,7 @@ async function applyFieldUpdates(github, projectId, itemId, fields) {
 async function fetchAllProjectFields(github, projectId) {
   const allFields = [];
   let hasNextPage = true;
+  /** @type {any} */
   let endCursor = null;
 
   while (hasNextPage) {
@@ -788,7 +862,8 @@ async function updateProject(output, temporaryIdMap = new Map(), githubClient = 
     // rather than attempting project resolution and falling back.
     if (viewerLogin === "github-actions[bot]") {
       throw new Error(
-        "GitHub Projects v2 operations require a PAT or GitHub App token with Projects access, but this run is authenticated as github-actions[bot] (default GITHUB_TOKEN). " +
+        `${ERR_CONFIG}: ` +
+          "GitHub Projects v2 operations require a PAT or GitHub App token with Projects access, but this run is authenticated as github-actions[bot] (default GITHUB_TOKEN). " +
           "Fix: set secrets.GH_AW_PROJECT_GITHUB_TOKEN (or configure safe-outputs.update-project.github-token) so the safe-outputs step uses that token for github-script."
       );
     }
@@ -1102,8 +1177,9 @@ async function updateProject(output, temporaryIdMap = new Map(), githubClient = 
         }
       }
 
-      if (output.fields && Object.keys(output.fields).length > 0) {
-        await applyFieldUpdates(github, projectId, itemId, output.fields);
+      const resolvedFields1 = resolveFieldsObject(output.fields);
+      if (resolvedFields1 && Object.keys(resolvedFields1).length > 0) {
+        await applyFieldUpdates(github, projectId, itemId, resolvedFields1);
       }
 
       core.setOutput("item-id", itemId);
@@ -1118,6 +1194,7 @@ async function updateProject(output, temporaryIdMap = new Map(), githubClient = 
       };
     }
 
+    /** @type {any} */
     let contentNumber = null;
     if (hasContentNumber || hasIssue || hasPullRequest) {
       const rawContentNumber = hasContentNumber ? output.content_number : hasIssue ? output.issue : output.pull_request;
@@ -1191,8 +1268,9 @@ async function updateProject(output, temporaryIdMap = new Map(), githubClient = 
         ).addProjectV2ItemById.item.id;
       }
 
-      if (output.fields && Object.keys(output.fields).length > 0) {
-        await applyFieldUpdates(github, projectId, itemId, output.fields);
+      const resolvedFields2 = resolveFieldsObject(output.fields);
+      if (resolvedFields2 && Object.keys(resolvedFields2).length > 0) {
+        await applyFieldUpdates(github, projectId, itemId, resolvedFields2);
       }
 
       core.setOutput("item-id", itemId);
@@ -1256,6 +1334,7 @@ async function main(config = {}, githubClient = null) {
 
   // Track state
   let processedCount = 0;
+  /** @type {any} */
   let firstProjectUrl = null;
   let viewsCreated = false;
   let fieldsCreated = false;

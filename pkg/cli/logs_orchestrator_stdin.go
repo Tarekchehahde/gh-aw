@@ -147,15 +147,17 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) e
 	}
 
 	// Download artifacts for all runs concurrently.
-	downloadResults := downloadRunArtifactsConcurrent(ctx, runs, opts.OutputDir, opts.Verbose, len(runs), opts.RepoOverride, artifactFilter)
+	downloadResults := downloadRunArtifactsConcurrent(ctx, runs, runArtifactsConcurrentOptions{outputDir: opts.OutputDir, verbose: opts.Verbose, maxRuns: len(runs), repoOverride: opts.RepoOverride, artifactFilter: artifactFilter, evalsOnly: opts.EvalsOnly, artifactSets: opts.ArtifactSets})
 
 	filters := runFilterOpts{
 		engine:            opts.Engine,
+		runtime:           opts.Runtime,
 		noStaged:          opts.NoStaged,
 		firewallOnly:      opts.FirewallOnly,
 		noFirewall:        opts.NoFirewall,
 		safeOutputType:    opts.SafeOutputType,
 		filteredIntegrity: opts.FilteredIntegrity,
+		evalsOnly:         opts.EvalsOnly,
 	}
 
 	// Process download results applying the same filters as DownloadWorkflowLogs.
@@ -173,11 +175,11 @@ func DownloadWorkflowLogsFromStdin(ctx context.Context, opts StdinLogsOptions) e
 			continue
 		}
 
-		if applyRunFilters(result, filters, opts.Verbose) {
+		if applyRunFilters(ctx, result, filters, opts.Verbose) {
 			continue
 		}
 
-		processedRun := buildProcessedRun(result, opts.Verbose, false)
+		processedRun := buildProcessedRun(ctx, result, opts.Verbose, false)
 
 		if opts.Parse {
 			awInfoPath := filepath.Join(result.LogsPath, "aw_info.json")

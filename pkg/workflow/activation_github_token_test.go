@@ -148,6 +148,34 @@ func TestActivationGitHubApp(t *testing.T) {
 		assert.Contains(t, stepsStr, "github-token: ${{ steps.activation-app-token.outputs.token }}", "Add-comment step should use app token")
 	})
 
+	t.Run("repositories_wildcard_omits_repositories_input_in_activation_mint_step", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name:       "Test Workflow",
+			AIReaction: "eyes",
+			ActivationGitHubApp: &GitHubAppConfig{
+				AppID:        "${{ vars.APP_ID }}",
+				PrivateKey:   "${{ secrets.APP_PRIVATE_KEY }}",
+				Repositories: []string{"*"},
+			},
+		}
+
+		job, err := compiler.buildActivationJob(workflowData, false, "", "test.lock.yml")
+		require.NoError(t, err, "buildActivationJob should succeed")
+		require.NotNil(t, job)
+
+		stepsStr := strings.Join(job.Steps, "")
+		mintIdx := strings.Index(stepsStr, "id: activation-app-token")
+		require.Greater(t, mintIdx, -1, "Token mint step should be present")
+
+		mintSection := stepsStr[mintIdx:]
+		nextStepIdx := strings.Index(mintSection[len("id: activation-app-token"):], "      - name:")
+		if nextStepIdx > -1 {
+			mintSection = mintSection[:nextStepIdx+len("id: activation-app-token")]
+		}
+
+		assert.NotContains(t, mintSection, "repositories:", "Activation mint step should omit repositories when repositories is [\"*\"]")
+	})
+
 	t.Run("missing_key_ignore_adds_guard_and_fallback_token", func(t *testing.T) {
 		statusComment := true
 		workflowData := &WorkflowData{
@@ -166,9 +194,12 @@ func TestActivationGitHubApp(t *testing.T) {
 		require.NotNil(t, job)
 
 		stepsStr := strings.Join(job.Steps, "")
-		assert.Contains(t, stepsStr, "if: ${{ secrets.GH_AW_APP_ID != '' && secrets.GH_AW_APP_PRIVATE_KEY != '' }}")
-		assert.NotContains(t, stepsStr, "GH_AW_APP_CLIENT_ID:")
-		assert.NotContains(t, stepsStr, "GH_AW_APP_PRIVATE_KEY:")
+		// Both credentials use secrets.* so ignore-if-missing should guard on
+		// step-local env aliases instead of secrets.* directly.
+		assert.NotContains(t, stepsStr, "if: ${{ secrets.")
+		assert.Contains(t, stepsStr, "GH_AW_IGNORE_IF_MISSING_APP_ID: ${{ secrets.GH_AW_APP_ID }}")
+		assert.Contains(t, stepsStr, "GH_AW_IGNORE_IF_MISSING_PRIVATE_KEY: ${{ secrets.GH_AW_APP_PRIVATE_KEY }}")
+		assert.Contains(t, stepsStr, "if: ${{ env.GH_AW_IGNORE_IF_MISSING_APP_ID != '' && env.GH_AW_IGNORE_IF_MISSING_PRIVATE_KEY != '' }}")
 		assert.Contains(t, stepsStr, "github-token: ${{ steps.activation-app-token.outputs.token || secrets.GITHUB_TOKEN }}")
 	})
 
@@ -456,4 +487,110 @@ Do something useful.
 		assert.Contains(t, lockStr, "client-id: ${{ vars.APP_ID }}", "Token mint step should use client-id")
 		assert.Contains(t, lockStr, "github-token: ${{ steps.activation-app-token.outputs.token }}", "Reaction step should use app token")
 	})
+
+	t.Run("multiline_oauth_check_uses_block_scalar_with_folded_input", func(t *testing.T) {
+		workflowContent := `---
+on:
+  workflow_dispatch:
+engine:
+  id: copilot
+  env:
+    COPILOT_GITHUB_TOKEN: >-
+      ${{ secrets.EXAMPLE_TOKEN_A != '' && secrets.EXAMPLE_TOKEN_A ||
+          secrets.EXAMPLE_TOKEN_B != '' && secrets.EXAMPLE_TOKEN_B ||
+          secrets.EXAMPLE_TOKEN_C }}
+---
+Do something useful.
+`
+		mdPath := filepath.Join(tmpDir, "multiline-folded-token-workflow.md")
+		err := os.WriteFile(mdPath, []byte(workflowContent), 0600)
+		require.NoError(t, err)
+
+		lockPath := filepath.Join(tmpDir, "multiline-folded-token-workflow.lock.yml")
+		err = compiler.CompileWorkflow(mdPath)
+		require.NoError(t, err, "Compilation should succeed")
+
+		lockContent, err := os.ReadFile(lockPath)
+		require.NoError(t, err)
+		lockStr := string(lockContent)
+
+		assert.Contains(t, lockStr, "      - name: Check for OAuth tokens\n", "OAuth token check step should be present")
+		assert.Contains(t, lockStr, "          COPILOT_GITHUB_TOKEN: |\n", "Multiline folded value should be emitted as a literal block scalar")
+		assert.Contains(t, lockStr, "            ${{ secrets.EXAMPLE_TOKEN_A != '' && secrets.EXAMPLE_TOKEN_A ||\n", "First expression line should be preserved")
+		assert.Contains(t, lockStr, "                secrets.EXAMPLE_TOKEN_B != '' && secrets.EXAMPLE_TOKEN_B ||\n", "Continuation indentation should be preserved")
+		assert.Contains(t, lockStr, "                secrets.EXAMPLE_TOKEN_C }}\n", "Final expression line should be preserved")
+	})
+
+	t.Run("multiline_oauth_check_uses_block_scalar_with_literal_input", func(t *testing.T) {
+		workflowContent := `---
+on:
+  workflow_dispatch:
+engine:
+  id: copilot
+  env:
+    COPILOT_GITHUB_TOKEN: |
+      ${{ secrets.EXAMPLE_TOKEN_A != '' && secrets.EXAMPLE_TOKEN_A ||
+      secrets.EXAMPLE_TOKEN_B != '' && secrets.EXAMPLE_TOKEN_B ||
+      secrets.EXAMPLE_TOKEN_C }}
+---
+Do something useful.
+`
+		mdPath := filepath.Join(tmpDir, "multiline-literal-token-workflow.md")
+		err := os.WriteFile(mdPath, []byte(workflowContent), 0600)
+		require.NoError(t, err)
+
+		lockPath := filepath.Join(tmpDir, "multiline-literal-token-workflow.lock.yml")
+		err = compiler.CompileWorkflow(mdPath)
+		require.NoError(t, err, "Compilation should succeed")
+
+		lockContent, err := os.ReadFile(lockPath)
+		require.NoError(t, err)
+		lockStr := string(lockContent)
+
+		assert.Contains(t, lockStr, "      - name: Check for OAuth tokens\n", "OAuth token check step should be present")
+		assert.Contains(t, lockStr, "          COPILOT_GITHUB_TOKEN: |\n", "Multiline literal value should be emitted as a literal block scalar")
+		assert.Contains(t, lockStr, "            ${{ secrets.EXAMPLE_TOKEN_A != '' && secrets.EXAMPLE_TOKEN_A ||\n", "First expression line should be preserved")
+		assert.Contains(t, lockStr, "            secrets.EXAMPLE_TOKEN_B != '' && secrets.EXAMPLE_TOKEN_B ||\n", "Literal continuation line should be preserved")
+		assert.Contains(t, lockStr, "            secrets.EXAMPLE_TOKEN_C }}\n", "Final literal expression line should be preserved")
+	})
+}
+
+// TestActivationOAuthTokenCheck_CopilotRequestsWrite verifies that when
+// permissions.copilot-requests is write (org-billed Copilot auth via
+// github.token), the compiled lock file does not reference
+// secrets.COPILOT_GITHUB_TOKEN anywhere, including in the "Check for OAuth
+// tokens" step and the gh-aw-manifest secrets array.
+func TestActivationOAuthTokenCheck_CopilotRequestsWrite(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "activation-oauth-copilot-requests-test")
+	compiler := NewCompiler()
+
+	workflowContent := `---
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  copilot-requests: write
+engine: copilot
+---
+Do something useful.
+`
+	mdPath := filepath.Join(tmpDir, "org-billing-workflow.md")
+	err := os.WriteFile(mdPath, []byte(workflowContent), 0600)
+	require.NoError(t, err)
+
+	lockPath := filepath.Join(tmpDir, "org-billing-workflow.lock.yml")
+	err = compiler.CompileWorkflow(mdPath)
+	require.NoError(t, err, "Compilation should succeed")
+
+	lockContent, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+	lockStr := string(lockContent)
+
+	assert.Contains(t, lockStr, "      - name: Check for OAuth tokens\n", "OAuth token check step should still be present")
+	assert.NotContains(t, lockStr, "secrets.COPILOT_GITHUB_TOKEN", "secrets.COPILOT_GITHUB_TOKEN should not appear anywhere in the lock file when copilot-requests: write is set")
+
+	manifest, err := ExtractGHAWManifestFromLockFile(lockStr)
+	require.NoError(t, err)
+	require.NotNil(t, manifest)
+	assert.NotContains(t, manifest.Secrets, "COPILOT_GITHUB_TOKEN", "gh-aw-manifest secrets should not include COPILOT_GITHUB_TOKEN when copilot-requests: write is set")
 }

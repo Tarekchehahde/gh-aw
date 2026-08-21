@@ -22,6 +22,35 @@ var oidcVaultActions = []string{
 	"cyberark/conjur-action",                // CyberArk Conjur
 }
 
+// checkoutActions is the list of GitHub Actions that require contents: read to
+// clone or fetch repository contents. When a user-provided safe-output step uses
+// one of these actions, the compiled safe_outputs job must include contents: read
+// so the checkout succeeds in private repositories.
+var checkoutActions = []string{
+	"actions/checkout",
+}
+
+// stepsRequireContentsRead returns true if any of the provided steps use an action
+// that needs to read repository contents (e.g. actions/checkout).
+func stepsRequireContentsRead(steps []any) bool {
+	for _, step := range steps {
+		stepMap, ok := step.(map[string]any)
+		if !ok {
+			continue
+		}
+		uses, ok := stepMap["uses"].(string)
+		if !ok || uses == "" {
+			continue
+		}
+		// Strip the @version suffix before matching
+		actionRef, _, _ := strings.Cut(uses, "@")
+		if slices.Contains(checkoutActions, actionRef) {
+			return true
+		}
+	}
+	return false
+}
+
 // stepsRequireIDToken returns true if any of the provided steps use a known
 // OIDC/secret-vault action that requires the id-token: write permission.
 func stepsRequireIDToken(steps []any) bool {
@@ -77,6 +106,10 @@ func getCheckBranchProtection(config *PushToPullRequestBranchConfig) bool {
 // Handlers that are staged (globally or per-handler) are skipped because
 // staged mode only emits preview output and does not make any API calls.
 func ComputePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig) *Permissions {
+	return computePermissionsForSafeOutputs(safeOutputs, false)
+}
+
+func computePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig, excludePerHandlerApps bool) *Permissions {
 	if safeOutputs == nil {
 		safeOutputsPermissionsLog.Print("No safe outputs configured, returning empty permissions")
 		return NewPermissions()
@@ -88,6 +121,9 @@ func ComputePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig) *Permissio
 		if handler.PermissionBuilder == nil {
 			continue
 		}
+		if excludePerHandlerApps && handler.StructField != "" && getHandlerGitHubApp(safeOutputs, handler.StructField) != nil {
+			continue
+		}
 		handlerPermissions := handler.PermissionBuilder(safeOutputs)
 		if handlerPermissions == nil {
 			continue
@@ -96,6 +132,10 @@ func ComputePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig) *Permissio
 			safeOutputsPermissionsLog.Printf("Adding permissions for %s", handler.Key)
 		}
 		permissions.Merge(handlerPermissions)
+	}
+
+	if dispatchRepositoryPermissions := computeDispatchRepositoryPermissions(safeOutputs, excludePerHandlerApps); dispatchRepositoryPermissions != nil {
+		permissions.Merge(dispatchRepositoryPermissions)
 	}
 
 	// NoOp and MissingTool don't require write permissions beyond what's already included
@@ -114,6 +154,18 @@ func ComputePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig) *Permissio
 		permissions.Set(PermissionIdToken, PermissionWrite)
 	}
 
+	// Auto-detect checkout actions in user-provided steps and add contents: read.
+	// Without this, private-repository checkouts in safe-output steps would fail
+	// because the safe_outputs job would not include a contents permission.
+	// Only add contents: read when no contents permission is already present; a
+	// handler-derived contents: write must not be downgraded to read.
+	if stepsRequireContentsRead(safeOutputs.Steps) {
+		if _, exists := permissions.Get(PermissionContents); !exists {
+			safeOutputsPermissionsLog.Print("Auto-detected checkout action in steps; adding contents: read")
+			permissions.Set(PermissionContents, PermissionRead)
+		}
+	}
+
 	// If safeOutputs is configured but no permissions were accumulated (all handlers staged),
 	// return explicit empty permissions so the compiled safe_outputs job renders
 	// "permissions: {}" rather than omitting the block and inheriting workflow-level permissions.
@@ -124,6 +176,30 @@ func ComputePermissionsForSafeOutputs(safeOutputs *SafeOutputsConfig) *Permissio
 	}
 
 	safeOutputsPermissionsLog.Printf("Computed permissions with %d scopes", len(permissions.permissions))
+	return permissions
+}
+
+func computeDispatchRepositoryPermissions(safeOutputs *SafeOutputsConfig, excludePerToolApps bool) *Permissions {
+	if safeOutputs == nil || safeOutputs.DispatchRepository == nil || len(safeOutputs.DispatchRepository.Tools) == 0 {
+		return nil
+	}
+
+	var permissions *Permissions
+	globalStaged := templatableBoolIsTrue(safeOutputs.Staged)
+	for _, tool := range safeOutputs.DispatchRepository.Tools {
+		if tool == nil || isHandlerStaged(globalStaged, tool.Staged) {
+			continue
+		}
+		if excludePerToolApps && tool.GitHubApp != nil {
+			continue
+		}
+		if permissions == nil {
+			permissions = NewPermissionsContentsWrite()
+			continue
+		}
+		permissions.Merge(NewPermissionsContentsWrite())
+	}
+
 	return permissions
 }
 

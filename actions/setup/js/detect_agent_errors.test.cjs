@@ -3,12 +3,25 @@ import { describe, it, expect } from "vitest";
 const {
   detectErrors,
   isCAPIQuotaExceededError,
+  isInvocationCapExceededError,
+  isMaxCacheMissesExceededError,
+  isAgenticEngineTimeout,
+  isStepTimeout,
   INFERENCE_ACCESS_ERROR_PATTERN,
   MCP_POLICY_BLOCKED_PATTERN,
   AGENTIC_ENGINE_TIMEOUT_PATTERN,
+  WATCHDOG_SIGTERM_PATTERN,
+  STEP_TIMEOUT_SIGTERM_PATTERN,
   MODEL_NOT_SUPPORTED_PATTERN,
   HTTP_400_RESPONSE_ERROR_PATTERN,
   CAPI_QUOTA_EXCEEDED_PATTERN,
+  INVOCATION_CAP_EXCEEDED_PATTERN,
+  MAX_CACHE_MISSES_EXCEEDED_PATTERN,
+  MISSING_MODEL_PRICING_PATTERN,
+  SHELL_EXPANSION_GUARD_REJECTED_PATTERN,
+  isShellExpansionGuardRejectedError,
+  extractMissingModelPricingModelName,
+  buildOutputLines,
 } = require("./detect_agent_errors.cjs");
 
 describe("detect_agent_errors.cjs", () => {
@@ -128,6 +141,17 @@ describe("detect_agent_errors.cjs", () => {
       expect(MODEL_NOT_SUPPORTED_PATTERN.test("model 'claude-3-5-sonnet@20241022' not found")).toBe(true);
     });
 
+    it("matches the Copilot SDK driver policy-enablement error", () => {
+      const errorOutput = "[copilot-sdk-driver] [sdk-driver] error: Execution failed: Error: No model available. Check policy enablement under GitHub Settings > Copilot";
+      expect(MODEL_NOT_SUPPORTED_PATTERN.test(errorOutput)).toBe(true);
+    });
+
+    it("does not match 'No model available' without the policy-enablement hint", () => {
+      expect(MODEL_NOT_SUPPORTED_PATTERN.test("No model available. Retrying shortly.")).toBe(false);
+      expect(MODEL_NOT_SUPPORTED_PATTERN.test("No model available\nCheck policy enablement under GitHub Settings > Copilot")).toBe(false);
+      expect(MODEL_NOT_SUPPORTED_PATTERN.test("warning: no model available yet, waiting")).toBe(false);
+    });
+
     it("matches AIC api-proxy 404 standalone 'Model not found' shape", () => {
       expect(MODEL_NOT_SUPPORTED_PATTERN.test("404 Not Found: Model not found")).toBe(true);
       expect(MODEL_NOT_SUPPORTED_PATTERN.test("ResponseError: 404 Not Found: Model not found")).toBe(true);
@@ -191,6 +215,59 @@ describe("detect_agent_errors.cjs", () => {
       expect(isCAPIQuotaExceededError("MCP servers were blocked by policy: 'github'")).toBe(false);
       expect(isCAPIQuotaExceededError("")).toBe(false);
     });
+
+    it("CAPI_QUOTA_EXCEEDED_PATTERN does not match the invocation cap error (different 429 subtype)", () => {
+      // "Maximum LLM invocations exceeded" is a distinct error from quota/rate-limit —
+      // it should NOT match the CAPI quota pattern.
+      expect(isCAPIQuotaExceededError("CAPIError: 429 Maximum LLM invocations exceeded (25/25)")).toBe(false);
+    });
+
+    it("matches the Copilot CLI's own retry-exhaustion message with no CAPIError: prefix (429)", () => {
+      const message = "Failed to get response from the AI model; retried 5 times (total retry wait time: 380.35 seconds) " + "(Request-ID AC21:F5CEC:33A719:40DD88:6A83AA27) Last error: 429 Too Many Requests";
+      expect(isCAPIQuotaExceededError(message)).toBe(true);
+    });
+
+    it("matches the Copilot CLI's own retry-exhaustion message for 5xx statuses (503)", () => {
+      const message = "Failed to get response from the AI model; retried 5 times (total retry wait time: 300 seconds) Last error: 503 Service Unavailable";
+      expect(isCAPIQuotaExceededError(message)).toBe(true);
+    });
+
+    it("does not match a 'Failed to get response' message without retry-exhaustion context", () => {
+      expect(isCAPIQuotaExceededError("Failed to get response from the AI model due to a network error")).toBe(false);
+    });
+  });
+
+  describe("INVOCATION_CAP_EXCEEDED_PATTERN / isInvocationCapExceededError", () => {
+    it("matches the CAPI form: CAPIError 429 Maximum LLM invocations exceeded", () => {
+      expect(INVOCATION_CAP_EXCEEDED_PATTERN.test("CAPIError: 429 Maximum LLM invocations exceeded (25/25)")).toBe(true);
+      expect(isInvocationCapExceededError("CAPIError: 429 Maximum LLM invocations exceeded (25/25)")).toBe(true);
+    });
+
+    it("matches when embedded in larger log output", () => {
+      const log = "Some agent output\nExecution failed: CAPIError: 429 Maximum LLM invocations exceeded (20/20)\nMore output";
+      expect(isInvocationCapExceededError(log)).toBe(true);
+    });
+
+    it("matches the Anthropic JSON error type field", () => {
+      const output = '{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20).","invocation_count":20,"max_runs":20}}';
+      expect(INVOCATION_CAP_EXCEEDED_PATTERN.test(output)).toBe(true);
+      expect(isInvocationCapExceededError(output)).toBe(true);
+    });
+
+    it("matches the human-readable Anthropic message form", () => {
+      expect(isInvocationCapExceededError("Failed to authenticate. API Error: 403 Maximum LLM invocations exceeded (20 / 20).")).toBe(true);
+    });
+
+    it("matches case-insensitively for the human-readable form", () => {
+      expect(isInvocationCapExceededError("maximum llm invocations exceeded (25/25)")).toBe(true);
+    });
+
+    it("does not match unrelated errors", () => {
+      expect(isInvocationCapExceededError("CAPIError: 429 429 quota exceeded")).toBe(false);
+      expect(isInvocationCapExceededError("CAPIError: Too Many Requests")).toBe(false);
+      expect(isInvocationCapExceededError("Access denied by policy settings")).toBe(false);
+      expect(isInvocationCapExceededError("")).toBe(false);
+    });
   });
 
   describe("HTTP_400_RESPONSE_ERROR_PATTERN", () => {
@@ -229,6 +306,41 @@ describe("detect_agent_errors.cjs", () => {
     });
   });
 
+  describe("MISSING_MODEL_PRICING_PATTERN / extractMissingModelPricingModelName", () => {
+    it("matches the exact error from issue #48344 with claude-opus-5", () => {
+      const msg = 'Model "claude-opus-5" has no AI credits pricing and no default pricing is configured.';
+      expect(MISSING_MODEL_PRICING_PATTERN.test(msg)).toBe(true);
+    });
+
+    it("matches case-insensitively", () => {
+      expect(MISSING_MODEL_PRICING_PATTERN.test('model "some-model" HAS NO AI CREDITS PRICING')).toBe(true);
+    });
+
+    it("matches when embedded in a larger log line", () => {
+      const log = 'some prior output\nError: 400 Model "gpt-4.1" has no AI credits pricing and no default pricing is configured.\nmore output';
+      expect(MISSING_MODEL_PRICING_PATTERN.test(log)).toBe(true);
+    });
+
+    it("does not match unrelated pricing messages", () => {
+      expect(MISSING_MODEL_PRICING_PATTERN.test("AI credits pricing updated for model")).toBe(false);
+      expect(MISSING_MODEL_PRICING_PATTERN.test("no default pricing is configured")).toBe(false);
+    });
+
+    it("extractMissingModelPricingModelName returns model name from matching log", () => {
+      const log = 'Error: 400 Model "claude-opus-5" has no AI credits pricing and no default pricing is configured.';
+      expect(extractMissingModelPricingModelName(log)).toBe("claude-opus-5");
+    });
+
+    it("extractMissingModelPricingModelName returns empty string for non-matching log", () => {
+      expect(extractMissingModelPricingModelName("Some unrelated error")).toBe("");
+    });
+
+    it("extractMissingModelPricingModelName handles model names with dots", () => {
+      const log = 'Model "gpt-4.1-mini" has no AI credits pricing';
+      expect(extractMissingModelPricingModelName(log)).toBe("gpt-4.1-mini");
+    });
+  });
+
   describe("detectErrors", () => {
     it("returns all false for empty log", () => {
       const result = detectErrors("");
@@ -238,6 +350,11 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+      expect(result.maxCacheMissesExceeded).toBe(false);
+      expect(result.missingModelPricingError).toBe(false);
+      expect(result.missingModelPricingModelName).toBe("");
+      expect(result.shellExpansionGuardRejected).toBe(false);
     });
 
     it("detects inference access error only", () => {
@@ -248,6 +365,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects MCP policy error only", () => {
@@ -258,6 +376,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects engine timeout only", () => {
@@ -268,6 +387,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects model not supported error only", () => {
@@ -278,6 +398,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(true);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects invalid model name errors", () => {
@@ -288,6 +409,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(true);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects CAPI quota exceeded error only", () => {
@@ -298,6 +420,54 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(true);
+      expect(result.invocationCapExceeded).toBe(false);
+    });
+
+    it("detects invocation cap exceeded error only (CAPI form)", () => {
+      const result = detectErrors("Execution failed: CAPIError: 429 Maximum LLM invocations exceeded (25/25)");
+      expect(result.inferenceAccessError).toBe(false);
+      expect(result.mcpPolicyError).toBe(false);
+      expect(result.agenticEngineTimeout).toBe(false);
+      expect(result.modelNotSupportedError).toBe(false);
+      expect(result.http400ResponseError).toBe(false);
+      expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(true);
+    });
+
+    it("detects invocation cap exceeded error only (Anthropic JSON form)", () => {
+      const result = detectErrors('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20).","invocation_count":20,"max_runs":20}}');
+      expect(result.inferenceAccessError).toBe(false);
+      expect(result.mcpPolicyError).toBe(false);
+      expect(result.agenticEngineTimeout).toBe(false);
+      expect(result.modelNotSupportedError).toBe(false);
+      expect(result.http400ResponseError).toBe(false);
+      expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(true);
+    });
+
+    it("detects shell expansion guard rejection only (issue github/gh-aw#52254 payload shape)", () => {
+      const log = [
+        "[copilot-harness] attempt 1: shell(safeoutputs create_discussion --title 'MCP toolset unavailable' --body \"...\\n...\")",
+        "Command rejected: shell command contains dangerous patterns (command substitution, indirect expansion, or nested command substitution) that could enable arbitrary code execution. Please rewrite the command without these expansion patterns.",
+        "[copilot-harness] attempt 2: retrying identical command",
+        "Command rejected: shell command contains dangerous patterns (command substitution, indirect expansion, or nested command substitution) that could enable arbitrary code execution. Please rewrite the command without these expansion patterns.",
+        "##[error]The action 'Execute GitHub Copilot CLI' has timed out after 5 minutes.",
+      ].join("\n");
+      const result = detectErrors(log);
+      expect(result.inferenceAccessError).toBe(false);
+      expect(result.mcpPolicyError).toBe(false);
+      expect(result.modelNotSupportedError).toBe(false);
+      expect(result.http400ResponseError).toBe(false);
+      expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+      expect(result.agenticEngineTimeout).toBe(false);
+      expect(result.shellExpansionGuardRejected).toBe(true);
+    });
+
+    it("detects both capi quota and invocation-cap flags when both signatures are present", () => {
+      const result = detectErrors("CAPIError: Too Many Requests\nCAPIError: 429 Maximum LLM invocations exceeded (25/25)");
+      expect(result.capiQuotaExceededError).toBe(true);
+      expect(result.invocationCapExceeded).toBe(true);
     });
 
     it("detects HTTP 400 response error only", () => {
@@ -308,6 +478,8 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(true);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+      expect(result.missingModelPricingError).toBe(false);
     });
 
     it("detects both errors in the same log", () => {
@@ -319,6 +491,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects timeout alongside other errors", () => {
@@ -330,6 +503,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects SDK session.idle timeout", () => {
@@ -340,6 +514,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("detects SDK session.idle timeout alongside other errors", () => {
@@ -351,6 +526,7 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
     });
 
     it("returns false for unrelated log content", () => {
@@ -361,6 +537,406 @@ describe("detect_agent_errors.cjs", () => {
       expect(result.modelNotSupportedError).toBe(false);
       expect(result.http400ResponseError).toBe(false);
       expect(result.capiQuotaExceededError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+      expect(result.maxCacheMissesExceeded).toBe(false);
+      expect(result.missingModelPricingError).toBe(false);
+    });
+
+    it("detects missing model pricing error from agent-stdio.log message", () => {
+      const log = 'Error: 400 Model "claude-opus-5" has no AI credits pricing and no default pricing is configured. Set apiProxy.defaultAiCreditsPricing in the AWF config.';
+      const result = detectErrors(log);
+      expect(result.missingModelPricingError).toBe(true);
+      expect(result.missingModelPricingModelName).toBe("claude-opus-5");
+      expect(result.http400ResponseError).toBe(false);
+    });
+
+    it("detects missing model pricing with model name containing dots", () => {
+      const log = 'Model "gpt-4.1-mini" has no AI credits pricing';
+      const result = detectErrors(log);
+      expect(result.missingModelPricingError).toBe(true);
+      expect(result.missingModelPricingModelName).toBe("gpt-4.1-mini");
+    });
+
+    it("normalizes multiline model names to a single line", () => {
+      const log = `Model "claude-opus-5
+commentary" has no AI credits pricing`;
+      const result = detectErrors(log);
+      expect(result.missingModelPricingError).toBe(true);
+      expect(result.missingModelPricingModelName).toBe("claude-opus-5 commentary");
+    });
+
+    it("does not false-positive on unrelated AI credits error messages", () => {
+      const result = detectErrors("Maximum AI credits exceeded for this run");
+      expect(result.missingModelPricingError).toBe(false);
+      expect(result.missingModelPricingModelName).toBe("");
+    });
+
+    it("does not report engine timeout when post-result watchdog fired SIGTERM (watchdogFired=true)", () => {
+      // Mirrors the actual failing run: watchdog terminated idle process, not a step timeout
+      const log = [
+        "[copilot-harness] attempt 1: post-result watchdog terminating idle process after 20736ms (SIGTERM)",
+        "[copilot-harness] attempt 1: process exit event exitCode=1 signal=SIGTERM",
+        "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=12m 38s stdout=0B stderr=431678B hasOutput=true watchdogFired=true",
+        "[copilot-harness] attempt 1 failed: exitCode=1 failureClass=authentication_failed",
+      ].join("\n");
+      const result = detectErrors(log);
+      expect(result.agenticEngineTimeout).toBe(false);
+    });
+
+    it("reports engine timeout when SIGTERM is from step timeout (watchdogFired=false)", () => {
+      const log = [
+        "[copilot-harness] attempt 1: process exit event exitCode=1 signal=SIGTERM",
+        "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 0s stdout=1234B stderr=567B hasOutput=true watchdogFired=false",
+      ].join("\n");
+      const result = detectErrors(log);
+      expect(result.agenticEngineTimeout).toBe(true);
+    });
+
+    it("reports engine timeout when SIGTERM is from step timeout (no watchdogFired field)", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 12s stdout=1234B stderr=567B hasOutput=true";
+      const result = detectErrors(log);
+      expect(result.agenticEngineTimeout).toBe(true);
+    });
+
+    it("reports engine timeout when both watchdog and step-timeout SIGTERMs are present", () => {
+      const log = [
+        "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=10m 0s hasOutput=true watchdogFired=true",
+        "[copilot-harness] attempt 2: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true watchdogFired=false",
+      ].join("\n");
+      const result = detectErrors(log);
+      expect(result.agenticEngineTimeout).toBe(true);
+    });
+
+    it("detects max cache misses exceeded (JSON error type form)", () => {
+      const result = detectErrors('{"error":{"type":"max_cache_misses_exceeded","message":"Maximum consecutive cache misses exceeded (6 / 5).","consecutive_cache_misses":6,"max_cache_misses":5}}');
+      expect(result.maxCacheMissesExceeded).toBe(true);
+      expect(result.inferenceAccessError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+    });
+
+    it("detects max cache misses exceeded (human-readable message form)", () => {
+      const result = detectErrors("Maximum consecutive cache misses exceeded");
+      expect(result.maxCacheMissesExceeded).toBe(true);
+      expect(result.inferenceAccessError).toBe(false);
+      expect(result.invocationCapExceeded).toBe(false);
+    });
+
+    it("detects max cache misses exceeded in a production log line", () => {
+      const log = '2026-07-30T06:14:50.000Z [ERROR] Error in API request: 403 {"error":{"type":"max_cache_misses_exceeded","message":"Maximum consecutive cache misses exceeded (6 / 5).","consecutive_cache_misses":6,"max_cache_misses":5}}';
+      const result = detectErrors(log);
+      expect(result.maxCacheMissesExceeded).toBe(true);
+    });
+
+    it("does not false-positive on unrelated cache miss content", () => {
+      const result = detectErrors("Cache miss for key: model-output-xyz");
+      expect(result.maxCacheMissesExceeded).toBe(false);
+    });
+  });
+
+  describe("MAX_CACHE_MISSES_EXCEEDED_PATTERN", () => {
+    it("matches max_cache_misses_exceeded error type", () => {
+      expect(MAX_CACHE_MISSES_EXCEEDED_PATTERN.test('{"type":"max_cache_misses_exceeded"}')).toBe(true);
+    });
+
+    it("matches Maximum consecutive cache misses exceeded message", () => {
+      expect(MAX_CACHE_MISSES_EXCEEDED_PATTERN.test("Maximum consecutive cache misses exceeded")).toBe(true);
+    });
+
+    it("is case-insensitive", () => {
+      expect(MAX_CACHE_MISSES_EXCEEDED_PATTERN.test("MAXIMUM CONSECUTIVE CACHE MISSES EXCEEDED")).toBe(true);
+    });
+
+    it("does not match unrelated cache miss content", () => {
+      expect(MAX_CACHE_MISSES_EXCEEDED_PATTERN.test("Cache miss for key: output")).toBe(false);
+    });
+  });
+
+  describe("isMaxCacheMissesExceededError", () => {
+    it("returns false for empty input", () => {
+      expect(isMaxCacheMissesExceededError("")).toBe(false);
+    });
+
+    it("detects max_cache_misses_exceeded JSON error type", () => {
+      expect(isMaxCacheMissesExceededError('{"error":{"type":"max_cache_misses_exceeded"}}')).toBe(true);
+    });
+
+    it("detects human-readable message form", () => {
+      expect(isMaxCacheMissesExceededError("Maximum consecutive cache misses exceeded")).toBe(true);
+    });
+
+    it("returns false for unrelated content", () => {
+      expect(isMaxCacheMissesExceededError("Some unrelated error message")).toBe(false);
+    });
+  });
+
+  describe("SHELL_EXPANSION_GUARD_REJECTED_PATTERN / isShellExpansionGuardRejectedError", () => {
+    // Exact payload shape from the issue report (github/gh-aw#52254): the sandbox's shell
+    // command-injection guard rejected a benign multi-line `printf` call to `safeoutputs
+    // create_discussion` for containing bash expansion patterns.
+    const ISSUE_REJECTION_MESSAGE =
+      "Command rejected: shell command contains dangerous patterns (command substitution, " +
+      "indirect expansion, or nested command substitution) that could enable arbitrary code " +
+      "execution. Please rewrite the command without these expansion patterns.";
+
+    it("matches the exact rejection message from the issue report", () => {
+      expect(SHELL_EXPANSION_GUARD_REJECTED_PATTERN.test(ISSUE_REJECTION_MESSAGE)).toBe(true);
+      expect(isShellExpansionGuardRejectedError(ISSUE_REJECTION_MESSAGE)).toBe(true);
+    });
+
+    it("matches when embedded in larger multi-line log output", () => {
+      const log = [
+        "[copilot-harness] attempt 1: invoking shell(safeoutputs create_discussion --title ... --body ...)",
+        ISSUE_REJECTION_MESSAGE,
+        "[copilot-harness] attempt 2: retrying identical command",
+        ISSUE_REJECTION_MESSAGE,
+        "##[error]The action 'Execute GitHub Copilot CLI' has timed out after 5 minutes.",
+      ].join("\n");
+      expect(isShellExpansionGuardRejectedError(log)).toBe(true);
+    });
+
+    it("is case-insensitive", () => {
+      expect(SHELL_EXPANSION_GUARD_REJECTED_PATTERN.test(ISSUE_REJECTION_MESSAGE.toUpperCase())).toBe(true);
+    });
+
+    it("matches when the two anchor phrases are split across a line break", () => {
+      const wrapped = "Command rejected: ...that could enable arbitrary code execution.\nPlease rewrite the command without these expansion patterns.";
+      expect(isShellExpansionGuardRejectedError(wrapped)).toBe(true);
+    });
+
+    it("does not match unrelated shell errors", () => {
+      expect(isShellExpansionGuardRejectedError("bash: safeoutputs: command not found")).toBe(false);
+      expect(isShellExpansionGuardRejectedError("permission denied by workflow tool permissions")).toBe(false);
+      expect(isShellExpansionGuardRejectedError("")).toBe(false);
+    });
+
+    it("does not match arbitrary code execution mentions without the rewrite guidance", () => {
+      expect(isShellExpansionGuardRejectedError("This could enable arbitrary code execution if left unchecked.")).toBe(false);
+    });
+  });
+
+  describe("WATCHDOG_SIGTERM_PATTERN", () => {
+    it("matches a process closed line with SIGTERM and watchdogFired=true", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=12m 38s hasOutput=true watchdogFired=true";
+      expect(WATCHDOG_SIGTERM_PATTERN.test(log)).toBe(true);
+    });
+
+    it("does not match a process closed line with SIGTERM and watchdogFired=false", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true watchdogFired=false";
+      expect(WATCHDOG_SIGTERM_PATTERN.test(log)).toBe(false);
+    });
+
+    it("does not match a process closed line with SIGTERM and no watchdogFired field", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true";
+      expect(WATCHDOG_SIGTERM_PATTERN.test(log)).toBe(false);
+    });
+
+    it("does not match a process exit event line (not process closed)", () => {
+      const log = "[copilot-harness] attempt 1: process exit event exitCode=1 signal=SIGTERM";
+      expect(WATCHDOG_SIGTERM_PATTERN.test(log)).toBe(false);
+    });
+  });
+
+  describe("STEP_TIMEOUT_SIGTERM_PATTERN", () => {
+    it("matches a process closed line with SIGTERM and no watchdogFired field", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 12s hasOutput=true";
+      expect(STEP_TIMEOUT_SIGTERM_PATTERN.test(log)).toBe(true);
+    });
+
+    it("matches a process closed line with SIGTERM and watchdogFired=false", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true watchdogFired=false";
+      expect(STEP_TIMEOUT_SIGTERM_PATTERN.test(log)).toBe(true);
+    });
+
+    it("does not match a process closed line with SIGTERM and watchdogFired=true", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=12m 38s hasOutput=true watchdogFired=true";
+      expect(STEP_TIMEOUT_SIGTERM_PATTERN.test(log)).toBe(false);
+    });
+  });
+
+  describe("isAgenticEngineTimeout", () => {
+    it("returns true for SDK session.idle timeout", () => {
+      expect(isAgenticEngineTimeout("[sdk-driver] error: Timeout after 870000ms waiting for session.idle")).toBe(true);
+    });
+
+    it("returns true for step-timeout SIGTERM (no watchdogFired field)", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 12s hasOutput=true";
+      expect(isAgenticEngineTimeout(log)).toBe(true);
+    });
+
+    it("returns true for step-timeout SIGTERM (watchdogFired=false)", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true watchdogFired=false";
+      expect(isAgenticEngineTimeout(log)).toBe(true);
+    });
+
+    it("returns false for SIGTERM in a non-process-closed context", () => {
+      expect(isAgenticEngineTimeout("Claude CLI terminated with signal=SIGTERM after timeout")).toBe(false);
+    });
+
+    it("returns true for SIGKILL", () => {
+      const log = "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGKILL duration=20m 0s hasOutput=true";
+      expect(isAgenticEngineTimeout(log)).toBe(true);
+    });
+
+    it("returns false for post-result watchdog SIGTERM (watchdogFired=true)", () => {
+      // Mirrors the actual failing run: watchdog terminated idle process after authentication failure
+      const log = [
+        "[copilot-harness] attempt 1: post-result watchdog terminating idle process after 20736ms (SIGTERM)",
+        "[copilot-harness] attempt 1: process exit event exitCode=1 signal=SIGTERM",
+        "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=12m 38s stdout=0B stderr=431678B hasOutput=true watchdogFired=true",
+        "[copilot-harness] attempt 1 failed: exitCode=1 failureClass=authentication_failed",
+      ].join("\n");
+      expect(isAgenticEngineTimeout(log)).toBe(false);
+    });
+
+    it("returns true when both a watchdog SIGTERM and a step-timeout SIGTERM are present", () => {
+      // If there's a watchdog AND a non-watchdog "process closed" SIGTERM, it's still a timeout
+      const log = [
+        "[copilot-harness] attempt 1: process closed exitCode=1 signal=SIGTERM duration=10m 0s hasOutput=true watchdogFired=true",
+        "[copilot-harness] attempt 2: process closed exitCode=1 signal=SIGTERM duration=20m 0s hasOutput=true watchdogFired=false",
+      ].join("\n");
+      expect(isAgenticEngineTimeout(log)).toBe(true);
+    });
+
+    it("returns false for empty log", () => {
+      expect(isAgenticEngineTimeout("")).toBe(false);
+    });
+
+    it("returns false for unrelated content", () => {
+      expect(isAgenticEngineTimeout("CAPIError: 400 Bad Request")).toBe(false);
+      expect(isAgenticEngineTimeout("MCP server timeout")).toBe(false);
+    });
+  });
+
+  describe("isStepTimeout", () => {
+    const timeoutMinutes = "15";
+    const startMs = 1_000_000;
+
+    it("detects a step killed after reaching its timeout-minutes budget", () => {
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes, startMs, nowMs: startMs + 15 * 60_000 })).toBe(true);
+    });
+
+    it("tolerates the small delay between step start and the start timestamp write", () => {
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes, startMs, nowMs: startMs + 15 * 60_000 - 10_000 })).toBe(true);
+    });
+
+    it("returns false when the engine failed well before the timeout budget", () => {
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes, startMs, nowMs: startMs + 5 * 60_000 })).toBe(false);
+    });
+
+    it("returns false when the engine step succeeded", () => {
+      expect(isStepTimeout({ outcome: "success", timeoutMinutes, startMs, nowMs: startMs + 20 * 60_000 })).toBe(false);
+    });
+
+    it("returns false when the outcome, timeout or start timestamp is unavailable", () => {
+      expect(isStepTimeout({ outcome: "", timeoutMinutes, startMs, nowMs: startMs + 20 * 60_000 })).toBe(false);
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes: "", startMs, nowMs: startMs + 20 * 60_000 })).toBe(false);
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes: "${{ inputs.timeout }}", startMs, nowMs: startMs + 20 * 60_000 })).toBe(false);
+      expect(isStepTimeout({ outcome: "failure", timeoutMinutes, startMs: NaN, nowMs: startMs + 20 * 60_000 })).toBe(false);
+    });
+  });
+
+  describe("buildOutputLines", () => {
+    it("suppresses generic capi_quota_exceeded_error when invocation cap is present", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: true,
+        invocationCapExceeded: true,
+      });
+
+      expect(lines).toContain("capi_quota_exceeded_error=false");
+      expect(lines).toContain("invocation_cap_exceeded=true");
+    });
+
+    it("emits missing_model_pricing_error and missing_model_pricing_model_name outputs", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: false,
+        invocationCapExceeded: false,
+        maxCacheMissesExceeded: false,
+        missingModelPricingError: true,
+        missingModelPricingModelName: "claude-opus-5",
+      });
+
+      expect(lines).toContain("missing_model_pricing_error=true");
+      expect(lines).toContain("missing_model_pricing_model_name=claude-opus-5");
+    });
+
+    it("emits missing_model_pricing_error=false and empty model name when not detected", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: false,
+        invocationCapExceeded: false,
+        maxCacheMissesExceeded: false,
+        missingModelPricingError: false,
+        missingModelPricingModelName: "",
+      });
+
+      expect(lines).toContain("missing_model_pricing_error=false");
+      expect(lines).toContain("missing_model_pricing_model_name=");
+    });
+
+    it("emits max_cache_misses_exceeded=true when detected", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: false,
+        invocationCapExceeded: false,
+        maxCacheMissesExceeded: true,
+        missingModelPricingError: false,
+        missingModelPricingModelName: "",
+      });
+
+      expect(lines).toContain("max_cache_misses_exceeded=true");
+    });
+
+    it("emits max_cache_misses_exceeded=false when not detected", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: false,
+        invocationCapExceeded: false,
+        maxCacheMissesExceeded: false,
+        missingModelPricingError: false,
+        missingModelPricingModelName: "",
+      });
+
+      expect(lines).toContain("max_cache_misses_exceeded=false");
+    });
+
+    it("emits shell_expansion_guard_rejected=true when detected", () => {
+      const lines = buildOutputLines({
+        inferenceAccessError: false,
+        mcpPolicyError: false,
+        agenticEngineTimeout: false,
+        modelNotSupportedError: false,
+        http400ResponseError: false,
+        capiQuotaExceededError: false,
+        invocationCapExceeded: false,
+        maxCacheMissesExceeded: false,
+        missingModelPricingError: false,
+        missingModelPricingModelName: "",
+        shellExpansionGuardRejected: true,
+      });
+
+      expect(lines).toContain("shell_expansion_guard_rejected=true");
     });
   });
 });

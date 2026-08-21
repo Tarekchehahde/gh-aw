@@ -44,8 +44,9 @@ If no workflows are specified, all Markdown files in .github/workflows will be v
 				return err
 			}
 
-			// Check for updates (non-blocking, runs once per day)
-			CheckForUpdatesAsync(cmd.Context(), noCheckUpdate, verbose)
+			// Check for updates (non-blocking, runs once per day); join before exit
+			joinUpdateCheck := CheckForUpdatesAsync(cmd.Context(), noCheckUpdate, verbose)
+			defer joinUpdateCheck()
 
 			validateLog.Printf("Running validate command: workflows=%v, dir=%s", args, dir)
 
@@ -76,7 +77,7 @@ If no workflows are specified, all Markdown files in .github/workflows will be v
 	addEngineFlag(cmd)
 	cmd.Flags().StringP("dir", "d", "", "Workflow directory (default: $GH_AW_WORKFLOWS_DIR or .github/workflows)")
 	cmd.Flags().Bool("strict", false, "Override frontmatter to enforce strict mode validation for all workflows (enforces action pinning, network config, safe-outputs, disallows write permissions and deprecated fields). Note: Workflows default to strict mode unless frontmatter sets strict: false")
-	cmd.Flags().BoolP("json", "j", false, "Output results in JSON format")
+	addJSONFlag(cmd)
 	cmd.Flags().Bool("fail-fast", false, "Stop at the first validation error instead of collecting all errors")
 	cmd.Flags().Bool("validate-images", false, "Require Docker to be available for container image validation. Without this flag, container image validation is silently skipped when Docker is not installed or the daemon is not running")
 	cmd.Flags().Bool("stats", false, "Display statistics table sorted by workflow file size (shows jobs, steps, scripts, and shells)")

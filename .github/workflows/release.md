@@ -24,9 +24,6 @@ permissions:
   actions: read
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: copilot
 timeout-minutes: 20
@@ -47,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Validate container SHA pins in actions-lock.json files
@@ -113,7 +110,7 @@ jobs:
       release_tag: ${{ steps.compute_config.outputs.release_tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -240,7 +237,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -257,7 +254,7 @@ jobs:
           echo "✓ Tag created: $RELEASE_TAG"
 
       - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
           cache: false  # Disabled for release security - prevent cache poisoning attacks
@@ -271,10 +268,10 @@ jobs:
           echo "✓ Binaries built successfully"
 
       - name: Setup Docker Buildx (pre-validation)
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.3.0
 
       - name: Build Docker image (validation only)
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           platforms: linux/amd64
@@ -588,7 +585,7 @@ jobs:
           fi
 
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -681,10 +678,10 @@ jobs:
           retention-days: 90  # Long retention since SBOMs are not attached to the release
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.1.0
+        uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4.2.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -692,7 +689,7 @@ jobs:
 
       - name: Extract metadata for Docker
         id: meta
-        uses: docker/metadata-action@v6.1.0
+        uses: docker/metadata-action@v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -704,7 +701,7 @@ jobs:
 
       - name: Build and push Docker image (amd64)
         id: build
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           platforms: linux/amd64
@@ -805,6 +802,7 @@ jobs:
             core.info(`Comment body to post:\n${commentBody}`);
 
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const commentDelayMs = 1000;
             const withRetry = async (fn, label) => {
               const maxAttempts = 3;
               for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -837,6 +835,10 @@ jobs:
               if (alreadyCommented) {
                 skippedCount += 1;
                 continue;
+              }
+
+              if (commentedCount > 0) {
+                await sleep(commentDelayMs);
               }
 
               await withRetry(
@@ -972,7 +974,17 @@ tools:
     - awk
     - sed
 
+evals:
+  - id: release-updated
+    question: Did the agent update the release with generated highlights?
+  - id: highlights-included
+    question: Does the agent output confirm that release highlights were generated and prepended to the release notes?
+  - id: community-attribution
+    question: Does the agent output include attribution to community contributors in the release highlights?
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Release Highlights Generator

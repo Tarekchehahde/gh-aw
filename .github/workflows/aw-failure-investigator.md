@@ -31,7 +31,7 @@ experiments:
     issue: 36105
 sandbox:
   agent:
-    sudo: false
+    runtime: gvisor
 tools:
   cli-proxy: true
   github:
@@ -63,6 +63,7 @@ imports:
   - shared/reporting.md
 
   - shared/otlp.md
+  - shared/default-ai-credits-pricing.md
 steps:
   - name: Deterministic pre-fetch for failure analysis
     env:
@@ -74,6 +75,7 @@ steps:
       python3 - <<'PY'
       import json
       import os
+      import re
       import subprocess
       from datetime import datetime, timedelta, timezone
       from pathlib import Path
@@ -83,10 +85,15 @@ steps:
       OUT = "/tmp/gh-aw/agent/failure-investigator/prefetch.json"
       TRACKER_ID = "aw-failure-investigator"
       LOOKBACK_HOURS = 6
-      FAILURE_CONCLUSIONS = {"failure", "timed_out", "startup_failure", "cancelled"}
+      FAILURE_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
       MAX_DISCOVERY_PAGES = 20
-      # Most dominant signatures appear in the final 30-60 lines.
+      # Capture this many lines around a fault marker, or from the tail if none exists.
       MAX_LOG_TAIL_LINES = 50
+      FAULT_MARKER = re.compile(
+          r"\b(?:error|panic|exception|traceback|fatal|abort|segfault|coredump)\b|"
+          r"(?:process|command).*(?:failed|exit code)|(?:exit code|non-zero exit)",
+          re.IGNORECASE,
+      )
       # Deep-dive budget: investigate at most this many distinct failed runs.
       MAX_FAILURES_TO_DETAIL = 5
       AGENTIC_WORKFLOW_PATHS = {
@@ -139,6 +146,21 @@ steps:
               return workflow_path in AGENTIC_WORKFLOW_PATHS
           print("Warning: no local .lock.yml workflows found; falling back to workflow path suffix matching")
           return workflow_path.endswith(".lock.yml")
+
+      def capture_error_window(log_text):
+          lines = log_text.splitlines()
+          marker_index = next(
+              (index for index in range(len(lines) - 1, -1, -1) if FAULT_MARKER.search(lines[index])),
+              None,
+          )
+          if marker_index is None:
+              captured_lines = lines[-MAX_LOG_TAIL_LINES:]
+          else:
+              start = max(0, min(marker_index - MAX_LOG_TAIL_LINES // 2, len(lines) - MAX_LOG_TAIL_LINES))
+              end = min(len(lines), start + MAX_LOG_TAIL_LINES)
+              captured_lines = lines[start:end]
+          has_fault_marker = any(FAULT_MARKER.search(line) for line in captured_lines)
+          return captured_lines, has_fault_marker
       
       def isoformat_z(dt):
           return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -251,17 +273,18 @@ steps:
                               REPO,
                               "--job",
                               str(job_id),
-                              "--log-failed",
+                              "--log",
                           ]
                       )
                       if log_text:
-                          tail_lines = log_text.splitlines()[-MAX_LOG_TAIL_LINES:]
+                          tail_lines, has_fault_marker = capture_error_window(log_text)
                           truncated_error_logs.append(
                               {
                                   "job_id": job_id,
                                   "job_name": job_name,
                                   "line_count": len(tail_lines),
                                   "tail_lines": "\n".join(tail_lines),
+                                  "capture_likely_missed_fault": not has_fault_marker,
                               }
                           )
       
@@ -318,6 +341,11 @@ steps:
       PY
 features:
   gh-aw-detection: true
+evals:
+  - id: failures_investigated
+    question: Did the agent investigate agentic workflow failures from the last 6 hours and produce findings?
+  - id: issues_created_or_closed
+    question: Were fix sub-issues created for unresolved failures, or were resolved tracking issues closed?
 ---
 
 # [aw] Failure Investigator (6h)
@@ -380,6 +408,11 @@ Identify regressions and deltas (metrics/tooling/firewall/MCP behavior) that sup
 
 First, identify currently open `agentic-workflows` issues that are now fixed, stale, or no longer actionable based on fresh evidence, and close them using `update-issue`.
 
+Before closing a tool-denial-limit issue (for example, exceeded denial/guardrail failures), verify there is at least one
+linked commit after the issue was opened that touches the affected workflow `.md` or `.lock.yml` path. If no such commit
+exists, do **not** close the issue as completed; keep it open and add/update a tracking comment with the missing workflow
+fix evidence.
+
 Then, if new uncovered work remains, add **sub-issues** for concrete fixes to the **most recent open parent report issue** instead of creating a new parent by default.
 
 Only create a new parent report issue when **P0 failures have no existing tracking coverage**.
@@ -414,7 +447,7 @@ For sub-issues, prioritize high-quality actionable items, avoid duplicates unles
 description: Groups pre-fetched failure runs into severity-ranked clusters by error signature and workflow
 model: small
 ---
-You receive a JSON array of `failures` from the pre-fetch payload. Each entry has `run_id`, `workflow_name`, `workflow_path`, `conclusion`, `failed_job_names`, `failed_steps`, and `truncated_error_logs`.
+You receive a JSON array of `failures` from the pre-fetch payload. Each entry has `run_id`, `workflow_name`, `workflow_path`, `conclusion`, `failed_job_names`, `failed_steps`, and `truncated_error_logs`. Treat a `truncated_error_logs` entry with `capture_likely_missed_fault: true` as insufficient evidence, never as a failure signature.
 
 Group failures into clusters:
 1. Cluster by dominant error signature extracted from `truncated_error_logs[].tail_lines`; group failures from the same workflow with matching signatures together.
@@ -449,8 +482,8 @@ description: Extracts per-cluster audit evidence including dominant errors, tool
 model: small
 ---
 Given failure clusters with their `truncated_error_logs` from the prefetch payload:
-1. If a cluster has ≥10 lines of pre-fetched error logs, extract evidence directly from those logs — do **not** call `audit`.
-2. Only call `agentic-workflows` MCP `audit` when pre-fetched logs are missing or fewer than 5 lines. Cap total `audit` calls at **2** across all clusters.
+1. If a cluster has ≥10 lines of pre-fetched error logs and none has `capture_likely_missed_fault: true`, extract evidence directly from those logs — do **not** call `audit`.
+2. Only call `agentic-workflows` MCP `audit` when pre-fetched logs are missing, fewer than 5 lines, or `capture_likely_missed_fault: true`. Cap total `audit` calls at **2** across all clusters.
 3. When calling `audit`, request only `artifacts: ["usage", "agent"]` to limit download size.
 
 Extract dominant error, tool-failure pattern, anomalies, and failure class.

@@ -114,7 +114,7 @@ strict: false
 			if tt.expectError {
 				require.Error(t, compileErr,
 					"CTR-015: expected error for bare \"*\" in allowed-labels")
-				assert.Contains(t, compileErr.Error(), "CTR-015",
+				require.ErrorContains(t, compileErr, "CTR-015",
 					"CTR-015: error message should reference the rule ID")
 			} else {
 				assert.NoError(t, compileErr,
@@ -142,7 +142,8 @@ strict: false
 	tests := []struct {
 		name        string
 		safeOutputs string
-		wantInJSON  string
+		handler     string
+		wantLabels  []any
 	}{
 		{
 			name: "add-labels required-labels as array",
@@ -151,7 +152,8 @@ strict: false
     allowed: [bug]
     required-labels: [approved, ready]
 `,
-			wantInJSON: `"required_labels":["approved","ready"]`,
+			handler:    "add_labels",
+			wantLabels: []any{"approved", "ready"},
 		},
 		{
 			name: "add-comment required-labels as array",
@@ -159,7 +161,8 @@ strict: false
   add-comment:
     required-labels: [approved]
 `,
-			wantInJSON: `"required_labels":["approved"]`,
+			handler:    "add_comment",
+			wantLabels: []any{"approved"},
 		},
 	}
 
@@ -178,8 +181,9 @@ strict: false
 			lockPath := wfPath[:len(wfPath)-3] + ".lock.yml"
 			lockBytes, err := os.ReadFile(lockPath)
 			require.NoError(t, err, "lock file should exist")
-			assert.Contains(t, string(lockBytes), tt.wantInJSON,
-				"compiled JSON should contain required_labels as array")
+			handlerConfig := extractHandlerConfig(t, string(lockBytes))
+			assert.Equal(t, tt.wantLabels, handlerConfig[tt.handler]["required_labels"],
+				"compiled config should contain required_labels as array")
 		})
 	}
 }

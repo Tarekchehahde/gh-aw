@@ -12,11 +12,13 @@ tracker-id: jsweep-daily
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 runtimes:
   node:
     version: "20"
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:
@@ -54,9 +56,6 @@ timeout-minutes: 20
 strict: true
 
 
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # jsweep - JavaScript Unbloater

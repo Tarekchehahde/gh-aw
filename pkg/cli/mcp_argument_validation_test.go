@@ -89,13 +89,13 @@ func TestExtractUnknownParamsFromSchemaError(t *testing.T) {
 		"workflow-name": "typo",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unexpected additional properties")
+	require.ErrorContains(t, err, "unexpected additional properties")
 	assert.Equal(t, []string{"workflow-name"}, extractUnknownParams(err.Error()))
 }
 
 // TestFindSimilarParam verifies the fuzzy matching of parameter names.
 func TestFindSimilarParam(t *testing.T) {
-	compileParams := []string{"actionlint", "fix", "max_tokens", "poutine", "runner-guard", "strict", "workflows", "zizmor"}
+	compileParams := []string{"actionlint", "fix", "grype", "max_tokens", "poutine", "runner-guard", "strict", "syft", "workflows", "yamllint", "zizmor"}
 
 	tests := []struct {
 		name        string
@@ -200,13 +200,26 @@ func TestBuildHelpfulParamError(t *testing.T) {
 		msg := buildHelpfulParamError("", []string{"workflow-name"}, []string{"workflows"})
 		assert.NotContains(t, msg, "--help", "no tool name means no help line")
 	})
+
+	t.Run("prompt param points to ad hoc evaluation mode instead of a suggestion", func(t *testing.T) {
+		msg := buildHelpfulParamError("status", []string{"prompt"}, []string{"pattern"})
+		assert.Contains(t, msg, "Unknown parameter 'prompt'", "should mention unknown param")
+		assert.Contains(t, msg, "agentic-workflows custom agent", "should point to the custom agent")
+		assert.NotContains(t, msg, "Did you mean", "should not offer a fuzzy-match suggestion for a freeform param")
+	})
+
+	t.Run("scenario param points to ad hoc evaluation mode", func(t *testing.T) {
+		msg := buildHelpfulParamError("compile", []string{"scenario"}, []string{"workflows", "strict"})
+		assert.Contains(t, msg, "Unknown parameter 'scenario'", "should mention unknown param")
+		assert.Contains(t, msg, "ad hoc scenario evaluation", "should mention ad hoc scenario evaluation")
+	})
 }
 
 // TestArgumentValidationMiddleware_TransformsAdditionalPropertiesError verifies
 // that the middleware replaces raw schema validation errors with helpful messages.
 func TestArgumentValidationMiddleware_TransformsAdditionalPropertiesError(t *testing.T) {
 	toolParams := map[string]toolParamEntry{
-		"compile": {"actionlint", "fix", "max_tokens", "poutine", "runner-guard", "strict", "workflows", "zizmor"},
+		"compile": {"actionlint", "fix", "grype", "max_tokens", "poutine", "runner-guard", "strict", "syft", "workflows", "yamllint", "zizmor"},
 	}
 
 	middleware := argumentValidationMiddleware(toolParams)

@@ -3,7 +3,12 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,7 +19,7 @@ func TestNewProjectCommand(t *testing.T) {
 	cmd := NewProjectCommand()
 	require.NotNil(t, cmd, "Command should be created")
 	assert.Equal(t, "project", cmd.Use, "Command name should be 'project'")
-	assert.Equal(t, "Create GitHub Projects V2 boards", cmd.Short, "Short description should describe project creation")
+	assert.Equal(t, "Create and manage GitHub Projects V2 boards", cmd.Short, "Short description should describe project creation and management")
 	assert.Contains(t, cmd.Long, "Create GitHub Projects V2 boards linked to repositories.", "Long description should describe creation behavior")
 	assert.NotEmpty(t, cmd.Commands(), "Command should have subcommands")
 }
@@ -35,52 +40,6 @@ func TestNewProjectNewCommand(t *testing.T) {
 	linkFlag := cmd.Flags().Lookup("link")
 	require.NotNil(t, linkFlag, "Should have --link flag")
 	assert.Equal(t, "l", linkFlag.Shorthand, "Link flag should have short form 'l'")
-}
-
-func TestEscapeGraphQLString(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "plain text",
-			input:    "Hello World",
-			expected: "Hello World",
-		},
-		{
-			name:     "with quotes",
-			input:    `Project "Alpha"`,
-			expected: `Project \"Alpha\"`,
-		},
-		{
-			name:     "with backslash",
-			input:    `Path\to\file`,
-			expected: `Path\\to\\file`,
-		},
-		{
-			name:     "with newline",
-			input:    "Line 1\nLine 2",
-			expected: "Line 1\\nLine 2",
-		},
-		{
-			name:     "with tab",
-			input:    "Name\tValue",
-			expected: "Name\\tValue",
-		},
-		{
-			name:     "complex string",
-			input:    "Test \"project\"\nWith\ttabs\\and backslashes",
-			expected: "Test \\\"project\\\"\\nWith\\ttabs\\\\and backslashes",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := escapeGraphQLString(tt.input)
-			assert.Equal(t, tt.expected, result, "GraphQL string should be properly escaped")
-		})
-	}
 }
 
 func TestProjectConfig(t *testing.T) {
@@ -160,7 +119,7 @@ func TestProjectNewCommandArgs(t *testing.T) {
 			if tt.shouldErr {
 				assert.Error(t, err, "Should return error for invalid arguments")
 			} else {
-				assert.NoError(t, err, "Should not return error for valid arguments")
+				require.NoError(t, err, "Should not return error for valid arguments")
 			}
 		})
 	}
@@ -551,4 +510,229 @@ func TestGraphQLRequestBodyStructure(t *testing.T) {
 		assert.Equal(t, projectId, vars["projectId"])
 		assert.Equal(t, repositoryId, vars["repositoryId"])
 	})
+}
+
+func TestValidateOwnerUsesStringLoginField(t *testing.T) {
+	oldRunGHInputContext := projectCommandRunGHInputContext
+	defer func() { projectCommandRunGHInputContext = oldRunGHInputContext }()
+
+	tests := []struct {
+		name      string
+		ownerType string
+		owner     string
+		wantQuery string
+	}{
+		{name: "organization login false stays string", ownerType: "org", owner: "false", wantQuery: `query($login: String!) { organization(login: $login) { id login } }`},
+		{name: "user login null stays string", ownerType: "user", owner: "null", wantQuery: `query($login: String!) { user(login: $login) { id login } }`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedArgs []string
+			var request map[string]any
+			projectCommandRunGHInputContext = func(ctx context.Context, spinnerMessage string, input io.Reader, args ...string) ([]byte, error) {
+				capturedArgs = append([]string(nil), args...)
+				request = parseGraphQLRequestBody(t, input)
+				return []byte(`{}`), nil
+			}
+
+			err := validateOwner(context.Background(), tt.ownerType, tt.owner, false)
+			require.NoError(t, err)
+
+			require.Equal(t, tt.wantQuery, request["query"])
+			vars, ok := request["variables"].(map[string]any)
+			require.True(t, ok, "variables should be a JSON object")
+			assert.Equal(t, tt.owner, vars["login"])
+			assert.NotContains(t, tt.wantQuery, tt.owner, "owner login must not be string-interpolated into query")
+			assert.Equal(t, []string{"api", "graphql", "--input", "-"}, capturedArgs)
+		})
+	}
+}
+
+func TestGetOwnerNodeIdUsesStringLoginField(t *testing.T) {
+	oldRunGHInputContext := projectCommandRunGHInputContext
+	defer func() { projectCommandRunGHInputContext = oldRunGHInputContext }()
+
+	tests := []struct {
+		name      string
+		ownerType string
+		owner     string
+		wantJQ    string
+		wantQuery string
+	}{
+		{
+			name:      "organization login false stays string",
+			ownerType: "org",
+			owner:     "false",
+			wantJQ:    ".data.organization.id",
+			wantQuery: `query($login: String!) { organization(login: $login) { id } }`,
+		},
+		{
+			name:      "user login null stays string",
+			ownerType: "user",
+			owner:     "null",
+			wantJQ:    ".data.user.id",
+			wantQuery: `query($login: String!) { user(login: $login) { id } }`,
+		},
+		{
+			name:      "special characters are passed via login field",
+			ownerType: "org",
+			owner:     `octo"cat\team`,
+			wantJQ:    ".data.organization.id",
+			wantQuery: `query($login: String!) { organization(login: $login) { id } }`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedArgs []string
+			var request map[string]any
+			projectCommandRunGHInputContext = func(ctx context.Context, spinnerMessage string, input io.Reader, args ...string) ([]byte, error) {
+				capturedArgs = append([]string(nil), args...)
+				request = parseGraphQLRequestBody(t, input)
+				return []byte("NODE_ID_123"), nil
+			}
+
+			nodeID, err := getOwnerNodeId(context.Background(), tt.ownerType, tt.owner, false)
+			require.NoError(t, err)
+			assert.Equal(t, "NODE_ID_123", nodeID)
+
+			require.Equal(t, tt.wantQuery, request["query"])
+			vars, ok := request["variables"].(map[string]any)
+			require.True(t, ok, "variables should be a JSON object")
+			assert.Equal(t, tt.owner, vars["login"])
+			assert.NotContains(t, tt.wantQuery, tt.owner, "owner login must not be string-interpolated into query")
+
+			jqIndex := slices.Index(capturedArgs, "--jq")
+			require.Positive(t, jqIndex)
+			require.Less(t, jqIndex, len(capturedArgs)-1)
+			assert.Equal(t, tt.wantJQ, capturedArgs[jqIndex+1])
+		})
+	}
+}
+
+func TestGetStatusFieldUsesStringLoginAndIntNumberFields(t *testing.T) {
+	oldRunGHInputContext := projectCommandRunGHInputContext
+	defer func() { projectCommandRunGHInputContext = oldRunGHInputContext }()
+
+	tests := []struct {
+		name         string
+		info         projectURLInfo
+		wantProject  string
+		wantProjectJ string
+		wantFieldsJ  string
+	}{
+		{
+			name:         "organization login false stays string",
+			info:         projectURLInfo{scope: "orgs", ownerLogin: "false", projectNumber: 42},
+			wantProject:  "project-org",
+			wantProjectJ: ".data.organization.projectV2.id",
+			wantFieldsJ:  ".data.organization.projectV2.fields.nodes",
+		},
+		{
+			name:         "user login null stays string",
+			info:         projectURLInfo{scope: "users", ownerLogin: "null", projectNumber: 7},
+			wantProject:  "project-user",
+			wantProjectJ: ".data.user.projectV2.id",
+			wantFieldsJ:  ".data.user.projectV2.fields.nodes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var callsArgs [][]string
+			var requests []map[string]any
+			projectCommandRunGHInputContext = func(ctx context.Context, spinnerMessage string, input io.Reader, args ...string) ([]byte, error) {
+				callArgs := append([]string(nil), args...)
+				callsArgs = append(callsArgs, callArgs)
+				requests = append(requests, parseGraphQLRequestBody(t, input))
+				switch jqPathArg(t, callArgs) {
+				case tt.wantProjectJ:
+					return []byte(tt.wantProject), nil
+				case tt.wantFieldsJ:
+					return []byte(`[{"id":"status-field","name":"Status","options":[{"name":"Todo","color":"GRAY"}]}]`), nil
+				default:
+					return nil, errors.New("unexpected jq path")
+				}
+			}
+
+			field, err := getStatusField(context.Background(), tt.info, false)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantProject, field.projectID)
+			assert.Equal(t, "status-field", field.fieldID)
+			require.Len(t, field.options, 1)
+			assert.Equal(t, "Todo", field.options[0].Name)
+
+			require.Len(t, callsArgs, 2)
+			require.Len(t, requests, 2)
+			for i, call := range callsArgs {
+				wantJQ := tt.wantFieldsJ
+				if i == 0 {
+					wantJQ = tt.wantProjectJ
+				}
+				assert.Equal(t, []string{"api", "graphql", "--input", "-", "--jq", wantJQ}, call)
+
+				req := requests[i]
+				vars, ok := req["variables"].(map[string]any)
+				require.True(t, ok, "variables should be a JSON object")
+				query, ok := req["query"].(string)
+				require.True(t, ok, "query should be a string")
+				assert.Equal(t, tt.info.ownerLogin, vars["login"])
+				require.IsType(t, float64(0), vars["number"])
+				assert.InDelta(t, tt.info.projectNumber, vars["number"].(float64), 1e-9)
+				assert.NotContains(t, query, tt.info.ownerLogin, "owner login must not be string-interpolated into query")
+				assert.NotContains(t, query, strconv.Itoa(tt.info.projectNumber), "project number must not be string-interpolated into query")
+			}
+		})
+	}
+}
+
+func parseGraphQLRequestBody(t *testing.T, input io.Reader) map[string]any {
+	t.Helper()
+	data, err := io.ReadAll(input)
+	require.NoError(t, err)
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(data, &request))
+	return request
+}
+
+func jqPathArg(t *testing.T, args []string) string {
+	t.Helper()
+	jqIndex := slices.Index(args, "--jq")
+	require.Positive(t, jqIndex)
+	require.Less(t, jqIndex, len(args)-1)
+	return args[jqIndex+1]
+}
+
+// TestProjectGraphQLQueryConstantsAreParameterized ensures the project GraphQL documents
+// stay static templates that declare their inputs as GraphQL variables, so user-controlled
+// values can never be interpolated into a query string.
+func TestProjectGraphQLQueryConstantsAreParameterized(t *testing.T) {
+	queries := map[string][]string{
+		"validateOrgOwnerQuery":  {"$login: String!"},
+		"validateUserOwnerQuery": {"$login: String!"},
+		"orgOwnerNodeIDQuery":    {"$login: String!"},
+		"userOwnerNodeIDQuery":   {"$login: String!"},
+		"orgProjectFieldsQuery":  {"$login: String!", "$number: Int!"},
+		"userProjectFieldsQuery": {"$login: String!", "$number: Int!"},
+	}
+	values := map[string]string{
+		"validateOrgOwnerQuery":  validateOrgOwnerQuery,
+		"validateUserOwnerQuery": validateUserOwnerQuery,
+		"orgOwnerNodeIDQuery":    orgOwnerNodeIDQuery,
+		"userOwnerNodeIDQuery":   userOwnerNodeIDQuery,
+		"orgProjectFieldsQuery":  orgProjectFieldsQuery,
+		"userProjectFieldsQuery": userProjectFieldsQuery,
+	}
+
+	for name, declarations := range queries {
+		t.Run(name, func(t *testing.T) {
+			query := values[name]
+			assert.NotContains(t, query, "%s", "query must not contain format verbs")
+			assert.NotContains(t, query, "%v", "query must not contain format verbs")
+			for _, declaration := range declarations {
+				assert.Contains(t, query, declaration, "query must declare its inputs as GraphQL variables")
+			}
+		})
+	}
 }

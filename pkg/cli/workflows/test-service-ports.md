@@ -4,6 +4,9 @@ on:
 permissions:
   contents: read
 engine: copilot
+sandbox:
+  agent:
+    runtime: docker-sudo-iptables
 services:
   postgres:
     image: postgres:15
@@ -17,8 +20,9 @@ services:
 
 # Test Service Ports
 
-This workflow tests that the compiler automatically generates `--allow-host-service-ports`
-from `services:` port mappings.
+This workflow tests that the compiler generates `--allow-host-service-ports`
+from `services:` port mappings when `runtime: docker-sudo-iptables` opts AWF into
+host-access mode.
 
 Expected: the compiled lock file includes `--allow-host-service-ports` with expressions for
 both PostgreSQL (port 5432) and Redis (port 6379).

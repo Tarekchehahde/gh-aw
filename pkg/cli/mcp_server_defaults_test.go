@@ -4,6 +4,7 @@ package cli
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -12,13 +13,28 @@ import (
 // TestMCPToolElicitationDefaults verifies that MCP tools have appropriate
 // elicitation defaults configured according to SEP-1024.
 func TestMCPToolElicitationDefaults(t *testing.T) {
+	t.Run("compile workflows input describes array syntax", func(t *testing.T) {
+		schema, err := GenerateSchema[compileArgs]()
+		if err != nil {
+			t.Fatalf("Failed to generate schema: %v", err)
+		}
+		workflows, ok := schema.Properties["workflows"]
+		if !ok {
+			t.Fatal("Expected 'workflows' property to exist")
+		}
+		if !strings.Contains(workflows.Description, `["workflow.md"]`) {
+			t.Errorf("workflows description = %q, want array example", workflows.Description)
+		}
+	})
+
 	t.Run("compile tool has strict default", func(t *testing.T) {
 		type compileArgs struct {
-			Workflows  []string `json:"workflows,omitempty" jsonschema:"Workflow files to compile (empty for all)"`
+			Workflows  []string `json:"workflows,omitempty" jsonschema:"Workflow files to compile as an array (e.g., [\"workflow.md\"]) (empty for all)"`
 			Strict     bool     `json:"strict,omitempty" jsonschema:"Override frontmatter to enforce strict mode validation for all workflows"`
 			Zizmor     bool     `json:"zizmor,omitempty" jsonschema:"Run zizmor security scanner on generated .lock.yml files"`
 			Poutine    bool     `json:"poutine,omitempty" jsonschema:"Run poutine security scanner on generated .lock.yml files"`
 			Actionlint bool     `json:"actionlint,omitempty" jsonschema:"Run actionlint linter on generated .lock.yml files"`
+			Grant      bool     `json:"grant,omitempty" jsonschema:"Run grant license scanner on container images referenced in compiled .lock.yml files"`
 			Fix        bool     `json:"fix,omitempty" jsonschema:"Apply automatic codemod fixes to workflows before compiling"`
 		}
 
@@ -52,7 +68,7 @@ func TestMCPToolElicitationDefaults(t *testing.T) {
 		}
 	})
 
-	t.Run("logs tool has count, timeout, max_tokens and artifacts defaults", func(t *testing.T) {
+	t.Run("logs tool has count, max_tokens and artifacts defaults (no timeout default)", func(t *testing.T) {
 		type logsArgs struct {
 			WorkflowName string   `json:"workflow_name,omitempty" jsonschema:"Name of the workflow to download logs for (empty for all)"`
 			Count        int      `json:"count,omitempty" jsonschema:"Number of workflow runs to download"`
@@ -66,12 +82,11 @@ func TestMCPToolElicitationDefaults(t *testing.T) {
 			t.Fatalf("Failed to generate schema: %v", err)
 		}
 
-		// Add defaults as done in registerLogsTool
+		// Add defaults as done in registerLogsTool (no timeout default: it is
+		// computed at runtime from count and workflow_name so the go-sdk cannot
+		// fill it in statically without bypassing the per-request computation).
 		if err := AddSchemaDefault(schema, "count", defaultMCPLogsToolCount); err != nil {
 			t.Fatalf("Failed to add count default: %v", err)
-		}
-		if err := AddSchemaDefault(schema, "timeout", defaultMCPLogsToolTimeoutMinutesForCount(defaultMCPLogsToolCount)); err != nil {
-			t.Fatalf("Failed to add timeout default: %v", err)
 		}
 		if err := AddSchemaDefault(schema, "max_tokens", 12000); err != nil {
 			t.Fatalf("Failed to add max_tokens default: %v", err)
@@ -96,21 +111,16 @@ func TestMCPToolElicitationDefaults(t *testing.T) {
 			t.Errorf("Expected count default to be %d, got %v", defaultMCPLogsToolCount, countDefault)
 		}
 
-		// Verify timeout default
+		// Verify timeout has NO schema default: registerLogsTool intentionally
+		// omits a static timeout default because the runtime computes it from
+		// both the effective count and workflow_name.  A static default would be
+		// applied by the go-sdk before the handler runs, bypassing that logic.
 		timeoutProp, ok := schema.Properties["timeout"]
 		if !ok {
 			t.Fatal("Expected 'timeout' property to exist")
 		}
-		if len(timeoutProp.Default) == 0 {
-			t.Error("Expected 'timeout' property to have a default value")
-		}
-		var timeoutDefault int
-		if err := json.Unmarshal(timeoutProp.Default, &timeoutDefault); err != nil {
-			t.Fatalf("Failed to unmarshal timeout default: %v", err)
-		}
-		expectedTimeoutDefault := defaultMCPLogsToolTimeoutMinutesForCount(defaultMCPLogsToolCount)
-		if timeoutDefault != expectedTimeoutDefault {
-			t.Errorf("Expected timeout default to be %d, got %v", expectedTimeoutDefault, timeoutDefault)
+		if len(timeoutProp.Default) != 0 {
+			t.Errorf("Expected 'timeout' property to have no schema default (runtime-computed), got %s", timeoutProp.Default)
 		}
 
 		// Verify max_tokens default (backward-compat field)

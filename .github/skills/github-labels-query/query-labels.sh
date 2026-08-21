@@ -1,7 +1,7 @@
 #!/bin/bash
 set +o histexpand
 
-# Query GitHub labels with per_page pagination support.
+# Query GitHub labels with perPage pagination support.
 #
 # Usage: ./query-labels.sh [OPTIONS]
 #
@@ -10,10 +10,12 @@ set +o histexpand
 #   --repo REPO        Repository name (required)
 #   --per-page N       Results per page: 1-100 (default: 10)
 #   --page N           Page number (default: 1)
+#   --name-filter STR  Case-insensitive substring filter on the label name
 #
 # Alternatively, inputs can be provided as environment variables using the
-# mcp-scripts INPUT_* convention (INPUT_OWNER, INPUT_REPO, INPUT_PER_PAGE,
-# INPUT_PAGE). CLI arguments take precedence over environment variables.
+# mcp-scripts INPUT_* convention (INPUT_OWNER, INPUT_REPO, INPUT_PERPAGE,
+# INPUT_PAGE, INPUT_NAMEFILTER). INPUT_PER_PAGE is also accepted for backward compatibility.
+# CLI arguments take precedence over environment variables.
 #
 # Calls the GitHub REST API:
 #   GET /repos/{owner}/{repo}/labels?per_page={n}&page={n}
@@ -25,10 +27,13 @@ set -e
 
 # Defaults: pick up INPUT_* env vars (mcp-scripts convention) or fall back to
 # hardcoded defaults; CLI flags below will override.
+# INPUT_PERPAGE (camelCase perPage) is preferred; INPUT_PER_PAGE accepted for
+# backward compatibility with callers using the old snake_case convention.
 OWNER="${INPUT_OWNER:-}"
 REPO="${INPUT_REPO:-}"
-PER_PAGE="${INPUT_PER_PAGE:-10}"
+PER_PAGE="${INPUT_PERPAGE:-${INPUT_PER_PAGE:-10}}"
 PAGE="${INPUT_PAGE:-1}"
+NAME_FILTER="${INPUT_NAMEFILTER:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -46,6 +51,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --page)
             PAGE="$2"
+            shift 2
+            ;;
+        --name-filter)
+            NAME_FILTER="$2"
             shift 2
             ;;
         *)
@@ -70,14 +79,23 @@ if ! [[ "$PER_PAGE" =~ ^[0-9]+$ ]] || [[ "$PER_PAGE" -lt 1 ]] || [[ "$PER_PAGE" 
     exit 1
 fi
 
-RESPONSE=$(gh api "repos/${OWNER}/${REPO}/labels?per_page=${PER_PAGE}&page=${PAGE}")
+if [[ -n "$NAME_FILTER" ]]; then
+    RESPONSE=$(gh api --paginate --slurp "repos/${OWNER}/${REPO}/labels?per_page=100" | jq '[.[][]]')
+else
+    RESPONSE=$(gh api "repos/${OWNER}/${REPO}/labels?per_page=${PER_PAGE}&page=${PAGE}")
+fi
 
 echo "$RESPONSE" | jq \
     --argjson per_page "$PER_PAGE" \
     --argjson page "$PAGE" \
-    '{
-        labels: [.[] | {id, node_id, url, name, color, default, description}],
-        item_count: length,
+    --arg name_filter "$NAME_FILTER" \
+    '(if $name_filter == "" then .
+      else [.[] | select(.name | ascii_downcase | contains($name_filter | ascii_downcase))]
+           | .[(($page - 1) * $per_page):($page * $per_page)]
+      end) as $selected
+     | {
+        labels: [$selected[] | {id, node_id, url, name, color, default, description}],
+        item_count: ($selected | length),
         per_page: $per_page,
         page: $page
     }'

@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/githubapi"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/semverutil"
 	"github.com/github/gh-aw/pkg/workflow"
@@ -80,6 +83,8 @@ func isRunningAsMCPServer() bool {
 var (
 	// getLastCheckFilePathFunc allows overriding in tests
 	getLastCheckFilePathFunc = getLastCheckFilePathImpl
+	// checkForUpdatesWithContextFunc allows overriding in tests
+	checkForUpdatesWithContextFunc = checkForUpdatesWithContext
 )
 
 // getLastCheckFilePath returns the path to the last check timestamp file
@@ -97,9 +102,7 @@ func updateLastCheckTime() {
 	writeUpdateCheckTime(getLastCheckFilePath(), constants.FilePermPublic, "update check", updateCheckLog)
 }
 
-// checkForUpdates checks if a newer version of gh-aw is available
-// This function is non-blocking and ignores all errors (connectivity, API, etc.)
-func checkForUpdates(noCheckUpdate bool, verbose bool) {
+func checkForUpdatesWithContext(ctx context.Context, noCheckUpdate bool, verbose bool) {
 	// Quick check if we should even attempt the update check
 	if !shouldCheckForUpdate(noCheckUpdate) {
 		return
@@ -118,7 +121,7 @@ func checkForUpdates(noCheckUpdate bool, verbose bool) {
 	}
 
 	// Query GitHub API for latest release
-	latestVersion, err := getLatestRelease(false)
+	latestVersion, err := getLatestRelease(ctx, false)
 	if err != nil {
 		// Silently ignore errors - update check should never fail the command
 		updateCheckLog.Printf("Error checking for updates (ignoring): %v", err)
@@ -181,7 +184,7 @@ func isCurrentVersionAtLeastLatest(currentVersion, latestVersion string) bool {
 }
 
 // getLatestRelease queries GitHub API for the latest release of gh-aw
-func getLatestRelease(includePrereleases bool) (string, error) {
+func getLatestRelease(ctx context.Context, includePrereleases bool) (string, error) {
 	updateCheckLog.Print("Querying GitHub API for latest release...")
 
 	// Always target github.com explicitly: gh-aw is only published to github.com,
@@ -191,10 +194,17 @@ func getLatestRelease(includePrereleases bool) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create GitHub client: %w", err)
 	}
+	return getLatestReleaseWithClient(ctx, client, includePrereleases)
+}
 
+type releaseRESTClient interface {
+	DoWithContext(ctx context.Context, method string, path string, body io.Reader, response any) error
+}
+
+func getLatestReleaseWithClient(ctx context.Context, client releaseRESTClient, includePrereleases bool) (string, error) {
 	if includePrereleases {
 		var releases []Release
-		err = client.Get(fmt.Sprintf("repos/github/gh-aw/releases?per_page=%d", maxReleasesToQuery), &releases)
+		err := client.DoWithContext(ctx, http.MethodGet, fmt.Sprintf("repos/github/gh-aw/releases?per_page=%d", maxReleasesToQuery), nil, &releases)
 		if err != nil {
 			return "", fmt.Errorf("failed to query releases: %w", err)
 		}
@@ -206,7 +216,7 @@ func getLatestRelease(includePrereleases bool) (string, error) {
 
 	// Query the latest stable release
 	var release Release
-	err = client.Get("repos/github/gh-aw/releases/latest", &release)
+	err := client.DoWithContext(ctx, http.MethodGet, "repos/github/gh-aw/releases/latest", nil, &release)
 	if err != nil {
 		return "", fmt.Errorf("failed to query latest release: %w", err)
 	}
@@ -223,10 +233,7 @@ func getLatestRelease(includePrereleases bool) (string, error) {
 }
 
 func gitHubDotComRESTClientOptions() api.ClientOptions {
-	return api.ClientOptions{
-		Host:    "github.com",
-		Timeout: constants.DefaultHTTPClientTimeout,
-	}
+	return githubapi.ClientOptions("github.com", "")
 }
 
 // findLatestPublishedReleaseTag returns the first non-draft release tag from the
@@ -243,10 +250,16 @@ func findLatestPublishedReleaseTag(releases []Release) string {
 
 // CheckForUpdatesAsync performs update check in background (best effort)
 // This is called from compile command and should never block or fail the compilation
-// The context can be used to cancel the update check if the program is shutting down
-func CheckForUpdatesAsync(ctx context.Context, noCheckUpdate bool, verbose bool) {
+// The context can be used to cancel the update check if the program is shutting down.
+// The returned function joins the goroutine; call it before the program exits to ensure
+// the update check completes and the goroutine is properly cleaned up.
+func CheckForUpdatesAsync(ctx context.Context, noCheckUpdate bool, verbose bool) func() {
+	done := make(chan struct{})
+	checkCtx, cancelCheck := context.WithCancel(ctx)
+
 	// Run check in goroutine to avoid blocking compilation
 	go func() {
+		defer close(done)
 		// Recover from any panics in the update check
 		defer func() {
 			if r := recover(); r != nil {
@@ -255,22 +268,31 @@ func CheckForUpdatesAsync(ctx context.Context, noCheckUpdate bool, verbose bool)
 		}()
 
 		// Check if context was cancelled before starting
-		if ctx.Err() != nil {
-			updateCheckLog.Printf("Update check cancelled before starting: %v", ctx.Err())
+		if checkCtx.Err() != nil {
+			updateCheckLog.Printf("Update check cancelled before starting: %v", checkCtx.Err())
 			return
 		}
 
-		checkForUpdates(noCheckUpdate, verbose)
+		checkForUpdatesWithContextFunc(checkCtx, noCheckUpdate, verbose)
 	}()
 
 	// Give the goroutine a small window to complete quickly
 	// This allows the message to appear before compilation starts
 	// but doesn't block if the check takes longer
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+
 	select {
-	case <-time.After(100 * time.Millisecond):
+	case <-done:
+		// Goroutine finished within the window
+	case <-timer.C:
 		// Continue after timeout
 	case <-ctx.Done():
 		// Context cancelled during wait
-		return
+	}
+
+	return func() {
+		cancelCheck()
+		<-done
 	}
 }

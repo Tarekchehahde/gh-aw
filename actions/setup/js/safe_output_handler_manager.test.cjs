@@ -7,13 +7,19 @@ import {
   loadConfig,
   loadHandlers,
   processMessages,
+  sortMessagesByTemporaryIdDependencies,
+  sortMessageIndicesByTemporaryIdDependencies,
   buildCommentMemoryMessagesFromFiles,
   rollbackReviewResults,
+  rollbackReviewResultsForPR,
   skipReviewResults,
+  skipReviewResultsForPR,
   logCreatedItemFromResult,
   isFailedProcessingResult,
   isReportOnlyFailureResult,
   partitionFailureResults,
+  computeSafeOutputsStatus,
+  setSafeOutputsStatusOutputs,
 } from "./safe_output_handler_manager.cjs";
 
 const require = createRequire(import.meta.url);
@@ -56,6 +62,31 @@ describe("Safe Output Handler Manager", () => {
       expect(result).toHaveProperty("add_comment");
       expect(result.create_issue).toEqual({ max: 5 });
       expect(result.add_comment).toEqual({ max: 1 });
+    });
+
+    describe("temporary ID dependency ordering", () => {
+      it("orders a blocked_by temporary-ID producer before its dependent issue", () => {
+        const prerequisite = { type: "create_issue", temporary_id: "aw_prereq", title: "Prerequisite" };
+        const blocked = { type: "create_issue", temporary_id: "aw_blocked", blocked_by: "aw_prereq", title: "Blocked" };
+
+        expect(sortMessagesByTemporaryIdDependencies([blocked, prerequisite])).toEqual([prerequisite, blocked]);
+      });
+
+      it("keeps independent messages in their original relative order", () => {
+        const dependent = { type: "create_issue", temporary_id: "aw_blocked", blocked_by: "aw_prereq", title: "Blocked" };
+        const producer = { type: "create_issue", temporary_id: "aw_prereq", title: "Prerequisite" };
+        const unrelated = { type: "create_issue", temporary_id: "aw_other", title: "Unrelated" };
+
+        expect(sortMessagesByTemporaryIdDependencies([dependent, producer, unrelated])).toEqual([producer, dependent, unrelated]);
+      });
+
+      it("returns original message indices in processing order", () => {
+        const dependent = { type: "create_issue", temporary_id: "aw_blocked", blocked_by: "aw_prereq", title: "Blocked" };
+        const producer = { type: "create_issue", temporary_id: "aw_prereq", title: "Prerequisite" };
+        const unrelated = { type: "create_issue", temporary_id: "aw_other", title: "Unrelated" };
+
+        expect(sortMessageIndicesByTemporaryIdDependencies([dependent, producer, unrelated])).toEqual([1, 0, 2]);
+      });
     });
 
     describe("logCreatedItemFromResult", () => {
@@ -121,6 +152,24 @@ describe("Safe Output Handler Manager", () => {
       ).toBe(true);
     });
 
+    it("does not treat failed resolve_pull_request_review_thread results as report-only", () => {
+      expect(
+        isReportOnlyFailureResult({
+          type: "resolve_pull_request_review_thread",
+          success: false,
+        })
+      ).toBe(false);
+    });
+
+    it("does not treat failed dismiss_pull_request_review results as report-only", () => {
+      expect(
+        isReportOnlyFailureResult({
+          type: "dismiss_pull_request_review",
+          success: false,
+        })
+      ).toBe(false);
+    });
+
     it("does not treat skipped or cancelled assign_to_agent results as report-only", () => {
       expect(
         isReportOnlyFailureResult({
@@ -183,6 +232,130 @@ describe("Safe Output Handler Manager", () => {
 
       expect(reportOnlyFailures).toEqual([{ type: "upload_artifact", success: false, error: "artifact twirp CreateArtifact failed (400)" }]);
       expect(fatalFailures).toEqual([{ type: "create_issue", success: false, error: "Validation failed" }]);
+    });
+
+    it("computes partial success item status from mixed successful and failed results", () => {
+      const status = computeSafeOutputsStatus([
+        { type: "create_issue", success: true },
+        { type: "add_comment", success: true },
+        { type: "create_discussion", success: false, error: "Validation failed" },
+        { type: "noop", success: false, skipped: true },
+        { type: "link_sub_issue", success: false, deferred: true },
+        { type: "merge_pull_request", success: false, cancelled: true },
+      ]);
+
+      expect(status).toEqual({
+        itemsSucceeded: 2,
+        itemsApplied: 2,
+        itemsSkipped: 1,
+        itemsWarnings: 0,
+        itemsCancelled: 1,
+        itemsDeferred: 1,
+        itemsFailed: 1,
+        status: "partial_success",
+      });
+    });
+
+    it("computes skipped and warning counts without counting them as applied mutations", () => {
+      expect(
+        computeSafeOutputsStatus([
+          { type: "add_comment", success: true, result: { success: true, skipped: true, warning: "Target locked" } },
+          { type: "add_labels", success: false, skipped: true, result: { success: false, skipped: true, reasonCode: "REQUIRED_LABELS_MISMATCH" } },
+          { type: "create_issue", success: true },
+        ])
+      ).toEqual({
+        itemsSucceeded: 1,
+        itemsApplied: 1,
+        itemsSkipped: 2,
+        itemsWarnings: 0,
+        itemsCancelled: 0,
+        itemsDeferred: 0,
+        itemsFailed: 0,
+        status: "completed_with_skips",
+      });
+    });
+
+    it("omits only explicitly delegated skips from outcome counts", () => {
+      expect(
+        computeSafeOutputsStatus([
+          { type: "add_comment", success: false, skipped: true, reason: "Policy skipped this output" },
+          { type: "noop", success: false, skipped: true, delegated: true, reason: "Handled by standalone step" },
+        ])
+      ).toEqual({
+        itemsSucceeded: 0,
+        itemsApplied: 0,
+        itemsSkipped: 1,
+        itemsWarnings: 0,
+        itemsCancelled: 0,
+        itemsDeferred: 0,
+        itemsFailed: 0,
+        status: "completed_with_skips",
+      });
+    });
+
+    it("computes failure item status when all active results failed", () => {
+      expect(
+        computeSafeOutputsStatus([
+          { type: "create_issue", success: false, error: "Validation failed" },
+          { type: "add_comment", success: false, error: "Validation failed" },
+        ])
+      ).toEqual({
+        itemsSucceeded: 0,
+        itemsApplied: 0,
+        itemsSkipped: 0,
+        itemsWarnings: 0,
+        itemsCancelled: 0,
+        itemsDeferred: 0,
+        itemsFailed: 2,
+        status: "failure",
+      });
+    });
+
+    it("exports item status outputs", () => {
+      setSafeOutputsStatusOutputs({
+        itemsSucceeded: 10,
+        itemsFailed: 5,
+        status: "partial_success",
+      });
+
+      expect(core.setOutput).toHaveBeenCalledWith("items_succeeded", "10");
+      expect(core.setOutput).toHaveBeenCalledWith("items_applied", "10");
+      expect(core.setOutput).toHaveBeenCalledWith("items_skipped", "0");
+      expect(core.setOutput).toHaveBeenCalledWith("items_warnings", "0");
+      expect(core.setOutput).toHaveBeenCalledWith("items_cancelled", "0");
+      expect(core.setOutput).toHaveBeenCalledWith("items_deferred", "0");
+      expect(core.setOutput).toHaveBeenCalledWith("items_failed", "5");
+      expect(core.setOutput).toHaveBeenCalledWith("status", "partial_success");
+    });
+
+    it("keeps review cleanup failures fatal unless a handler marks them skipped", () => {
+      const { fatalFailures, reportOnlyFailures } = partitionFailureResults([
+        { type: "resolve_pull_request_review_thread", success: false, error: "wrong node type" },
+        { type: "dismiss_pull_request_review", success: false, error: "wrong actor" },
+      ]);
+
+      expect(reportOnlyFailures).toEqual([]);
+      expect(fatalFailures).toEqual([
+        { type: "resolve_pull_request_review_thread", success: false, error: "wrong node type" },
+        { type: "dismiss_pull_request_review", success: false, error: "wrong actor" },
+      ]);
+    });
+
+    it("does not treat a resolve_pull_request_review_thread result marked skipped as a fatal failure", () => {
+      const results = [
+        { type: "resolve_pull_request_review_thread", success: false, skipped: true, error: "Repository 'other-owner/other-repo' is not in the allowed-repos list. Allowed: github/gh-aw" },
+        { type: "create_issue", success: false, error: "Validation failed" },
+      ];
+      const { fatalFailures, reportOnlyFailures } = partitionFailureResults(results);
+
+      expect(reportOnlyFailures).toEqual([]);
+      expect(fatalFailures).toEqual([{ type: "create_issue", success: false, error: "Validation failed" }]);
+
+      // The skipped result is neither a fatal nor a report-only failure; it is counted
+      // as a skip in the overall item status instead of being silently dropped.
+      const status = computeSafeOutputsStatus(results);
+      expect(status.itemsSkipped).toBe(1);
+      expect(status.itemsFailed).toBe(1);
     });
   });
 
@@ -275,18 +448,139 @@ describe("Safe Output Handler Manager", () => {
             max: 1,
             mentions: mentionsConfig,
             allowedMentionAliases: ["copilot", "octocat"],
-          })
+          }),
+          null
         );
         expect(createIssueMainSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             max: 1,
             mentions: mentionsConfig,
             allowedMentionAliases: ["copilot", "octocat"],
-          })
+          }),
+          null
         );
       } finally {
         addCommentMainSpy.mockRestore();
         createIssueMainSpy.mockRestore();
+      }
+    });
+
+    it("injects GH_AW_PROJECT_GITHUB_TOKEN for project handlers when github-token is missing", async () => {
+      process.env.GH_AW_PROJECT_GITHUB_TOKEN = "projects-token";
+      global.getOctokit = vi.fn().mockReturnValue({ client: "project-client" });
+
+      const updateProjectModule = require("./update_project.cjs");
+      const updateProjectMainSpy = vi.spyOn(updateProjectModule, "main").mockImplementation(async () => async () => ({ success: true }));
+
+      try {
+        const handlers = await loadHandlers({
+          update_project: { project: "https://github.com/orgs/myorg/projects/1" },
+        });
+
+        expect(handlers.has("update_project")).toBe(true);
+        expect(global.getOctokit).toHaveBeenCalledWith("projects-token");
+        expect(updateProjectMainSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            project: "https://github.com/orgs/myorg/projects/1",
+            "github-token": "projects-token",
+          }),
+          expect.objectContaining({ client: "project-client" })
+        );
+      } finally {
+        updateProjectMainSpy.mockRestore();
+        delete process.env.GH_AW_PROJECT_GITHUB_TOKEN;
+        delete global.getOctokit;
+      }
+    });
+
+    it("preserves explicit project handler github-token over GH_AW_PROJECT_GITHUB_TOKEN fallback", async () => {
+      process.env.GH_AW_PROJECT_GITHUB_TOKEN = "fallback-project-token";
+      global.getOctokit = vi.fn().mockReturnValue({ client: "project-client" });
+
+      const updateProjectModule = require("./update_project.cjs");
+      const updateProjectMainSpy = vi.spyOn(updateProjectModule, "main").mockImplementation(async () => async () => ({ success: true }));
+
+      try {
+        await loadHandlers({
+          update_project: {
+            project: "https://github.com/orgs/myorg/projects/1",
+            "github-token": "explicit-project-token",
+          },
+        });
+
+        expect(global.getOctokit).toHaveBeenCalledWith("explicit-project-token");
+        expect(updateProjectMainSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            "github-token": "explicit-project-token",
+          }),
+          expect.objectContaining({ client: "project-client" })
+        );
+      } finally {
+        updateProjectMainSpy.mockRestore();
+        delete process.env.GH_AW_PROJECT_GITHUB_TOKEN;
+        delete global.getOctokit;
+      }
+    });
+
+    it("wraps project handlers so global.github is set to the project client during execution", async () => {
+      process.env.GH_AW_PROJECT_GITHUB_TOKEN = "projects-token";
+      const projectClient = { client: "project-client" };
+      global.getOctokit = vi.fn().mockReturnValue(projectClient);
+
+      const previousGithub = { client: "shared-client" };
+      global.github = previousGithub;
+      let seenGithub = null;
+
+      const updateProjectModule = require("./update_project.cjs");
+      const updateProjectMainSpy = vi.spyOn(updateProjectModule, "main").mockImplementation(async () => async () => {
+        // outer function: handler factory at loadHandlers() time; inner function: message handler at processMessages() time
+        seenGithub = global.github;
+        return { success: true };
+      });
+
+      try {
+        const handlers = await loadHandlers({
+          update_project: { project: "https://github.com/orgs/myorg/projects/1" },
+        });
+        const handler = handlers.get("update_project");
+        expect(typeof handler).toBe("function");
+
+        await handler({ type: "update_project" });
+
+        expect(seenGithub).toBe(projectClient);
+        expect(global.github).toBe(previousGithub);
+      } finally {
+        updateProjectMainSpy.mockRestore();
+        delete process.env.GH_AW_PROJECT_GITHUB_TOKEN;
+        delete global.getOctokit;
+        global.github = previousGithub;
+      }
+    });
+
+    it("restores global.github to absent state after wrapped project handler execution", async () => {
+      process.env.GH_AW_PROJECT_GITHUB_TOKEN = "projects-token";
+      const projectClient = { client: "project-client" };
+      global.getOctokit = vi.fn().mockReturnValue(projectClient);
+      delete global.github;
+
+      const updateProjectModule = require("./update_project.cjs");
+      const updateProjectMainSpy = vi.spyOn(updateProjectModule, "main").mockImplementation(async () => async () => ({ success: true }));
+
+      try {
+        const handlers = await loadHandlers({
+          update_project: { project: "https://github.com/orgs/myorg/projects/1" },
+        });
+        const handler = handlers.get("update_project");
+        expect(typeof handler).toBe("function");
+
+        await handler({ type: "update_project" });
+
+        expect("github" in global).toBe(false);
+      } finally {
+        updateProjectMainSpy.mockRestore();
+        delete process.env.GH_AW_PROJECT_GITHUB_TOKEN;
+        delete global.getOctokit;
+        delete global.github;
       }
     });
   });
@@ -385,6 +679,20 @@ describe("Safe Output Handler Manager", () => {
       // Handler is absent only because the file doesn't exist in the test env (warning, not error)
       expect(handlers.has("my_script")).toBe(false);
     });
+
+    it("should surface the load failure reason when a message has no handler", async () => {
+      process.env.GH_AW_SAFE_OUTPUT_SCRIPTS = JSON.stringify({
+        my_script: "safe_output_script_my_script.cjs",
+      });
+
+      const handlers = await loadHandlers({}, {});
+      const result = await processMessages(handlers, [{ type: "my_script" }]);
+
+      expect(result.results[0].success).toBe(false);
+      expect(result.results[0].error).toContain("No handler loaded for type 'my_script'");
+      expect(result.results[0].error).toContain("Cannot find module");
+      expect(core.warning).toHaveBeenCalledWith(expect.stringContaining("The handler was configured but failed to load"));
+    });
   });
 
   describe("processMessages", () => {
@@ -414,6 +722,36 @@ describe("Safe Output Handler Manager", () => {
       expect(result.results[0].messageIndex).toBe(0);
       expect(result.results[1].type).toBe("create_issue");
       expect(result.results[1].messageIndex).toBe(1);
+    });
+
+    it("preserves summary-safe diagnostics from skipped handler results", async () => {
+      const messages = [{ type: "add_comment", item_number: 123 }];
+      const skippedResult = {
+        success: false,
+        skipped: true,
+        reasonCode: "REQUIRED_LABELS_MISMATCH",
+        reason: "Required labels missing",
+        error: "Item does not match required-labels filter",
+        target: { repo: "owner/repo", number: 123 },
+        safeDetails: {
+          requiredLabels: ["automation", "n-plus-1"],
+          missingLabels: ["automation"],
+        },
+      };
+      const handler = vi.fn().mockResolvedValue(skippedResult);
+
+      const result = await processMessages(new Map([["add_comment", handler]]), messages);
+
+      expect(result.success).toBe(true);
+      expect(result.results[0]).toMatchObject({
+        type: "add_comment",
+        messageIndex: 0,
+        success: false,
+        skipped: true,
+        reasonCode: "REQUIRED_LABELS_MISMATCH",
+        reason: "Required labels missing",
+        result: skippedResult,
+      });
     });
 
     it("should abort non-reviewable outputs in detection warning mode", async () => {
@@ -1051,6 +1389,47 @@ describe("Safe Output Handler Manager", () => {
       const linkResult = result.results.find(r => r.type === "link_sub_issue");
       expect(linkResult.success).toBe(true);
       expect(linkResult.deferred).toBe(false);
+    });
+
+    it.each([
+      ["returned failure", () => ({ success: false, error: "Retry failed" })],
+      ["thrown error", () => Promise.reject(new Error("Retry failed"))],
+    ])("should classify a deferred retry %s as failed", async (_name, retryResult) => {
+      const handler = vi.fn().mockResolvedValueOnce({ deferred: true, error: "Unresolved temporary ID" }).mockImplementationOnce(retryResult);
+      const result = await processMessages(new Map([["link_sub_issue", handler]]), [{ type: "link_sub_issue", parent_issue_number: "aw_parent12", sub_issue_number: 42 }]);
+
+      expect(result.results[0]).toMatchObject({
+        type: "link_sub_issue",
+        success: false,
+        deferred: false,
+        error: "Retry failed",
+        result: { success: false, deferred: false, error: "Retry failed" },
+      });
+      expect(isFailedProcessingResult(result.results[0])).toBe(true);
+    });
+
+    it("preserves summary-safe diagnostics when a deferred retry is skipped", async () => {
+      const skippedResult = {
+        success: false,
+        skipped: true,
+        reasonCode: "REQUIRED_LABELS_MISMATCH",
+        reason: "Required labels missing",
+        target: { repo: "owner/repo", number: 123 },
+        safeDetails: { missingLabels: ["automation"] },
+      };
+      const handler = vi.fn().mockResolvedValueOnce({ deferred: true, error: "Unresolved temporary ID" }).mockResolvedValueOnce(skippedResult);
+      const result = await processMessages(new Map([["link_sub_issue", handler]]), [{ type: "link_sub_issue", parent_issue_number: "aw_parent12", sub_issue_number: 42 }]);
+
+      expect(result.results[0]).toMatchObject({
+        type: "link_sub_issue",
+        messageIndex: 0,
+        success: false,
+        skipped: true,
+        reasonCode: "REQUIRED_LABELS_MISMATCH",
+        reason: "Required labels missing",
+        result: skippedResult,
+      });
+      expect(isFailedProcessingResult(result.results[0])).toBe(false);
     });
 
     it("should track outputs created during deferred retry with unresolved temp IDs", async () => {
@@ -1830,6 +2209,45 @@ describe("Safe Output Handler Manager", () => {
     });
   });
 
+  describe("handler module runtime dependencies", () => {
+    // Safe output handler modules are copied to the runner temp directory without a
+    // node_modules folder, so requiring an npm package makes the handler fail to load
+    // at runtime with "Cannot find module" and silently skips its messages.
+    it("does not require npm packages from any handler module in HANDLER_MAP", () => {
+      const jsDir = new URL(".", import.meta.url).pathname;
+      const managerSource = fs.readFileSync(`${jsDir}safe_output_handler_manager.cjs`, "utf8");
+      const handlerMapBlock = managerSource.match(/const HANDLER_MAP = \{([\s\S]*?)\n\};/);
+      expect(handlerMapBlock).not.toBeNull();
+
+      const handlerFiles = [...handlerMapBlock[1].matchAll(/["'](\.\/[^"']+\.cjs)["']/g)].map(match => match[1].slice(2));
+      expect(handlerFiles).toContain("approve_workflow_run.cjs");
+
+      const builtinModules = new Set(require("module").builtinModules);
+      const visited = new Set();
+      const queue = [...handlerFiles];
+      /** @type {string[]} */
+      const externalRequires = [];
+
+      while (queue.length > 0) {
+        const file = queue.shift();
+        if (visited.has(file) || !fs.existsSync(`${jsDir}${file}`)) continue;
+        visited.add(file);
+
+        const source = fs.readFileSync(`${jsDir}${file}`, "utf8");
+        for (const match of source.matchAll(/require\(["']([^"']+)["']\)/g)) {
+          const specifier = match[1];
+          if (specifier.startsWith("./")) {
+            queue.push(specifier.slice(2));
+          } else if (!specifier.startsWith("node:") && !builtinModules.has(specifier)) {
+            externalRequires.push(`${file}: ${specifier}`);
+          }
+        }
+      }
+
+      expect(externalRequires).toEqual([]);
+    });
+  });
+
   describe("call_workflow handler registration", () => {
     it("processes call_workflow messages without no-handler warnings when handler is registered", async () => {
       const messages = [{ type: "call_workflow", workflow_name: "worker-a" }];
@@ -1969,6 +2387,124 @@ describe("Safe Output Handler Manager", () => {
 
     it("handles empty results array without throwing", () => {
       expect(() => skipReviewResults([], "PR is locked")).not.toThrow();
+    });
+  });
+
+  describe("rollbackReviewResultsForPR", () => {
+    it("rolls back only the matching PR result (nested result shape from processMessages)", () => {
+      const results = [
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 1 } },
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 2 } },
+      ];
+      rollbackReviewResultsForPR(results, "o/r", 1, "submission failed");
+      expect(results[0].success).toBe(false);
+      expect(results[0].error).toBe("Review finalization failed: submission failed");
+      // PR 2 result must not be touched
+      expect(results[1].success).toBe(true);
+      expect(results[1].error).toBeUndefined();
+    });
+
+    it("rolls back create_pull_request_review_comment results for the matching PR only", () => {
+      const results = [
+        { type: "create_pull_request_review_comment", success: true, result: { repo: "o/r", pull_request_number: 1 } },
+        { type: "create_pull_request_review_comment", success: true, result: { repo: "o/r", pull_request_number: 2 } },
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 1 } },
+      ];
+      rollbackReviewResultsForPR(results, "o/r", 1, "finalize error");
+      expect(results[0].success).toBe(false);
+      expect(results[2].success).toBe(false);
+      // PR 2 comment unchanged
+      expect(results[1].success).toBe(true);
+    });
+
+    it("falls back to rolling back all review results when no nested result matches", () => {
+      // Legacy shape: no r.result, no top-level repo/pull_request_number
+      const results = [
+        { type: "submit_pull_request_review", success: true },
+        { type: "create_pull_request_review_comment", success: true },
+        { type: "add_comment", success: true },
+      ];
+      rollbackReviewResultsForPR(results, "o/r", 99, "fallback error");
+      expect(results[0].success).toBe(false);
+      expect(results[1].success).toBe(false);
+      // non-review type must not be rolled back
+      expect(results[2].success).toBe(true);
+    });
+
+    it("does not modify results that already have success:false", () => {
+      const results = [{ type: "submit_pull_request_review", success: false, error: "already failed", result: { repo: "o/r", pull_request_number: 1 } }];
+      rollbackReviewResultsForPR(results, "o/r", 1, "new error");
+      // Falls back to global rollback path — but success is already false so no change
+      expect(results[0].error).toBe("already failed");
+    });
+
+    it("does not modify results for a different repo", () => {
+      const results = [{ type: "submit_pull_request_review", success: true, result: { repo: "o/other", pull_request_number: 1 } }];
+      rollbackReviewResultsForPR(results, "o/r", 1, "error");
+      // No match → fallback path, but the only review result has a different repo
+      // Fallback rolls back all review results regardless of repo
+      // (existing behavior: warns and rolls everything back)
+      expect(results[0].success).toBe(false);
+    });
+
+    it("handles empty results array without throwing", () => {
+      expect(() => rollbackReviewResultsForPR([], "o/r", 1, "error")).not.toThrow();
+    });
+  });
+
+  describe("skipReviewResultsForPR", () => {
+    it("marks only the matching PR result as skipped (nested result shape from processMessages)", () => {
+      const results = [
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 1 } },
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 2 } },
+      ];
+      skipReviewResultsForPR(results, "o/r", 1, "PR is locked");
+      expect(results[0].skipped).toBe(true);
+      expect(results[0].skipReason).toBe("PR is locked");
+      // PR 2 must not be skipped
+      expect(results[1].skipped).toBeUndefined();
+    });
+
+    it("marks create_pull_request_review_comment results for the matching PR only", () => {
+      const results = [
+        { type: "create_pull_request_review_comment", success: true, result: { repo: "o/r", pull_request_number: 3 } },
+        { type: "create_pull_request_review_comment", success: true, result: { repo: "o/r", pull_request_number: 5 } },
+        { type: "submit_pull_request_review", success: true, result: { repo: "o/r", pull_request_number: 3 } },
+      ];
+      skipReviewResultsForPR(results, "o/r", 3, "locked");
+      expect(results[0].skipped).toBe(true);
+      expect(results[2].skipped).toBe(true);
+      expect(results[1].skipped).toBeUndefined();
+    });
+
+    it("does not modify results with success:false", () => {
+      const results = [{ type: "submit_pull_request_review", success: false, error: "already failed", result: { repo: "o/r", pull_request_number: 1 } }];
+      skipReviewResultsForPR(results, "o/r", 1, "locked");
+      expect(results[0].skipped).toBeUndefined();
+    });
+
+    it("does not modify unrelated result types", () => {
+      const results = [
+        { type: "add_comment", success: true, result: { repo: "o/r", pull_request_number: 1 } },
+        { type: "create_issue", success: true },
+      ];
+      skipReviewResultsForPR(results, "o/r", 1, "locked");
+      expect(results[0].skipped).toBeUndefined();
+      expect(results[1].skipped).toBeUndefined();
+    });
+
+    it("handles top-level repo/pull_request_number for backward compat", () => {
+      const results = [
+        { type: "submit_pull_request_review", success: true, repo: "o/r", pull_request_number: 7 },
+        { type: "submit_pull_request_review", success: true, repo: "o/r", pull_request_number: 8 },
+      ];
+      skipReviewResultsForPR(results, "o/r", 7, "locked");
+      expect(results[0].skipped).toBe(true);
+      expect(results[1].skipped).toBeUndefined();
+    });
+
+    it("handles empty results array without throwing", () => {
+      expect(() => skipReviewResultsForPR([], "o/r", 1, "locked")).not.toThrow();
     });
   });
 

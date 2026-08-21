@@ -60,6 +60,125 @@ jobs:
 	assert.Equal(t, ".lock.yml", workflowFiles["ci"], "ci should map to .lock.yml")
 }
 
+// TestGenerateSafeOutputsConfigNeutralizesUnresolvableNeedsExpression verifies that a
+// templated expression referencing a job listed in safe-outputs.needs is neutralized in the
+// agent job's copy of the safe-outputs config, since that job is only ever wired as a
+// dependency of the safe_outputs handler job (see buildSafeOutputsJobNeeds), never of the
+// agent job itself. Leaving the raw needs.<job> expression in the agent job's config would
+// produce an actionlint "undefined property" error (see github/gh-aw#53909 /
+// pr-sous-chef.lock.yml:837).
+func TestGenerateSafeOutputsConfigNeutralizesUnresolvableNeedsExpression(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			Needs: []string{"approval_allowlist"},
+			ApproveWorkflowRun: &ApproveWorkflowRunConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("8")},
+				AllowedPullRequests:  []string{"${{ needs.approval_allowlist.outputs.eligible_pull_request_numbers }}"},
+			},
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err, "generateSafeOutputsConfig should not return an error")
+	require.NotEmpty(t, result, "Expected non-empty config")
+	assert.NotContains(t, result, "needs.approval_allowlist",
+		"agent job's safe-outputs config must not reference a job it does not depend on")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed), "Result must be valid JSON")
+
+	approveConfig, ok := parsed["approve_workflow_run"].(map[string]any)
+	require.True(t, ok, "Expected approve_workflow_run key in config")
+	assert.Equal(t, []any{}, approveConfig["allowed_pull_requests"],
+		"allowed_pull_requests should be neutralized to an empty array in the agent job's config")
+}
+
+func TestGenerateSafeOutputsConfigNeutralizesAllUnresolvableNeedsForms(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			Needs: []string{"approval_allowlist"},
+			ApproveWorkflowRun: &ApproveWorkflowRunConfig{
+				AllowedPullRequests: []string{`${{ needs['approval_allowlist'].outputs.eligible_pull_request_numbers }}`},
+			},
+			AddComments: &AddCommentsConfig{
+				AllowedCommentIDs: []string{"literal", "${{ needs.approval_allowlist.outputs.comment_ids }}"},
+			},
+			DataEnabled:          true,
+			DataSchemaExpression: "${{ fromJSON(needs.approval_allowlist.outputs.data_schema) }}",
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+
+	approveConfig := parsed["approve_workflow_run"].(map[string]any)
+	assert.Equal(t, []any{}, approveConfig["allowed_pull_requests"])
+	addCommentConfig := parsed["add_comment"].(map[string]any)
+	assert.Equal(t, []any{}, addCommentConfig["allows_comment_ids"])
+	assert.Empty(t, addCommentConfig["data_schema"])
+}
+
+func TestGenerateSafeOutputsConfigPreservesResolvableNeedsExpressions(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			Needs: []string{"approval_allowlist"},
+			AddComments: &AddCommentsConfig{
+				AllowedCommentIDs: []string{"${{ needs.prepare.outputs.comment_ids }}"},
+			},
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+	assert.Contains(t, result, "needs.prepare.outputs.comment_ids")
+}
+
+func TestSanitizeAgentSafeOutputsConfigNoOp(t *testing.T) {
+	config := map[string]any{
+		"add_comment": map[string]any{
+			"allowed_comment_ids": []string{"${{ needs.prepare.outputs.comment_ids }}"},
+		},
+	}
+
+	sanitizeAgentSafeOutputsConfig(config, nil)
+
+	assert.Equal(t, []string{"${{ needs.prepare.outputs.comment_ids }}"},
+		config["add_comment"].(map[string]any)["allowed_comment_ids"])
+}
+
+func TestSanitizeAgentSafeOutputsConfigStringExpression(t *testing.T) {
+	config := map[string]any{
+		"safe_output": map[string]any{
+			"data_schema": "${{ fromJSON(needs.approval_allowlist.outputs.data_schema) }}",
+		},
+	}
+
+	sanitizeAgentSafeOutputsConfig(config, []string{"approval_allowlist"})
+
+	assert.Empty(t, config["safe_output"].(map[string]any)["data_schema"])
+}
+
+func TestGenerateSafeOutputsConfigCommentMemoryToolsOnly(t *testing.T) {
+	data := &WorkflowData{
+		CommentMemoryConfig: &CommentMemoryConfig{
+			BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+			MemoryID:             "default",
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+	require.NotEmpty(t, result)
+	require.NotNil(t, data.SafeOutputs)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+	assert.Contains(t, parsed, commentMemoryHandlerKey)
+}
+
 // TestGenerateSafeOutputsConfigActions tests that generateSafeOutputsConfig includes custom
 // action tool names as enabled keys so both MCP server implementations register them.
 func TestGenerateSafeOutputsConfigActions(t *testing.T) {
@@ -122,8 +241,8 @@ func TestGenerateSafeOutputsConfigActionsCollisionReturnsError(t *testing.T) {
 
 	_, err := generateSafeOutputsConfig(data)
 	require.Error(t, err, "Expected an error when a custom action name collides with a built-in handler key")
-	assert.Contains(t, err.Error(), "add-labels", "Error should mention the conflicting action name")
-	assert.Contains(t, err.Error(), "add_labels", "Error should mention the conflicting normalized name")
+	require.ErrorContains(t, err, "add-labels", "Error should mention the conflicting action name")
+	require.ErrorContains(t, err, "add_labels", "Error should mention the conflicting normalized name")
 }
 
 // TestGenerateSafeOutputsConfigMissingToolWithIssue tests the missing_tool config.
@@ -218,6 +337,63 @@ func TestPopulateDispatchWorkflowFilesNoSafeOutputs(t *testing.T) {
 	data := &WorkflowData{SafeOutputs: nil}
 	// Should not panic
 	populateDispatchWorkflowFiles(data, "/some/path")
+}
+
+func TestGenerateSafeOutputsConfigAddsDataFlagsForBodyHandlers(t *testing.T) {
+	cfg := &SafeOutputsConfig{
+		DataEnabled: true,
+		AddComments: &AddCommentsConfig{
+			BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+		},
+	}
+	data := &WorkflowData{SafeOutputs: cfg}
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+	addComment, ok := parsed["add_comment"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, addComment["data_enabled"])
+}
+
+func TestGenerateSafeOutputsConfigForwardsAllowedCommentIDs(t *testing.T) {
+	cfg := &SafeOutputsConfig{
+		AddComments: &AddCommentsConfig{
+			BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+			Target:               "*",
+			AllowedCommentIDs:    []string{"${{ needs.prepare.outputs.comment_ids }}"},
+		},
+	}
+	data := &WorkflowData{SafeOutputs: cfg}
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+	addComment, ok := parsed["add_comment"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "*", addComment["target"])
+	assert.Equal(t, "${{ needs.prepare.outputs.comment_ids }}", addComment["allows_comment_ids"])
+}
+
+func TestGenerateSafeOutputsConfigAddsRuntimeDataSchemaExpression(t *testing.T) {
+	cfg := &SafeOutputsConfig{
+		DataEnabled:          true,
+		DataSchemaExpression: "${{ fromJSON(needs.schema.outputs.data_schema) }}",
+		AddComments: &AddCommentsConfig{
+			BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+		},
+	}
+	data := &WorkflowData{SafeOutputs: cfg}
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed))
+	addComment, ok := parsed["add_comment"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "${{ fromJSON(needs.schema.outputs.data_schema) }}", addComment["data_schema"])
 }
 
 // TestPopulateDispatchWorkflowFilesNoWorkflows tests that the function handles empty Workflows list gracefully.
@@ -565,11 +741,11 @@ func TestGenerateSafeOutputsConfigCreatePullRequestBackwardCompat(t *testing.T) 
 	data := &WorkflowData{
 		SafeOutputs: &SafeOutputsConfig{
 			CreatePullRequests: &CreatePullRequestsConfig{
-				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("2")},
-				AllowedLabels:        []string{"bug"},
-				AllowEmpty:           strPtr("true"),
-				AutoMerge:            strPtr("true"),
-				Expires:              24,
+				BaseSafeOutputConfig:          BaseSafeOutputConfig{Max: strPtr("2")},
+				SafeOutputAllowedLabelsConfig: SafeOutputAllowedLabelsConfig{AllowedLabels: []string{"bug"}},
+				AllowEmpty:                    strPtr("true"),
+				AutoMerge:                     strPtr("true"),
+				Expires:                       24,
 			},
 		},
 	}
@@ -594,6 +770,27 @@ func TestGenerateSafeOutputsConfigCreatePullRequestBackwardCompat(t *testing.T) 
 	assert.False(t, hasTargetRepo, "target-repo should not be present when not configured")
 	_, hasAllowedRepos := prConfig["allowed_repos"]
 	assert.False(t, hasAllowedRepos, "allowed_repos should not be present when not configured")
+}
+
+func TestGenerateSafeOutputsConfigCreatePullRequestAutoMergeMethod(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			CreatePullRequests: &CreatePullRequestsConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+				AutoMerge:            strPtr("rebase"),
+			},
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err, "generateSafeOutputsConfig should not return an error")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed), "Result must be valid JSON")
+
+	prConfig, ok := parsed["create_pull_request"].(map[string]any)
+	require.True(t, ok, "Expected create_pull_request key in config")
+	assert.Equal(t, "rebase", prConfig["auto_merge"], "auto_merge should preserve explicit merge method")
 }
 
 func TestGenerateSafeOutputsConfigInjectsCurrentCheckoutPatchWorkspacePath(t *testing.T) {
@@ -1178,4 +1375,51 @@ func TestGenerateSafeOutputsConfigDeduplicateByTitleNil(t *testing.T) {
 
 	_, hasDedup := ciConfig["deduplicate_by_title"]
 	assert.False(t, hasDedup, "deduplicate_by_title should not be present when nil")
+}
+
+// TestGenerateSafeOutputsConfigMaxBotMentions tests that max-bot-mentions is correctly
+// propagated as "max_bot_mentions" into config.json for the MCP server.
+func TestGenerateSafeOutputsConfigMaxBotMentions(t *testing.T) {
+	maxBotMentions := "5"
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			AddComments: &AddCommentsConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+			},
+			MaxBotMentions: &maxBotMentions,
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err, "generateSafeOutputsConfig should not return an error")
+	require.NotEmpty(t, result, "Expected non-empty config")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed), "Result must be valid JSON")
+
+	maxBotMentionsVal, ok := parsed["max_bot_mentions"]
+	require.True(t, ok, "Expected max_bot_mentions key in config")
+	assert.EqualValues(t, 5, maxBotMentionsVal, "max_bot_mentions should be 5")
+}
+
+// TestGenerateSafeOutputsConfigMaxBotMentionsAbsent tests that max_bot_mentions is
+// omitted from config.json when not configured.
+func TestGenerateSafeOutputsConfigMaxBotMentionsAbsent(t *testing.T) {
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			AddComments: &AddCommentsConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+			},
+		},
+	}
+
+	result, err := generateSafeOutputsConfig(data)
+	require.NoError(t, err, "generateSafeOutputsConfig should not return an error")
+	require.NotEmpty(t, result, "Expected non-empty config")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &parsed), "Result must be valid JSON")
+
+	_, hasMaxBotMentions := parsed["max_bot_mentions"]
+	assert.False(t, hasMaxBotMentions, "max_bot_mentions should not be present when not configured")
 }

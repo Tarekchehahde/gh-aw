@@ -312,8 +312,8 @@ func TestEnhanceToolDescription(t *testing.T) {
 			baseDescription: "Update a discussion.",
 			safeOutputs: &SafeOutputsConfig{
 				UpdateDiscussions: &UpdateDiscussionsConfig{
-					AllowedLabels: []string{"Label1", "Label2"},
-					Labels:        testBoolPtr(true),
+					SafeOutputAllowedLabelsConfig: SafeOutputAllowedLabelsConfig{AllowedLabels: []string{"Label1", "Label2"}},
+					Labels:                        boolPtr(true),
 				},
 			},
 			wantContains:    []string{"CONSTRAINTS:", `Only these labels are allowed: ["Label1" "Label2"]`},
@@ -325,8 +325,8 @@ func TestEnhanceToolDescription(t *testing.T) {
 			baseDescription: "Update a discussion.",
 			safeOutputs: &SafeOutputsConfig{
 				UpdateDiscussions: &UpdateDiscussionsConfig{
-					Title: testBoolPtr(true),
-					Body:  testBoolPtr(true),
+					Title: boolPtr(true),
+					Body:  boolPtr(true),
 				},
 			},
 			wantContains:    []string{"CONSTRAINTS:", "Title updates are allowed.", "Body updates are allowed."},
@@ -341,10 +341,10 @@ func TestEnhanceToolDescription(t *testing.T) {
 					UpdateEntityConfig: UpdateEntityConfig{
 						BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("3")},
 					},
-					Title:         testBoolPtr(true),
-					Body:          testBoolPtr(true),
-					Labels:        testBoolPtr(true),
-					AllowedLabels: []string{"bug"},
+					Title:                         boolPtr(true),
+					Body:                          boolPtr(true),
+					Labels:                        boolPtr(true),
+					SafeOutputAllowedLabelsConfig: SafeOutputAllowedLabelsConfig{AllowedLabels: []string{"bug"}},
 				},
 			},
 			wantContains: []string{
@@ -361,7 +361,7 @@ func TestEnhanceToolDescription(t *testing.T) {
 			baseDescription: "Update a discussion.",
 			safeOutputs: &SafeOutputsConfig{
 				UpdateDiscussions: &UpdateDiscussionsConfig{
-					Labels: testBoolPtr(true),
+					Labels: boolPtr(true),
 				},
 			},
 			wantContains:    []string{"CONSTRAINTS:", "Label updates are allowed."},
@@ -407,4 +407,71 @@ func TestSafeOutputsToolsJSONInSync(t *testing.T) {
 
 	assert.Equal(t, compilerTools, runtimeTools,
 		"pkg/workflow/js/safe_outputs_tools.json and actions/setup/js/safe_outputs_tools.json must define identical tool objects in the same order; update both files together")
+}
+
+func TestLargeContentFieldsHaveExpectedMaxLength(t *testing.T) {
+	var tools []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(safeOutputsToolsJSONContent), &tools), "failed to parse compiler copy of safe_outputs_tools.json")
+
+	findTool := func(toolName string) map[string]any {
+		for _, tool := range tools {
+			if name, ok := tool["name"].(string); ok && name == toolName {
+				return tool
+			}
+		}
+		return nil
+	}
+
+	fieldCases := []struct {
+		tool  string
+		field string
+	}{
+		{tool: "create_issue", field: "body"},
+		{tool: "create_discussion", field: "body"},
+		{tool: "add_comment", field: "body"},
+		{tool: "update_discussion", field: "body"},
+		{tool: "update_issue", field: "body"},
+		{tool: "update_pull_request", field: "body"},
+		{tool: "update_release", field: "body"},
+		{tool: "create_pull_request", field: "body"},
+		{tool: "close_discussion", field: "body"},
+		{tool: "close_issue", field: "body"},
+		{tool: "close_pull_request", field: "body"},
+		{tool: "create_pull_request_review_comment", field: "body"},
+		{tool: "submit_pull_request_review", field: "body"},
+		{tool: "reply_to_pull_request_review_comment", field: "body"},
+		{tool: "create_agent_session", field: "body"},
+		{tool: "create_project_status_update", field: "body"},
+		{tool: "update_project", field: "draft_body"},
+		{tool: "create_check_run", field: "summary"},
+		{tool: "create_check_run", field: "text"},
+		{tool: "autofix_code_scanning_alert", field: "fix_description"},
+		{tool: "autofix_code_scanning_alert", field: "fix_code"},
+		{tool: "merge_pull_request", field: "commit_message"},
+		{tool: "push_to_pull_request_branch", field: "message"},
+		{tool: "dismiss_pull_request_review", field: "justification"},
+		{tool: "noop", field: "message"},
+		{tool: "report_incomplete", field: "details"},
+		{tool: "mark_pull_request_as_ready_for_review", field: "reason"},
+	}
+
+	for _, tc := range fieldCases {
+		t.Run(tc.tool+"."+tc.field, func(t *testing.T) {
+			tool := findTool(tc.tool)
+			require.NotNil(t, tool, "expected tool %q", tc.tool)
+
+			inputSchema, ok := tool["inputSchema"].(map[string]any)
+			require.True(t, ok, "expected inputSchema object for tool %q", tc.tool)
+
+			properties, ok := inputSchema["properties"].(map[string]any)
+			require.True(t, ok, "expected properties object for tool %q", tc.tool)
+
+			fieldValue, ok := properties[tc.field].(map[string]any)
+			require.True(t, ok, "expected field %q for tool %q", tc.field, tc.tool)
+
+			maxLength, ok := fieldValue["maxLength"].(float64)
+			require.True(t, ok, "expected maxLength for %s.%s", tc.tool, tc.field)
+			assert.InDelta(t, float64(65536), maxLength, 0, "expected maxLength=65536 for %s.%s", tc.tool, tc.field)
+		})
+	}
 }

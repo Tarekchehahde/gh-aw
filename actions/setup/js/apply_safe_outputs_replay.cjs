@@ -23,7 +23,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { ERR_CONFIG, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_CONFIG, ERR_SYSTEM, ERR_VALIDATION, ERR_PARSE } = require("./error_codes.cjs");
 const { AGENT_OUTPUT_FILENAME, TMP_GH_AW_PATH } = require("./constants.cjs");
 
 /**
@@ -70,7 +70,11 @@ function parseRunUrl(runUrl) {
 async function downloadAgentArtifact(runId, destDir, repoSlug) {
   core.info(`Downloading agent artifact from run ${runId}...`);
 
-  fs.mkdirSync(destDir, { recursive: true });
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to create directory ${destDir}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   const args = ["run", "download", runId, "--name", "agent", "--dir", destDir];
   if (repoSlug) {
@@ -99,12 +103,17 @@ async function downloadAgentArtifact(runId, destDir, repoSlug) {
  * @returns {Object} Handler config keyed by normalized type name
  */
 function buildHandlerConfigFromOutput(agentOutputFile) {
-  const content = fs.readFileSync(agentOutputFile, "utf8");
+  let content;
+  try {
+    content = fs.readFileSync(agentOutputFile, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${agentOutputFile}: ${getErrorMessage(err)}`, { cause: err });
+  }
   let validatedOutput;
   try {
     validatedOutput = JSON.parse(content);
   } catch (err) {
-    throw new Error("Failed to parse agent output file " + agentOutputFile + ": " + getErrorMessage(err), { cause: err });
+    throw new Error(`${ERR_PARSE}: ` + "Failed to parse agent output file " + agentOutputFile + ": " + getErrorMessage(err), { cause: err });
   }
 
   if (!validatedOutput.items || !Array.isArray(validatedOutput.items)) {

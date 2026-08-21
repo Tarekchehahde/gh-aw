@@ -209,7 +209,7 @@ function readContextString(value) {
  * 2. `awInfo.context.engine_id` – propagated via aw_context for auxiliary / dispatched jobs
  * 3. `process.env.GH_AW_INFO_ENGINE_ID` – workflow-injected env var fallback
  *
- * @param {object} awInfo
+ * @param {any} awInfo
  * @returns {string}
  */
 function resolveEngineId(awInfo) {
@@ -226,7 +226,7 @@ function resolveEngineId(awInfo) {
  * standalone runs we fall back to the current run's run_id-run_attempt pair so
  * every live span is still queryable as a bounded execution unit.
  *
- * @param {object} awInfo
+ * @param {any} awInfo
  * @param {string} runId
  * @param {string} runAttempt
  * @returns {Array<{key: string, value: object}>}
@@ -323,7 +323,7 @@ const SPAN_KIND_CONSUMER = 5;
  * Build the OTLP span object nested under `scopeSpans[].spans[]`.
  *
  * @param {OTLPSpanRecordOptions} opts
- * @returns {object}
+ * @returns {any}
  */
 function buildOTLPSpan({ traceId, spanId, parentSpanId, spanName, startMs, endMs, attributes, statusCode, statusMessage, kind = SPAN_KIND_INTERNAL, events }) {
   const code = typeof statusCode === "number" ? statusCode : 1; // STATUS_CODE_OK
@@ -572,7 +572,7 @@ function buildGitHubActionsRunUrlAttribute(repository, runId) {
  *   resourceAttributes?: Array<{key: string, value: object}>,
  *   spans: object[]
  * }} opts
- * @returns {object}
+ * @returns {any}
  */
 function buildOTLPBatchPayload({ serviceName, scopeVersion, resourceAttributes, spans }) {
   return {
@@ -603,7 +603,7 @@ function buildOTLPBatchPayload({ serviceName, scopeVersion, resourceAttributes, 
  *   spans: object[],
  *   maxSpansPerPayload?: number
  * }} opts
- * @returns {object[]}
+ * @returns {any[]}
  */
 function buildOTLPBatchPayloads({ serviceName, scopeVersion, resourceAttributes, spans, maxSpansPerPayload = 100 }) {
   const normalizedMax = Number.isInteger(maxSpansPerPayload) && maxSpansPerPayload > 0 ? maxSpansPerPayload : 100;
@@ -625,7 +625,7 @@ function buildOTLPBatchPayloads({ serviceName, scopeVersion, resourceAttributes,
  * Build an OTLP/HTTP JSON traces payload wrapping a single span.
  *
  * @param {OTLPSpanOptions} opts
- * @returns {object} - Ready to be serialised as JSON and POSTed to `/v1/traces`
+ * @returns {any} - Ready to be serialised as JSON and POSTed to `/v1/traces`
  */
 function buildOTLPPayload({ traceId, spanId, parentSpanId, spanName, startMs, endMs, serviceName, scopeVersion, attributes, resourceAttributes, statusCode, statusMessage, kind = SPAN_KIND_INTERNAL, events }) {
   return buildOTLPBatchPayload({
@@ -653,7 +653,7 @@ const OTEL_JSONL_PATH = "/tmp/gh-aw/otel.jsonl";
  * file.  Creates the `/tmp/gh-aw` directory if it does not already exist.
  * Errors are silently swallowed — mirror failures must never break the workflow.
  *
- * @param {object} payload - OTLP traces payload
+ * @param {any} payload - OTLP traces payload
  * @returns {void}
  */
 function appendToOTLPJSONL(payload) {
@@ -873,6 +873,8 @@ const MAX_ATTR_VALUE_LENGTH = 1024;
  */
 const REDACTED = "[REDACTED]";
 
+const FETCH_TIMEOUT_MS = 120_000;
+
 /**
  * Sanitize an array of OTLP key-value attributes in-place (shallowly cloned).
  *
@@ -912,8 +914,8 @@ function sanitizeAttrs(attrs) {
  *
  * The original payload object is not mutated; a shallow-clone is returned.
  *
- * @param {object} payload - OTLP traces payload produced by {@link buildOTLPPayload}
- * @returns {object} Sanitized payload suitable for serialisation
+ * @param {any} payload - OTLP traces payload produced by {@link buildOTLPPayload}
+ * @returns {any} Sanitized payload suitable for serialisation
  */
 function sanitizeOTLPPayload(payload) {
   if (!payload || !Array.isArray(payload.resourceSpans)) return payload;
@@ -1034,7 +1036,7 @@ function parseOTLPEndpoints() {
  * caller before invoking this function (pass `skipJSONL: true`).
  *
  * @param {OTLPEndpointEntry[]} endpoints  - Resolved endpoint list from {@link parseOTLPEndpoints}
- * @param {object} payload                 - Serialisable OTLP JSON object
+ * @param {any} payload                 - Serialisable OTLP JSON object
  * @param {{ maxRetries?: number, baseDelayMs?: number, skipJSONL?: boolean }} [opts]
  * @returns {Promise<void>}
  */
@@ -1065,7 +1067,7 @@ async function sendOTLPToAllEndpoints(endpoints, payload, opts = {}) {
  * (used for per-endpoint headers in the multi-endpoint case).
  *
  * @param {string} endpoint  - OTLP base URL (e.g. https://traces.example.com:4317)
- * @param {object} payload   - Serialisable OTLP JSON object
+ * @param {any} payload   - Serialisable OTLP JSON object
  * @param {{ maxRetries?: number, baseDelayMs?: number, skipJSONL?: boolean, headersOverride?: string }} [opts]
  * @returns {Promise<void>}
  */
@@ -1097,6 +1099,7 @@ async function sendOTLPSpan(endpoint, payload, { maxRetries = 2, baseDelayMs = 1
             method: "POST",
             headers,
             body: sanitizedBody,
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
           });
       if (response.ok) {
         return;
@@ -1401,7 +1404,7 @@ async function sendJobSetupSpan(options = {}) {
  * file, invalid JSON, permission denied, etc.).
  *
  * @param {string} filePath - Absolute path to the JSON file
- * @returns {object | null}
+ * @returns {any | null}
  */
 function readJSONIfExists(filePath) {
   try {
@@ -1430,6 +1433,7 @@ const OTLP_EXPORT_ERRORS_PATH = "/tmp/gh-aw/otlp-export-errors.count";
  * @type {string}
  */
 const OTLP_EXPORT_ERROR_DETAILS_PATH = "/tmp/gh-aw/otlp-export-errors.jsonl";
+const AGENT_EXECUTION_EXIT_CODE_PATH = "/tmp/gh-aw/agent_execution_exit_code.txt";
 
 /**
  * Path to the failure categories file written by handle_agent_failure and read
@@ -1497,6 +1501,25 @@ function readOTLPExportErrorCount() {
     return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * Read an integer value from a file.
+ *
+ * @param {string} filePath
+ * @returns {number | null}
+ */
+function readIntegerIfExists(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8").trim();
+    if (!raw) {
+      return null;
+    }
+    const parsed = parseInt(raw, 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -2037,6 +2060,8 @@ async function sendJobConclusionSpan(spanName, options = {}) {
   const outputErrors = Array.isArray(agentOutput.errors) ? agentOutput.errors : [];
   const outputItems = Array.isArray(agentOutput.items) ? agentOutput.items : [];
   const errorMessages = outputErrors.map(getErrorMessage).filter(Boolean).slice(0, 5);
+  const agentExecutionExitCode = readIntegerIfExists(AGENT_EXECUTION_EXIT_CODE_PATH);
+  const hasAgentExecutionFailureExitCode = Number.isInteger(agentExecutionExitCode) && agentExecutionExitCode !== 0;
   const warningCount = runtimeMetrics.warningCount + (detectionConclusion === "warning" ? 1 : 0);
   const workflowRunConclusion = (typeof awInfo.workflow_run_conclusion === "string" ? awInfo.workflow_run_conclusion : "") || (typeof awInfo.context?.workflow_run_conclusion === "string" ? awInfo.context.workflow_run_conclusion : "");
 
@@ -2055,7 +2080,11 @@ async function sendJobConclusionSpan(spanName, options = {}) {
   // When GH_AW_AGENT_CONCLUSION and workflowRunConclusion are both absent (e.g. in the
   // agent job's own post-step where needs.<job>.result is not yet visible), fall back to
   // observable failure evidence so gh-aw.run.status and status.code are accurate.
-  if (!rawRunStatus && outputErrors.length > 0) {
+  if (!rawRunStatus && hasAgentExecutionFailureExitCode) {
+    runStatus = "failure";
+    statusCode = 2;
+    statusMessage = `copilot cli exited with code ${agentExecutionExitCode}`;
+  } else if (!rawRunStatus && outputErrors.length > 0) {
     runStatus = "failure";
     statusCode = 2;
     statusMessage = (errorMessages.length > 0 ? `errors detected: ${errorMessages[0]}` : "errors detected").slice(0, 256);
@@ -2076,6 +2105,9 @@ async function sendJobConclusionSpan(spanName, options = {}) {
   attributes.push(buildAttr("gh-aw.run.status", runStatus));
   attributes.push(buildAttr("gh-aw.error_count", outputErrors.length));
   attributes.push(buildAttr("gh-aw.warning_count", warningCount));
+  if (typeof agentExecutionExitCode === "number" && Number.isInteger(agentExecutionExitCode)) {
+    attributes.push(buildAttr("gh-aw.agent.execution.exit_code", agentExecutionExitCode));
+  }
   attributes.push(buildAttr("gh-aw.permission_denied_count", runtimeMetrics.permissionDeniedCount));
   attributes.push(buildAttr("gh-aw.steering_event_count", runtimeMetrics.steeringEventCount));
   attributes.push(buildAttr("gh-aw.action_minutes", Math.max(0, endMs - startMs) / 60000));
@@ -2301,6 +2333,7 @@ async function sendJobConclusionSpan(spanName, options = {}) {
       return options.startMs;
     }
   })();
+  /** @type {any} */
   let agentEndMs = null;
   try {
     agentEndMs = fs.statSync("/tmp/gh-aw/agent_output.json").mtimeMs;

@@ -23,6 +23,17 @@ func IsNotFoundError(err error) bool {
 	return matched
 }
 
+// IsNotFoundOutput reports whether output represents an HTTP 404 / "not found" response.
+// The check is case-insensitive and matches both the numeric literal "404" and
+// the phrase "not found".
+func IsNotFoundOutput(output string) bool {
+	matched := containsSubstring(output, "404", "not found")
+	if matched {
+		errorutilLog.Printf("Classified output as not-found (404): %s", output)
+	}
+	return matched
+}
+
 // IsForbiddenError reports whether err represents an HTTP 403 / "forbidden" response.
 // It returns false when err is nil.
 // The check is case-insensitive and only matches HTTP-style 403 patterns such as
@@ -49,6 +60,37 @@ func IsGoneError(err error) bool {
 	return matched
 }
 
+// IsRateLimitError reports whether output indicates a GitHub API rate-limit error.
+// The check is case-insensitive and matches known API phrases.
+func IsRateLimitError(output string) bool {
+	matched := containsSubstring(output,
+		"rate limit exceeded",
+		"secondary rate limit",
+	)
+	if matched {
+		errorutilLog.Printf("Classified output as rate-limit related (len=%d)", len(output))
+	}
+	return matched
+}
+
+// IsAuthError reports whether output indicates an authentication or
+// authorization issue from the GitHub API or gh CLI.
+func IsAuthError(output string) bool {
+	matched := containsSubstring(output,
+		"gh_token",
+		"github_token",
+		"authentication",
+		"not logged into",
+		"unauthorized",
+		"permission denied",
+		"saml enforcement",
+	)
+	if matched {
+		errorutilLog.Printf("Classified output as auth-related (len=%d)", len(output))
+	}
+	return matched
+}
+
 // containsErrorSubstring reports whether err contains any of the provided
 // substrings after lowercasing the full error message for case-insensitive
 // matching.
@@ -56,7 +98,11 @@ func containsErrorSubstring(err error, substrings ...string) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
+	return containsSubstring(err.Error(), substrings...)
+}
+
+func containsSubstring(value string, substrings ...string) bool {
+	msg := strings.ToLower(value)
 	for _, substring := range substrings {
 		if strings.Contains(msg, substring) {
 			return true

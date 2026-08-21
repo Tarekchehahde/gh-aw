@@ -15,9 +15,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 tools:
   cli-proxy: true
@@ -25,17 +22,14 @@ tools:
 imports:
   - shared/mcp/notion.md
   - shared/otlp.md
+  - shared/reporting.md
 strict: true
-
-
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 ### Issue Summary to Notion
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 Analyze the issue #${{ github.event.inputs.issue-number }} and create a brief summary, then add it as a comment to the Notion page.
 

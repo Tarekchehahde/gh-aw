@@ -156,6 +156,21 @@
   left: 1rem;
 }
 
+/* Ensure visually hidden labels never expand the mobile layout width.
+   This covers Starlight's heading anchor labels in addition to local controls. */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 /* Mermaid diagram colors
    We style Mermaid nodes by their class (tracked, notTracked, workflow, external)
    so we can use lighter colors in light mode and darker colors in dark mode. */
@@ -1690,8 +1705,11 @@ main,
   }
 }
 
-/* Mobile and tablet navigation (all viewports ≤900px) — hamburger replaces full header nav */
-@media (max-width: 900px) {
+/* Mobile and tablet navigation (all viewports ≤1050px) — hamburger replaces full header nav */
+/* Upper bound raised from 900px to 1050px so that iPad Pro 12.9 (1024px portrait) uses the
+   hamburger instead of the full 7-item nav bar, which overflowed and caused pointer-target
+   overlap on that device. See: https://github.com/github/gh-aw/issues/45211 */
+@media (max-width: 1050px) {
   /* Hide full nav; hamburger provides equivalent navigation on mobile and tablet */
   .custom-header-links {
     display: none !important;

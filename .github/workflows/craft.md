@@ -16,11 +16,10 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
   - shared/otlp.md
-sandbox:
-  agent:
-    sudo: false
+  - shared/reporting.md
 tools:
   cli-proxy: true
   edit:
@@ -48,6 +47,11 @@ safe-outputs:
     run-failure: "🛠️ Forge cooling down! [{workflow_name}]({run_url}) {status}. The anvil awaits another attempt..."
 features:
   gh-aw-detection: true
+evals:
+  - id: workflow_file_generated
+    question: Did the agent generate a new agentic workflow markdown file based on the user request?
+  - id: workflow_committed_or_pr
+    question: Was the generated workflow file committed to the repository or a PR created for review?
 ---
 
 # Workflow Craft Agent

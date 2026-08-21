@@ -71,6 +71,15 @@ An implementation MUST NOT grant elevated authority based on absent or unresolve
 
 A policy decision MUST be deterministic: given identical attribution inputs, the same policy MUST always be produced.
 
+#### Compliance Fixtures
+
+The minimum conformance fixture set for these RFC 2119 norms is tracked in
+`specs/intent-attribution-compliance/`:
+
+- `specs/intent-attribution-compliance/explicit-intent-wins.yaml`
+- `specs/intent-attribution-compliance/ambiguous-root-closing-issues.yaml`
+- `specs/intent-attribution-compliance/unlinked-pr-fail-closed.yaml`
+
 
 ## Current implementation
 
@@ -118,6 +127,14 @@ the compiled rule set from `.github/intent-policy.json` when present, otherwise 
 label-to-intent selectors derived from `.github/objective-mapping.json` — during validation
 or CI. Keys present in one source but not the other SHOULD surface as a sync warning or
 compliance failure so attribution and authorization stay aligned.
+
+**Escalation norm**: A sync warning that persists across **3 or more consecutive CI runs**
+without a corresponding corrective PR or explicit waiver **MUST** be escalated to a compliance
+failure. When a sync warning escalates, the CI check responsible for drift detection **MUST**
+fail with a non-zero exit code and open (or update) a tracking issue recording the affected
+keys, the first-detected date, and the on-call maintainer as the default assignee. This norm
+ensures that aspirational migration language does not mask persistent, unaddressed
+configuration drift.
 
 ## Product boundary
 
@@ -920,12 +937,12 @@ The agent must not be able to modify or expand its own policy.
 
 ### `Authorizer.AuthorizeTool` Implementation Audit
 
-The `AuthorizeTool` function as specified in this section is **not yet implemented** in the Go orchestrator. The following table documents which fields of `ExecutionPolicy` are wired to runtime enforcement and which remain unused.
+`Authorizer.AuthorizeTool` and `ResolveRisk` are implemented in `pkg/intent` (see `pkg/intent/governance.go`), but neither is yet called by the Go orchestrator. The following table documents which fields of `ExecutionPolicy` are wired to runtime enforcement and which remain unused.
 
 | `ExecutionPolicy` field | Wired to enforcement? | Notes |
 |---|---|---|
-| `AllowedTools` | **Not wired** | The `pkg/intent` package implements `PolicyCompiler.Compile()` and `mergePolicy()` for this field, but no orchestrator calls `AuthorizeTool` at tool-call time. |
-| `DeniedTools` | **Not wired** | Same as `AllowedTools` — present in the spec and policy model, not enforced at runtime. |
+| `AllowedTools` | **Implemented, not wired into orchestrator** | `pkg/intent` implements `PolicyCompiler.Compile()`, `mergePolicy()`, and `Authorizer.AuthorizeTool()` for this field, but no orchestrator calls `AuthorizeTool` at tool-call time yet. |
+| `DeniedTools` | **Implemented, not wired into orchestrator** | Same as `AllowedTools` — `Authorizer.AuthorizeTool()` checks this field, but it is not yet invoked from the execution path. |
 | `Autonomy` | **Not wired** | The autonomy level is compiled into the policy but not checked against actual workflow capabilities at execution time. |
 | `WriteScope` | **Not wired** | Defined in the policy model; no runtime enforcement in the Go orchestrator. |
 | `HumanApprovalRequired` | **Not wired** | Defined in policy model; human approval gates are not currently tied to `ExecutionPolicy`. |
@@ -934,9 +951,9 @@ The `AuthorizeTool` function as specified in this section is **not yet implement
 | `MaxAttempts` | **Not wired** | Not enforced at the orchestrator level. |
 | `RuleIDs` | **Provenance only** | Recorded in the policy for auditing; not used to gate execution. |
 
-**Risk**: Policy constraints defined in `.github/intent-policy.json` (or the equivalent `rules` array) have no runtime effect until the orchestrator is wired to call `AuthorizeTool` and enforce `WriteScope`, `HumanApprovalRequired`, and `RequiredChecks`. Any policy compiled by `PolicyCompiler.Compile()` today is purely advisory.
+**Risk**: Policy constraints defined in `.github/intent-policy.json` (or the equivalent `rules` array) have no runtime effect until the orchestrator calls `Authorizer.AuthorizeTool` and enforces `WriteScope`, `HumanApprovalRequired`, and `RequiredChecks`. Any policy compiled by `PolicyCompiler.Compile()` today is purely advisory.
 
-**Required follow-up**: Implement `Authorizer.AuthorizeTool` in `pkg/intent` or a new `pkg/intent/authz` sub-package and wire it into the execution path. Gate enforcement behind a feature flag until the policy model is validated in production.
+**Required follow-up**: Wire the now-implemented `Authorizer.AuthorizeTool` (in `pkg/intent`) into the execution path. Gate enforcement behind a feature flag until the policy model is validated in production.
 
 
 Initial observable rules:

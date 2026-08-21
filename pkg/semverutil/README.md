@@ -98,6 +98,17 @@ semverutil.IsMorePreciseVersion("v4", "v4.3.0")     // false
 semverutil.IsMorePreciseVersion("v4.3.0", "v4.3.0") // false (equal precision)
 ```
 
+### `NormalizeGitDescribeSemver(v string) string`
+
+Normalizes a version string produced by `git describe` into a canonical semver. Strips `git describe` prerelease suffixes of the form `N-gHEX` or `N-gHEX-dirty` (which indicate commits-since-tag metadata rather than real prerelease labels), leaving only the base semver. Non-`git describe` prerelease suffixes (e.g. `-beta.1`) are preserved. Returns the input unchanged if it is not a valid semver.
+
+```go
+semverutil.NormalizeGitDescribeSemver("v1.2.3-14-gabcdef")       // → "v1.2.3"
+semverutil.NormalizeGitDescribeSemver("v1.2.3-14-gabcdef-dirty") // → "v1.2.3"
+semverutil.NormalizeGitDescribeSemver("v1.2.3-beta.1")           // → "v1.2.3-beta.1"
+semverutil.NormalizeGitDescribeSemver("v1.2.3")                  // → "v1.2.3"
+```
+
 ### `IsCompatible(pinVersion, requestedVersion string) bool`
 
 Reports whether `pinVersion` is semver-compatible with `requestedVersion`. Compatibility is defined as sharing the same major version.
@@ -144,6 +155,10 @@ semverutil.IsCompatible("v6.0.0", "v5") // false
 - The package intentionally delegates to `golang.org/x/mod/semver` for canonical semver logic rather than implementing its own parsing.
 - `ParseVersion` uses `semver.Canonical` before splitting into components, ensuring correct handling of short forms like `v1` (canonicalized to `v1.0.0`).
 - `IsCompatible` returns `false` for invalid versions on either side before comparing majors, preventing two malformed version strings from being treated as compatible.
+
+## Source Synchronization
+
+Reviewed against recent source updates on 2026-07-24; `NormalizeGitDescribeSemver` added to Public API section. Re-verified on 2026-08-14; no further public-contract deltas identified.
 
 ---
 

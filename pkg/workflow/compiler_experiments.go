@@ -15,11 +15,11 @@ import (
 
 var experimentsLog = logger.New("workflow:compiler_experiments")
 
-// experimentsCacheDir is the runtime directory where the experiment state JSON is stored.
+// experimentsCacheDir is the runtime directory where the experiment state file is stored.
 const experimentsCacheDir = "/tmp/gh-aw/experiments"
 
-// experimentStateFile is the path to the experiment state JSON written by pick_experiment.cjs.
-const experimentStateFile = experimentsCacheDir + "/state.json"
+// experimentStateFile is the path to the experiment run-ledger JSONL file written by pick_experiment.cjs.
+const experimentStateFile = experimentsCacheDir + "/state.jsonl"
 
 // ExperimentsStorageCache uses GitHub Actions cache to persist experiment state.
 const ExperimentsStorageCache = "cache"
@@ -115,11 +115,17 @@ func extractExperimentsStorageFromFrontmatter(frontmatter map[string]any) string
 // experimentsBranchName returns the git branch name used for repo-based experiment storage.
 // Format: "experiments/{sanitizedWorkflowID}"
 func experimentsBranchName(workflowID string) string {
+	return WorkflowStateBranchName(experimentsBranchPrefix, workflowID)
+}
+
+// WorkflowStateBranchName returns a durable state branch name using
+// "{prefix}/{sanitizedWorkflowID}" format.
+func WorkflowStateBranchName(prefix, workflowID string) string {
 	sanitized := SanitizeWorkflowIDForCacheKey(workflowID)
 	if sanitized == "" {
 		sanitized = "default"
 	}
-	return experimentsBranchPrefix + "/" + sanitized
+	return prefix + "/" + sanitized
 }
 
 // extractOneExperimentConfig converts a single raw experiment value into an ExperimentConfig.
@@ -316,17 +322,80 @@ func extractIntSlice(raw any) []int {
 	return nil
 }
 
+// ParseExperimentMetricEvalReference returns the referenced eval question ID when metric
+// declares an eval-backed success metric.
+// Supported forms:
+//   - eval:<id>
+//   - evals.<id>
+//   - evals.<id>.<suffix> (suffix reserved for future derived metrics)
+func ParseExperimentMetricEvalReference(metric string) (string, bool) {
+	trimmed := strings.TrimSpace(metric)
+	if trimmed == "" {
+		return "", false
+	}
+	if rest, ok := strings.CutPrefix(trimmed, "eval:"); ok {
+		return strings.TrimSpace(rest), true
+	}
+	if rest, ok := strings.CutPrefix(trimmed, "evals."); ok {
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			return "", true
+		}
+		parts := strings.SplitN(rest, ".", 2)
+		return parts[0], true
+	}
+	return "", false
+}
+
+// validateExperimentMetricReferences ensures experiment metrics that reference evals
+// point to declared eval question IDs.
+func validateExperimentMetricReferences(configs map[string]*ExperimentConfig, evals *EvalsConfig) error {
+	if len(configs) == 0 {
+		return nil
+	}
+
+	evalIDs := map[string]struct{}{}
+	if evals != nil {
+		for _, q := range evals.Questions {
+			if q.ID != "" {
+				evalIDs[q.ID] = struct{}{}
+			}
+		}
+	}
+
+	for experimentName, cfg := range configs {
+		if cfg == nil {
+			continue
+		}
+		referencedEvalID, referencesEval := ParseExperimentMetricEvalReference(cfg.Metric)
+		if !referencesEval {
+			continue
+		}
+		if referencedEvalID == "" {
+			return fmt.Errorf("experiments.%s.metric: eval reference must include a non-empty eval id", experimentName)
+		}
+		if _, ok := evalIDs[referencedEvalID]; !ok {
+			if len(evalIDs) == 0 {
+				return fmt.Errorf("experiments.%s.metric: references eval %q but no evals are declared", experimentName, referencedEvalID)
+			}
+			return fmt.Errorf("experiments.%s.metric: references unknown eval %q", experimentName, referencedEvalID)
+		}
+	}
+
+	return nil
+}
+
 // generateExperimentSteps creates the steps that pick and upload A/B experiment variants.
 //
 // When storage is "cache" (legacy) the steps are:
 //  1. Restore experiment cache   – actions/cache/restore keyed by workflow ID
-//  2. Pick variants              – pick_experiment.cjs (reads/writes state.json, sets step outputs,
+//  2. Pick variants              – pick_experiment.cjs (reads/writes state.jsonl/state.json, sets step outputs,
 //     writes a Markdown step summary); outputs: one per experiment (e.g. "caveman=yes") + "experiments" JSON blob
 //  3. Save experiment cache      – actions/cache/save keyed by workflow ID
 //  4. Upload experiment artifact – actions/upload-artifact named "{workflowID}-experiment"
 //
 // When storage is "repo" (default) the steps are:
-//  1. Restore experiment state from git – load_experiment_state_from_repo.cjs fetches state.json
+//  1. Restore experiment state from git – load_experiment_state_from_repo.cjs fetches state.jsonl/state.json
 //     from the "experiments/{sanitizedID}" branch via the GitHub API (read-only; falls back to
 //     empty state when the branch/file does not yet exist)
 //  2. Pick variants              – same as cache mode
@@ -560,7 +629,7 @@ func experimentArtifactDownloadName(data *WorkflowData) string {
 
 // buildExperimentArtifactDownloadSteps creates a download step for the experiment artifact.
 // The artifact is downloaded to experimentsCacheDir so the detection agent can read the
-// current variant assignments from state.json.
+// current variant assignments from state.jsonl/state.json.
 // The step is a no-op when no experiments are declared.
 // pinAction resolves the download-artifact action reference; pass c.getActionPin from Compiler methods.
 func buildExperimentArtifactDownloadSteps(data *WorkflowData, pinAction func(string) string) []string {

@@ -33,7 +33,8 @@ type ProgressBar struct {
 	total         int64
 	current       int64
 	indeterminate bool
-	updateCount   int64 // Counter for pulsing animation in indeterminate mode
+	updateCount   int64       // Counter for pulsing animation in indeterminate mode
+	ttyCheck      func() bool // Injectable for testing; defaults to isTTY
 }
 
 // NewProgressBar creates a new progress bar with the specified total size (determinate mode)
@@ -65,6 +66,7 @@ func NewProgressBar(total int64) *ProgressBar {
 		current:       0,
 		indeterminate: false,
 		updateCount:   0,
+		ttyCheck:      isTTY,
 	}
 }
 
@@ -92,13 +94,15 @@ func (p *ProgressBar) Update(current int64) string {
 
 	// Handle indeterminate mode
 	if p.indeterminate {
-		if !isTTY() {
+		if !p.ttyCheck() {
 			// Fallback for non-TTY: "Processing... (512MB)"
 			if current == 0 {
 				return "Processing..."
 			}
 			return fmt.Sprintf("Processing... (%s)", formatBytes(current))
 		}
+		// Use a manual pulse because this synchronous renderer has no tea.Program loop
+		// to drive bubbles' spring animation.
 		// In TTY mode, show a pulsing indicator by cycling between 30% and 70%
 		// This creates a visual "breathing" effect that's more noticeable
 		// Using sine wave-like progression: 30% -> 50% -> 70% -> 50% -> 30%
@@ -116,7 +120,7 @@ func (p *ProgressBar) Update(current int64) string {
 
 	// Handle determinate mode with edge case: avoid division by zero
 	if p.total == 0 {
-		if isTTY() {
+		if p.ttyCheck() {
 			return p.progress.ViewAs(1.0)
 		}
 		return "100% (0B/0B)"
@@ -124,13 +128,16 @@ func (p *ProgressBar) Update(current int64) string {
 
 	percent := float64(current) / float64(p.total)
 
-	if !isTTY() {
-		// Fallback for non-TTY: "50% (512MB/1024MB)"
+	if !p.ttyCheck() {
+		// Non-TTY: hand-build "50% (512MB/1024MB)".
+		// In TTY mode the percentage is rendered by bubbles via ViewAs (ShowPercentage
+		// defaults to true), so the two branches stay consistent without duplication.
 		return fmt.Sprintf("%d%% (%s/%s)",
 			int(percent*100),
 			formatBytes(current),
 			formatBytes(p.total))
 	}
 
+	// TTY: delegate to bubbles — ViewAs renders the gradient bar and percentage.
 	return p.progress.ViewAs(percent)
 }

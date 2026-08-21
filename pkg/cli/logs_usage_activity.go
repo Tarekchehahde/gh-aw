@@ -21,6 +21,7 @@ type usageActivitySummary struct {
 	Session     *usageActivitySession     `json:"session,omitempty"`
 	Gateway     *usageActivityGateway     `json:"gateway,omitempty"`
 	SafeOutputs *usageActivitySafeOutputs `json:"safe_outputs,omitempty"`
+	Experiments *usageActivityExperiments `json:"experiments,omitempty"`
 }
 
 type usageActivityFirewall struct {
@@ -59,6 +60,11 @@ type usageActivityGatewayServer struct {
 type usageActivitySafeOutputs struct {
 	TotalItems  int            `json:"total_items"`
 	ItemsByType map[string]int `json:"items_by_type,omitempty"`
+}
+
+type usageActivityExperiments struct {
+	// Assignments maps each experiment name to the variant selected for this run.
+	Assignments map[string]string `json:"assignments,omitempty"`
 }
 
 func loadUsageActivitySummary(runDir string) (*usageActivitySummary, error) {
@@ -130,13 +136,15 @@ func applyUsageActivitySummaryToResult(summary *usageActivitySummary, result *Do
 		blockedDomains := sliceutil.SortedKeys(blockedSet)
 
 		result.FirewallAnalysis = &FirewallAnalysis{
-			DomainBuckets: DomainBuckets{
-				AllowedDomains: allowedDomains,
-				BlockedDomains: blockedDomains,
+			AnalysisBase: AnalysisBase{
+				DomainBuckets: DomainBuckets{
+					AllowedDomains: allowedDomains,
+					BlockedDomains: blockedDomains,
+				},
+				TotalRequests:   summary.Firewall.TotalRequests,
+				AllowedRequests: summary.Firewall.AllowedRequests,
+				BlockedRequests: summary.Firewall.BlockedRequests,
 			},
-			TotalRequests:    summary.Firewall.TotalRequests,
-			AllowedRequests:  summary.Firewall.AllowedRequests,
-			BlockedRequests:  summary.Firewall.BlockedRequests,
 			RequestsByDomain: requestsByDomain,
 		}
 	}
@@ -146,14 +154,16 @@ func applyUsageActivitySummaryToResult(summary *usageActivitySummary, result *Do
 		servers := make([]MCPServerStats, 0, len(summary.Gateway.Servers))
 		for _, server := range summary.Gateway.Servers {
 			servers = append(servers, MCPServerStats{
-				ServerName: server.ServerName,
+				MCPServerStatsBase: MCPServerStatsBase{
+					ServerName:    server.ServerName,
+					ToolCallCount: server.ToolCallCount,
+					ErrorCount:    server.FailedCalls,
+				},
 				// Keep both RequestCount and ToolCallCount aligned because MCPServerStats
 				// distinguishes overall request volume (RequestCount) from tool-invocation
 				// volume (ToolCallCount). In usage-aggregate mode we only have per-server
 				// tool-call counts, so both fields are populated from that single source.
-				RequestCount:  server.ToolCallCount,
-				ToolCallCount: server.ToolCallCount,
-				ErrorCount:    server.FailedCalls,
+				RequestCount: server.ToolCallCount,
 			})
 		}
 		result.MCPToolUsage = &MCPToolUsageData{

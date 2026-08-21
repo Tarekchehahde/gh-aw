@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
@@ -10,8 +11,16 @@ import (
 var prLog = logger.New("workflow:pr")
 
 // ShouldGeneratePRCheckoutStep returns true if the checkout-pr step should be generated
-// based on the workflow permissions. The step requires contents read access.
+// based on the workflow permissions and checkout configuration.
+// The step requires contents read access and checkout must not be disabled.
+// For pull_request_target-only workflows (where pull_request is not also a trigger),
+// the step is always suppressed regardless of checkout configuration:
+// checkout_pr_branch.cjs fetches refs/pull/<n>/head (the untrusted PR head),
+// which replaces any safe base-SHA checkout and is inaccessible for fork PRs.
 func ShouldGeneratePRCheckoutStep(data *WorkflowData) bool {
+	if data.CheckoutDisabled || data.IsPullRequestTarget {
+		return false
+	}
 	if data.CachedPermissions != nil {
 		return data.CachedPermissions.HasContentsReadAccess()
 	}
@@ -19,10 +28,55 @@ func ShouldGeneratePRCheckoutStep(data *WorkflowData) bool {
 	return permParser.HasContentsReadAccess()
 }
 
+func resolveAgentManifestPaths(registry *EngineRegistry, data *WorkflowData) (folders, files []string) {
+	folders = []string{".agents", ".github"}
+	if data != nil {
+		folders = append(folders, data.AmbientFolders...)
+	}
+	files = []string{"AGENTS.md"}
+
+	if registry != nil {
+		engineID := strings.ToLower(resolveActivationEngineID(data))
+		engine, err := registry.GetEngine(engineID)
+		if err != nil {
+			engine, err = registry.GetEngineByPrefix(engineID)
+		}
+		if err == nil {
+			if provider, ok := engine.(AgentFileProvider); ok {
+				for _, prefix := range provider.GetAgentManifestPathPrefixes() {
+					if folder := strings.TrimSuffix(prefix, "/"); folder != "" {
+						folders = append(folders, folder)
+					}
+				}
+				files = append(files, provider.GetAgentManifestFiles()...)
+			}
+		}
+	}
+
+	return sortedUniqueStrings(folders), sortedUniqueStrings(files)
+}
+
+func sortedUniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // generateSaveBaseGitHubFoldersStep generates step strings (for the activation job) that
 // snapshot agent config folders and root instruction files from the workspace into
-// /tmp/gh-aw/base/.  The folder and file lists are computed from the engine registry so
-// that engine implementations are the single source of truth — no hardcoding in the script.
+// /tmp/gh-aw/base/. The folder and file lists contain platform defaults, the selected
+// engine's manifests, and ambient folders.
 //
 // folders: the agent config directories to snapshot (e.g. ".agents", ".claude", ".github")
 // files:   the root instruction files to snapshot (e.g. "AGENTS.md", "CLAUDE.md")
@@ -32,8 +86,8 @@ func generateSaveBaseGitHubFoldersStep(folders, files []string) []string {
 	lines = append(lines, "        env:\n")
 	lines = append(lines, fmt.Sprintf("          GH_AW_AGENT_FOLDERS: \"%s\"\n", strings.Join(folders, " ")))
 	lines = append(lines, fmt.Sprintf("          GH_AW_AGENT_FILES: \"%s\"\n", strings.Join(files, " ")))
-	lines = append(lines, "        # poutine:ignore untrusted_checkout_exec\n")
-	lines = append(lines, "        run: bash \"${RUNNER_TEMP}/gh-aw/actions/save_base_github_folders.sh\"\n")
+	lines = append(lines, "        run: |\n")
+	lines = append(lines, "          bash \"${RUNNER_TEMP}/gh-aw/actions/save_base_github_folders.sh\"\n")
 	return lines
 }
 

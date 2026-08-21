@@ -98,51 +98,51 @@ func TestGetSandboxDisableJustification(t *testing.T) {
 	t.Run("boolean true is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData(true))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "string", "should explain that a string is required")
+		require.ErrorContains(t, err, "string", "should explain that a string is required")
 	})
 
 	t.Run("boolean false is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData(false))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "string", "should explain that a string is required")
+		require.ErrorContains(t, err, "string", "should explain that a string is required")
 	})
 
 	t.Run("empty string is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData(""))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "20", "should mention minimum length")
+		require.ErrorContains(t, err, "20", "should mention minimum length")
 	})
 
 	t.Run("short string is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData("too short"))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "20", "should mention minimum length")
+		require.ErrorContains(t, err, "20", "should mention minimum length")
 	})
 
 	t.Run("whitespace-padded short string is rejected", func(t *testing.T) {
 		// 22 spaces - long enough on paper but collapses to empty after TrimSpace
 		_, err := getSandboxDisableJustification(makeData("                      "))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "20", "should mention minimum length")
+		require.ErrorContains(t, err, "20", "should mention minimum length")
 	})
 
 	t.Run("whitespace-padded string where trimmed is below minimum is rejected", func(t *testing.T) {
 		// "short" padded with whitespace to 25 total chars still fails (trimmed is 5)
 		_, err := getSandboxDisableJustification(makeData("          short          "))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "20", "should mention minimum length")
+		require.ErrorContains(t, err, "20", "should mention minimum length")
 	})
 
 	t.Run("GitHub Actions expression is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData("${{ inputs.reason }}"))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "expressions")
+		require.ErrorContains(t, err, "expression")
 	})
 
 	t.Run("longer expression with surrounding text is rejected", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(makeData("reason: ${{ inputs.reason }} end"))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "expressions")
+		require.ErrorContains(t, err, "expression")
 	})
 
 	t.Run("20+ character literal reason passes", func(t *testing.T) {
@@ -160,7 +160,7 @@ func TestGetSandboxDisableJustification(t *testing.T) {
 	t.Run("feature missing returns error", func(t *testing.T) {
 		_, err := getSandboxDisableJustification(&WorkflowData{Features: map[string]any{}})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "missing")
+		require.ErrorContains(t, err, "missing")
 	})
 
 	t.Run("nil features returns error", func(t *testing.T) {
@@ -192,6 +192,59 @@ func TestValidateSandboxConfigTrustBoundaryMessage(t *testing.T) {
 	assert.Contains(t, errMsg, "dangerously-disable-sandbox-agent", "diagnostic must name the required feature flag")
 }
 
+func TestValidateSandboxConfigMCPEnvironmentVariableNames(t *testing.T) {
+	t.Run("valid names pass validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			SandboxConfig: &SandboxConfig{
+				MCP: &MCPGatewayRuntimeConfig{
+					Env: map[string]string{
+						"API_TOKEN": "value",
+						"_DEBUG":    "true",
+					},
+				},
+			},
+		}
+
+		require.NoError(t, validateSandboxConfig(workflowData))
+	})
+
+	t.Run("invalid names fail validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			SandboxConfig: &SandboxConfig{
+				MCP: &MCPGatewayRuntimeConfig{
+					Env: map[string]string{
+						"BAD-NAME": "value",
+					},
+				},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "sandbox.mcp.env.BAD-NAME")
+		assert.Contains(t, err.Error(), "^[A-Z_][A-Z0-9_]*$")
+		assert.Contains(t, err.Error(), "API_TOKEN")
+	})
+
+	t.Run("reserved transport names fail validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			SandboxConfig: &SandboxConfig{
+				MCP: &MCPGatewayRuntimeConfig{
+					Env: map[string]string{
+						"GH_AW_MCP_GATEWAY_ENV_0": "value",
+					},
+				},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "sandbox.mcp.env.GH_AW_MCP_GATEWAY_ENV_0")
+		assert.Contains(t, err.Error(), "reserved for internal transport")
+		assert.Contains(t, err.Error(), "GH_AW_MCP_GATEWAY_")
+	})
+}
+
 // TestValidateSandboxConfigStoresJustification tests that a valid justification is
 // stored in AgentSandboxConfig.DisableReason for downstream diagnostics and audit.
 func TestValidateSandboxConfigStoresJustification(t *testing.T) {
@@ -209,4 +262,139 @@ func TestValidateSandboxConfigStoresJustification(t *testing.T) {
 	require.NoError(t, err, "valid justification should pass validation")
 	assert.Equal(t, reason, workflowData.SandboxConfig.Agent.DisableReason,
 		"justification must be stored on AgentSandboxConfig for audit/logging")
+}
+
+func TestValidateAgentMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		memory      string
+		expectError bool
+	}{
+		{name: "valid: 48g", memory: "48g", expectError: false},
+		{name: "valid: 512m", memory: "512m", expectError: false},
+		{name: "valid: 8G uppercase", memory: "8G", expectError: false},
+		{name: "valid: 1024k", memory: "1024k", expectError: false},
+		{name: "invalid: no unit", memory: "48", expectError: true},
+		{name: "invalid: gb suffix", memory: "48gb", expectError: true},
+		{name: "invalid: leading zero", memory: "08g", expectError: true},
+		{name: "invalid: zero", memory: "0m", expectError: true},
+		{name: "invalid: empty", memory: "", expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAgentMemoryLimit(tt.memory)
+			if tt.expectError {
+				require.Error(t, err, "expected validation error for memory %q", tt.memory)
+			} else {
+				require.NoError(t, err, "expected no error for memory %q", tt.memory)
+			}
+		})
+	}
+}
+
+func TestValidateSandboxConfigMemory(t *testing.T) {
+	t.Run("valid memory passes validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Memory: "4g"},
+			},
+		}
+		err := validateSandboxConfig(workflowData)
+		assert.NoError(t, err, "valid memory should pass validation")
+	})
+
+	t.Run("invalid memory format fails validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Memory: "48gb"},
+			},
+		}
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err, "invalid memory format should fail validation")
+		assert.Contains(t, err.Error(), "48gb")
+	})
+
+	t.Run("leading zero memory format explains why it is invalid", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Memory: "08g"},
+			},
+		}
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err, "leading-zero memory format should fail validation")
+		assert.Contains(t, err.Error(), "without leading zeros")
+	})
+
+	t.Run("absent memory skips validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{},
+			},
+		}
+		err := validateSandboxConfig(workflowData)
+		assert.NoError(t, err, "absent memory should pass validation")
+	})
+}
+
+func TestValidateSandboxConfigAllowHostPorts(t *testing.T) {
+	t.Run("valid allow-host-ports passes validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Runtime: AgentRuntimeDockerSudoIptables, AllowHostPorts: []int{8081, 9000}},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		assert.NoError(t, err, "valid allow-host-ports should pass validation")
+	})
+
+	t.Run("out-of-range allow-host-ports fails validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Runtime: AgentRuntimeDockerSudoIptables, AllowHostPorts: []int{0}},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err, "out-of-range allow-host-ports should fail validation")
+		assert.Contains(t, err.Error(), "allow-host-ports value 0 is out of range")
+		assert.Contains(t, err.Error(), "Example: allow-host-ports: [9000]")
+	})
+
+	t.Run("dangerous allow-host-ports fails validation", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{Runtime: AgentRuntimeDockerSudoIptables, AllowHostPorts: []int{5432}},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err, "a dangerous port should fail validation")
+		assert.Contains(t, err.Error(), "allow-host-ports value 5432")
+		assert.Contains(t, err.Error(), "PostgreSQL")
+		assert.Contains(t, err.Error(), "services:")
+		assert.Contains(t, err.Error(), string(AgentRuntimeDockerSudoIptables))
+	})
+
+	t.Run("allow-host-ports requires the docker-sudo-iptables runtime", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Tools: map[string]any{"github": map[string]any{"mode": "remote"}},
+			SandboxConfig: &SandboxConfig{
+				Agent: &AgentSandboxConfig{AllowHostPorts: []int{9000}},
+			},
+		}
+
+		err := validateSandboxConfig(workflowData)
+		require.Error(t, err, "allow-host-ports on the default docker runtime should fail validation")
+		assert.Contains(t, err.Error(), "allow-host-ports")
+		assert.Contains(t, err.Error(), string(AgentRuntimeDockerSudoIptables))
+	})
 }

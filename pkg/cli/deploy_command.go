@@ -28,9 +28,9 @@ func NewDeployCommand(validateEngine func(string) error) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploy <workflow>...",
 		Short: "Deploy agentic workflows to a target repository using a pull request",
-		Long: `Deploy one or more workflows to a target repository by combining clone, update, add, compile, and pull request creation.
+		Long: `Deploy one or more workflows to a target repository by cloning the target repository, updating existing workflows, adding specified workflows, compiling lock files, and opening a pull request.
 
-The command clones the target repository, updates existing workflows from source, adds the specified workflows, recompiles lock files with purge enabled, and opens a pull request.`,
+The command clones the target repository, updates existing workflows from source, adds the specified workflows, recompiles lock files with purge enabled, and opens a pull request. This command always creates a pull request; the --create-pull-request flag is not needed.`,
 		Example: `  ` + string(constants.CLIExtensionPrefix) + ` deploy githubnext/agentics/ci-doctor --repo owner/repo
   ` + string(constants.CLIExtensionPrefix) + ` deploy githubnext/agentics/repo-assist githubnext/agentics/ci-doctor --repo owner/repo --force
   ` + string(constants.CLIExtensionPrefix) + ` deploy ./my-workflow.md --repo owner/repo
@@ -74,7 +74,7 @@ func runDeploy(ctx context.Context, targetRepo string, workflows []string, addOp
 		return err
 	}
 
-	if err := createDeployPR(resolvedWorkflows, targetRepo, addOpts.Verbose); err != nil {
+	if err := createDeployPR(ctx, resolvedWorkflows, targetRepo, addOpts.Verbose); err != nil {
 		return err
 	}
 
@@ -94,14 +94,12 @@ func registerDeployFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("name", "n", "", "Specify name for the added workflow (without .md extension)")
 	addEngineFlag(cmd)
 	cmd.Flags().BoolP("force", "f", false, "Overwrite existing workflow files without confirmation")
-	cmd.Flags().String("append", "", "Append extra content to the end of agentic workflow on installation")
+	cmd.Flags().String("append", "", "Append extra content to the end of the agentic workflow on installation")
 	cmd.Flags().Bool("no-gitattributes", false, "Skip updating .gitattributes file")
 	cmd.Flags().StringP("dir", "d", "", "Workflow directory (default: $GH_AW_WORKFLOWS_DIR or .github/workflows)")
 	cmd.Flags().Bool("no-stop-after", false, "Remove any stop-after field from the workflow")
 	cmd.Flags().String("stop-after", "", "Override stop-after value in the workflow (e.g., '+48h', '2025-12-31 23:59:59')")
-	cmd.Flags().Bool("no-security-scanner", false, "Skip security scanning of workflow markdown content")
-	cmd.Flags().Bool("disable-security-scanner", false, "Skip security scanning of workflow markdown content")
-	_ = cmd.Flags().MarkDeprecated("disable-security-scanner", "use --no-security-scanner instead")
+	addSecurityScannerFlag(cmd)
 	cmd.Flags().String("cool-down", defaultDeployCooldown, coolDownFlagUsage)
 	cmd.Flags().String("org", "", "Deploy workflows across repositories in an organization")
 	cmd.Flags().StringSlice("repos", nil, "Limit --org mode to repositories matching one or more glob patterns")
@@ -149,9 +147,7 @@ func parseDeployCommandOptions(cmd *cobra.Command, workflows []string, validateE
 	workflowDir, _ := cmd.Flags().GetString("dir")
 	noStopAfter, _ := cmd.Flags().GetBool("no-stop-after")
 	stopAfter, _ := cmd.Flags().GetString("stop-after")
-	disableSecurityScanner, _ := cmd.Flags().GetBool("no-security-scanner")
-	disableSecurityScannerLegacy, _ := cmd.Flags().GetBool("disable-security-scanner")
-	disableSecurityScanner = disableSecurityScanner || disableSecurityScannerLegacy
+	disableSecurityScanner := resolveDeprecatedBoolFlag(cmd, "no-security-scanner", "disable-security-scanner")
 	coolDownStr, _ := cmd.Flags().GetString("cool-down")
 
 	if nameFlag != "" && len(workflows) > 1 {
@@ -256,9 +252,9 @@ func runDeployCompilePass(ctx context.Context, addOpts AddOptions) error {
 	return nil
 }
 
-func createDeployPR(resolvedWorkflows []string, targetRepo string, verbose bool) error {
+func createDeployPR(ctx context.Context, resolvedWorkflows []string, targetRepo string, verbose bool) error {
 	prTitle, prBody := buildDeployPRMetadata(resolvedWorkflows, targetRepo)
-	_, err := CreatePRWithChanges("deploy-workflows", deployCommitMessage, prTitle, prBody, verbose)
+	_, err := CreatePRWithChanges(ctx, "deploy-workflows", deployCommitMessage, prTitle, prBody, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to create deploy pull request: %w", err)
 	}

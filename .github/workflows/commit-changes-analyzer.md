@@ -16,12 +16,9 @@ permissions:
   issues: read
   pull-requests: read
 max-turns: 100
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
-sandbox:
-  agent:
-    sudo: false
 tools:
   cli-proxy: true
   github:
@@ -43,6 +40,11 @@ imports:
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: changes_analyzed
+    question: Did the agent analyze all repository changes since the specified commit and produce a comprehensive report?
+  - id: discussion_created
+    question: Was a discussion or report created summarizing the changes since the specified commit?
 ---
 
 # Commit Changes Analyzer

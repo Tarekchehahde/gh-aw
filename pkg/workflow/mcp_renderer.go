@@ -47,6 +47,7 @@ package workflow
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -54,6 +55,17 @@ import (
 )
 
 var mcpRendererLog = logger.New("workflow:mcp_renderer")
+
+// safeMCPServerIDRE matches MCP server IDs that are safe to embed inside an unquoted bash heredoc.
+// The pattern allows alphanumeric characters, hyphens, and underscores — the same characters used
+// for built-in tool names and typical custom mcp-server keys.
+var safeMCPServerIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// isSafeMCPServerID reports whether id can be safely embedded inside an unquoted bash heredoc
+// without triggering shell expansion.
+func isSafeMCPServerID(id string) bool {
+	return id != "" && safeMCPServerIDRE.MatchString(id)
+}
 
 func durationStringToSeconds(durationValue string) (int, error) {
 	parsedDuration, err := time.ParseDuration(durationValue)
@@ -163,6 +175,10 @@ func RenderJSONMCPConfig(
 			if options.Renderers.RenderMCPScripts != nil {
 				options.Renderers.RenderMCPScripts(&configBuilder, workflowData.MCPScripts, isLast)
 			}
+		case enclaveMCPServerName:
+			if options.Renderers.RenderEnclave != nil {
+				options.Renderers.RenderEnclave(&configBuilder, workflowData, isLast)
+			}
 		default:
 			// Handle custom MCP tools using shared helper
 			HandleCustomMCPToolInSwitch(&configBuilder, toolName, tools, isLast, options.Renderers.RenderCustomMCPConfig)
@@ -207,6 +223,37 @@ func RenderJSONMCPConfig(
 			}
 			fmt.Fprintf(&configBuilder, ",\n              \"toolTimeout\": %d", toolTimeoutSeconds)
 		}
+		// Always emit startupTimeout to override MCP Gateway's built-in 30-second default.
+		// Without this field, the gateway evicts safeoutputs backends that start after 30s
+		// and permanently caches zero tools, causing silent data loss. The gh-aw default is
+		// 120 seconds (constants.DefaultMCPStartupTimeout); users can override via tools.startup-timeout.
+		if options.GatewayConfig.StartupTimeout > 0 {
+			fmt.Fprintf(&configBuilder, ",\n              \"startupTimeout\": %d", options.GatewayConfig.StartupTimeout)
+		}
+		// Emit forcePublicRepos: false when private-to-public-flows: allow is declared.
+		// Only emitted when explicitly set to false; omitting the field lets the gateway default (true).
+		// See MCP Gateway Specification Section 4.1.3.8.
+		if options.GatewayConfig.ForcePublicRepos != nil && !*options.GatewayConfig.ForcePublicRepos {
+			configBuilder.WriteString(",\n              \"forcePublicRepos\": false")
+		}
+		// Emit sinkVisibilityExemptServers when private-to-public-flows lists specific server IDs.
+		// See MCP Gateway Specification Section 10.9.
+		if len(options.GatewayConfig.SinkVisibilityExemptServers) > 0 {
+			configBuilder.WriteString(",\n              \"sinkVisibilityExemptServers\": [")
+			for i, serverID := range options.GatewayConfig.SinkVisibilityExemptServers {
+				if i > 0 {
+					configBuilder.WriteString(", ")
+				}
+				// Validate against safe-identifier pattern before writing into the heredoc.
+				// The config is rendered inside an unquoted bash heredoc; unvalidated IDs
+				// containing shell metacharacters (e.g. $(cmd), `cmd`) would be expanded.
+				if !isSafeMCPServerID(serverID) {
+					return fmt.Errorf("private-to-public-flows: server ID %q contains characters that are unsafe for shell heredoc emission; IDs must match [A-Za-z0-9_-]+. Example:\n\nfirewall:\n  private-to-public-flows:\n    allowed-server-ids:\n      - my-safe-server", serverID)
+				}
+				fmt.Fprintf(&configBuilder, "%q", serverID)
+			}
+			configBuilder.WriteString("]")
+		}
 		// When OTLP tracing is configured, add the opentelemetry section directly to the
 		// gateway config. The endpoint is passed via the OTEL_EXPORTER_OTLP_ENDPOINT env var
 		// (injected by injectOTLPConfig) so that secrets are never interpolated directly into
@@ -238,7 +285,7 @@ func RenderJSONMCPConfig(
 	// against PATH modifications that may occur later in the workflow.
 	yaml.WriteString("          GH_AW_NODE=$(which node 2>/dev/null || command -v node 2>/dev/null || echo node)\n")
 	// Write the configuration to the YAML output
-	yaml.WriteString("          cat << " + delimiter + " | \"$GH_AW_NODE\" \"${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs\"\n")
+	yaml.WriteString("          cat << " + delimiter + " | \"$GH_AW_NODE\" \"${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs\"\n") //nolint:generatedyamlheredoc // Gateway stdin rendering remains to be migrated.
 	yaml.WriteString(generatedConfig)
 	yaml.WriteString("          " + delimiter + "\n")
 

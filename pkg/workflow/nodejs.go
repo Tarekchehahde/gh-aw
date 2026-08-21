@@ -12,6 +12,14 @@ var nodejsLog = logger.New("workflow:nodejs")
 
 const npmDefaultCooldownDays = 3
 
+// NPMInstallOptions configures generated npm installation steps.
+type NPMInstallOptions struct {
+	IncludeNodeSetup  bool
+	IsGlobal          bool
+	RunInstallScripts bool
+	CooldownEnabled   bool
+}
+
 // GenerateNodeJsSetupStep creates a GitHub Actions step for setting up Node.js
 // Returns a step that installs Node.js using the default version from constants.DefaultNodeVersion
 // Caching is disabled by default to prevent cache poisoning vulnerabilities in release workflows
@@ -47,36 +55,15 @@ func installStepsContainNodeSetup(steps []GitHubActionStep) bool {
 //   - version: The package version to install
 //   - stepName: The name to display for the install step (e.g., "Install Claude Code CLI")
 //   - cacheKeyPrefix: The prefix for the cache key (unused, kept for API compatibility)
-//   - includeNodeSetup: If true, includes Node.js setup step before npm install
-//   - runInstallScripts: If true, allow pre/post install scripts (omits --ignore-scripts)
-//   - cooldownEnabled: If true, apply a default 3-day npm release-age cooldown
+//   - options.IncludeNodeSetup: If true, includes Node.js setup step before npm install
+//   - options.RunInstallScripts: If true, allow pre/post install scripts (omits --ignore-scripts)
+//   - options.CooldownEnabled: If true, apply a default 3-day npm release-age cooldown
 //
 // Returns steps for installing the npm package (optionally with Node.js setup)
-func GenerateNpmInstallSteps(packageName, version, stepName, cacheKeyPrefix string, includeNodeSetup bool, runInstallScripts bool, cooldownEnabled bool) []GitHubActionStep {
-	return GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPrefix, includeNodeSetup, true, runInstallScripts, cooldownEnabled)
-}
-
-// BuildStandardNpmEngineInstallSteps creates standard npm installation steps for engines.
-// This helper extracts the common pattern shared by Copilot, Codex, and Claude engines.
-//
-// Parameters:
-//   - packageName: The npm package name (e.g., "@github/copilot")
-//   - defaultVersion: The default version constant (e.g., constants.DefaultCopilotVersion)
-//   - stepName: The display name for the install step (e.g., "Install GitHub Copilot CLI")
-//   - cacheKeyPrefix: The cache key prefix (e.g., "copilot")
-//   - workflowData: The workflow data containing engine configuration
-//
-// Returns:
-//   - []GitHubActionStep: The installation steps including Node.js setup
-func BuildStandardNpmEngineInstallSteps(
-	packageName string,
-	defaultVersion string,
-	stepName string,
-	cacheKeyPrefix string,
-	workflowData *WorkflowData,
-) []GitHubActionStep {
-	cooldownEnabled := resolveRuntimeCooldown(workflowData, "node")
-	return buildStandardNpmEngineInstallSteps(packageName, defaultVersion, stepName, cacheKeyPrefix, workflowData, cooldownEnabled)
+func GenerateNpmInstallSteps(packageName, version, stepName, cacheKeyPrefix string, options NPMInstallOptions) []GitHubActionStep {
+	scopeOptions := options
+	scopeOptions.IsGlobal = true
+	return GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPrefix, scopeOptions)
 }
 
 // BuildStandardNpmEngineInstallStepsNoCooldown creates standard npm installation
@@ -117,9 +104,11 @@ func buildStandardNpmEngineInstallSteps(
 		version,
 		stepName,
 		cacheKeyPrefix,
-		true,  // Include Node.js setup
-		false, // Always disable scripts for engine CLI installs
-		cooldownEnabled,
+		NPMInstallOptions{
+			IncludeNodeSetup:  true,
+			RunInstallScripts: false,
+			CooldownEnabled:   cooldownEnabled,
+		},
 	)
 }
 
@@ -155,8 +144,25 @@ func BuildNpmEngineInstallStepsWithAWF(npmSteps []GitHubActionStep, workflowData
 		}
 
 		// gVisor must be installed and registered BEFORE AWF starts the agent container.
-		if isGVisorRuntime(workflowData) {
+		if isGVisorRuntime(workflowData) && isRuntimeInstallEnabled(workflowData) {
 			steps = append(steps, generateGVisorInstallStep())
+		}
+
+		// docker-sbx must be installed, authenticated, and smoke-tested BEFORE AWF
+		// starts so the microVM runtime is ready when AWF launches the agent.
+		if isDockerSbxRuntime(workflowData) {
+			if isRuntimeInstallEnabled(workflowData) {
+				steps = append(steps, generateDockerSbxKVMCheckStep())
+				steps = append(steps, generateDockerSbxSecretsCheckStep())
+				steps = append(steps, generateDockerSbxInstallStep())
+				steps = append(steps, generateDockerSbxAuthAndDaemonStep())
+				steps = append(steps, generateDockerSbxPreFlightStep())
+			}
+		}
+		if isCloudHypervisorRuntime(workflowData) {
+			steps = append(steps, generateCloudHypervisorKVMAccessStep())
+			steps = append(steps, generateCloudHypervisorHostPreflightStep())
+			steps = append(steps, generateCloudHypervisorBundleSetupStep(getAWFVersionForSetup(workflowData)))
 		}
 
 		awfInstall := generateAWFInstallationStep(awfVersion, agentConfig)
@@ -175,15 +181,16 @@ func BuildNpmEngineInstallStepsWithAWF(npmSteps []GitHubActionStep, workflowData
 	}
 
 	// Copy Copilot CLI to daemon-visible path for ARC/DinD.
-	// The install script puts copilot at /usr/local/bin/copilot which is inside the
-	// sysroot image — not the runner's filesystem. On ARC/DinD, the AWF command
-	// references ${RUNNER_TEMP}/gh-aw/bin/copilot which is daemon-visible.
+	// With --rootless, the binary is at ~/.local/bin/copilot; otherwise /usr/local/bin/copilot.
+	// On ARC/DinD, the AWF command references ${RUNNER_TEMP}/gh-aw/bin/copilot which is
+	// daemon-visible, so we copy from wherever the install script placed it.
 	if isFirewallEnabled(workflowData) && isArcDindTopology(workflowData) {
 		copyStep := GitHubActionStep([]string{
 			"      - name: Copy Copilot CLI to daemon-visible path",
 			"        run: |",
 			"          mkdir -p \"${RUNNER_TEMP}/gh-aw/bin\"",
-			"          cp /usr/local/bin/copilot \"${RUNNER_TEMP}/gh-aw/bin/copilot\"",
+			`          COPILOT_SRC="$(command -v copilot)"`,
+			"          cp \"$COPILOT_SRC\" \"${RUNNER_TEMP}/gh-aw/bin/copilot\"",
 			"          chmod +x \"${RUNNER_TEMP}/gh-aw/bin/copilot\"",
 		})
 		steps = append(steps, copyStep)
@@ -226,30 +233,89 @@ func GetNpmBinPathSetup() string {
 	return `: "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"; GH_AW_TOOL_CACHE="$RUNNER_TOOL_CACHE"; export PATH="$(find "$GH_AW_TOOL_CACHE" -maxdepth 5 -type d -name bin 2>/dev/null | tr '\n' ':')$PATH"; [ -n "$GOROOT" ] && export PATH="$GOROOT/bin:$PATH" || true; [ -n "$ERLANG_HOME" ] && export PATH="$ERLANG_HOME/bin:$PATH" || true`
 }
 
+// GenerateDockerSbxNpmCLIInstallStep installs an npm CLI into a runner path that is
+// visible inside microVM runtimes (docker-sbx/cloud-hypervisor), then creates a
+// stable bin/ symlink from
+// ${RUNNER_TEMP}/gh-aw/engine-cli/bin/<command> to the package's node_modules/.bin entry.
+func GenerateDockerSbxNpmCLIInstallStep(packageName, version, stepName, commandName string, runInstallScripts bool, cooldownEnabled bool) GitHubActionStep {
+	ignoreScriptsFlag := "--ignore-scripts "
+	if runInstallScripts {
+		ignoreScriptsFlag = ""
+	}
+
+	var installStep GitHubActionStep
+	if ExpressionPattern.MatchString(version) {
+		installStep = GitHubActionStep{
+			"      - name: " + stepName,
+			"        run: |",
+			"          mkdir -p \"${RUNNER_TEMP}/gh-aw/engine-cli/bin\"",
+			fmt.Sprintf(`          npm install %s--prefix "${RUNNER_TEMP}/gh-aw/engine-cli" %s@"${ENGINE_VERSION}"`, ignoreScriptsFlag, packageName),
+			fmt.Sprintf(`          ln -sf "../node_modules/.bin/%s" "${RUNNER_TEMP}/gh-aw/engine-cli/bin/%s"`, commandName, commandName),
+			"        env:",
+			"          ENGINE_VERSION: " + version,
+		}
+		if cooldownEnabled {
+			installStep = append(installStep, fmt.Sprintf("          NPM_CONFIG_MIN_RELEASE_AGE: '%d'", npmDefaultCooldownDays))
+		}
+		return installStep
+	}
+
+	installStep = GitHubActionStep{
+		"      - name: " + stepName,
+		"        run: |",
+		"          mkdir -p \"${RUNNER_TEMP}/gh-aw/engine-cli/bin\"",
+		fmt.Sprintf(`          npm install %s--prefix "${RUNNER_TEMP}/gh-aw/engine-cli" %s@%s`, ignoreScriptsFlag, packageName, version),
+		fmt.Sprintf(`          ln -sf "../node_modules/.bin/%s" "${RUNNER_TEMP}/gh-aw/engine-cli/bin/%s"`, commandName, commandName),
+	}
+	if cooldownEnabled {
+		installStep = append(installStep,
+			"        env:",
+			fmt.Sprintf("          NPM_CONFIG_MIN_RELEASE_AGE: '%d'", npmDefaultCooldownDays),
+		)
+	}
+	return installStep
+}
+
+// GetDockerSbxNpmCLIPathSetup returns the PATH export needed for npm CLIs that were
+// staged into ${RUNNER_TEMP}/gh-aw/engine-cli/bin for microVM runs.
+func GetDockerSbxNpmCLIPathSetup(workflowData *WorkflowData) string {
+	if !isDockerSbxRuntime(workflowData) && !isCloudHypervisorRuntime(workflowData) {
+		return ""
+	}
+	return `export PATH="${RUNNER_TEMP}/gh-aw/engine-cli/bin:$PATH"`
+}
+
 // GenerateNpmInstallStepsWithScope generates npm installation steps with control over global vs local installation.
 // By default, --ignore-scripts is added to the install command to prevent pre/post install
-// scripts from executing (supply chain security). Pass runInstallScripts=true to allow scripts.
-func GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPrefix string, includeNodeSetup bool, isGlobal bool, runInstallScripts bool, cooldownEnabled bool) []GitHubActionStep {
-	nodejsLog.Printf("Generating npm install steps: package=%s, version=%s, includeNodeSetup=%v, isGlobal=%v, runInstallScripts=%v", packageName, version, includeNodeSetup, isGlobal, runInstallScripts)
+// scripts from executing (supply chain security). Pass options.RunInstallScripts=true to allow scripts.
+func GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPrefix string, options NPMInstallOptions) []GitHubActionStep {
+	nodejsLog.Printf(
+		"Generating npm install steps: package=%s, version=%s, includeNodeSetup=%v, isGlobal=%v, runInstallScripts=%v",
+		packageName,
+		version,
+		options.IncludeNodeSetup,
+		options.IsGlobal,
+		options.RunInstallScripts,
+	)
 
 	var steps []GitHubActionStep
 
 	// Add Node.js setup if requested
-	if includeNodeSetup {
+	if options.IncludeNodeSetup {
 		nodejsLog.Print("Including Node.js setup step")
 		steps = append(steps, GenerateNodeJsSetupStep())
 	}
 
 	// Add npm install step
 	globalFlag := ""
-	if isGlobal {
+	if options.IsGlobal {
 		globalFlag = "-g "
 	}
 
 	// Add --ignore-scripts by default to prevent pre/post install scripts (supply chain security).
 	// runInstallScripts=true disables this protection (emits a warning at compile time).
 	ignoreScriptsFlag := "--ignore-scripts "
-	if runInstallScripts {
+	if options.RunInstallScripts {
 		ignoreScriptsFlag = ""
 	}
 
@@ -267,7 +333,7 @@ func GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPr
 			"        env:",
 			"          ENGINE_VERSION: " + version,
 		}
-		if cooldownEnabled {
+		if options.CooldownEnabled {
 			installStep = append(installStep, fmt.Sprintf("          NPM_CONFIG_MIN_RELEASE_AGE: '%d'", npmDefaultCooldownDays))
 		}
 	} else {
@@ -276,7 +342,7 @@ func GenerateNpmInstallStepsWithScope(packageName, version, stepName, cacheKeyPr
 			"      - name: " + stepName,
 			"        run: " + installCmd,
 		}
-		if cooldownEnabled {
+		if options.CooldownEnabled {
 			installStep = append(installStep,
 				"        env:",
 				fmt.Sprintf("          NPM_CONFIG_MIN_RELEASE_AGE: '%d'", npmDefaultCooldownDays),

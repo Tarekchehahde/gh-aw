@@ -4,13 +4,131 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+func TestFetchRemoteExperimentDetailsClassifiesTitleCaseNotFound(t *testing.T) {
+	fakeBinDir := t.TempDir()
+	fakeGH := filepath.Join(fakeBinDir, "gh")
+	require.NoError(t, os.WriteFile(fakeGH, []byte("#!/bin/sh\necho 'HTTP 404: Not Found' >&2\nexit 1\n"), 0o755))
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := fetchRemoteExperimentDetails("octo/repo", "experiments/missing", "missing")
+
+	require.EqualError(t, err, `experiment "missing" not found in octo/repo`)
+}
+
+func TestBuildSafeGitShowObjectArg(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		ref       string
+		fileName  string
+		want      string
+		shouldErr bool
+	}{
+		{
+			name:     "valid ref and file",
+			ref:      "origin/experiments/my-feature",
+			fileName: "state.jsonl",
+			want:     "origin/experiments/my-feature:state.jsonl",
+		},
+		{
+			name:      "rejects flag-like ref",
+			ref:       "--help",
+			fileName:  "state.jsonl",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects revision expression suffix",
+			ref:       "origin/experiments/my-feature~1",
+			fileName:  "state.jsonl",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects revision expression braces",
+			ref:       "origin/experiments/my-feature^{tree}",
+			fileName:  "state.jsonl",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects colon in ref",
+			ref:       "origin/experiments/my-feature:other",
+			fileName:  "state.jsonl",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects path traversal",
+			ref:       "origin/experiments/my-feature",
+			fileName:  "../state.json",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects colon in file name",
+			ref:       "origin/experiments/my-feature",
+			fileName:  "state.json:HEAD",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects flag-like file name",
+			ref:       "origin/experiments/my-feature",
+			fileName:  "-n",
+			shouldErr: true,
+		},
+		{
+			name:      "rejects control character in file name",
+			ref:       "origin/experiments/my-feature",
+			fileName:  "state\x01.jsonl",
+			shouldErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildSafeGitShowObjectArg(tt.ref, tt.fileName)
+			if tt.shouldErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsSafeExperimentStateRef(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{name: "experiment branch", ref: "origin/experiments/my-feature", want: true},
+		{name: "local experiment branch", ref: "experiments/my-feature", want: true},
+		{name: "evals branch", ref: "evals/myworkflow", want: true},
+		{name: "short sha", ref: "a1b2c3d", want: true},
+		{name: "reject too-short sha", ref: "a1b2c3", want: false},
+		{name: "full sha", ref: "0123456789abcdef0123456789abcdef01234567", want: true},
+		{name: "reject revision operator", ref: "origin/experiments/my-feature~1", want: false},
+		{name: "reject brace expression", ref: "origin/experiments/my-feature^{tree}", want: false},
+		{name: "reject wrong prefix", ref: "origin/main", want: false},
+		{name: "reject invalid sequence", ref: "origin/experiments/my..feature", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSafeExperimentStateRef(tt.ref))
+		})
+	}
+}
+
 func TestExtractExperimentName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		ref      string
@@ -62,6 +180,7 @@ func TestExtractExperimentName(t *testing.T) {
 }
 
 func TestParseExperimentState(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		input           []byte
@@ -99,11 +218,37 @@ func TestParseExperimentState(t *testing.T) {
 			wantLastRun:     "",
 		},
 		{
+			// A single-record JSONL is also valid standalone JSON.  parseExperimentState must
+			// not return it as an empty snapshot; it must fall through to JSONL parsing so the
+			// run record is properly loaded.
+			name:            "single-record jsonl is not treated as empty snapshot",
+			input:           []byte(`{"run_id":"1","timestamp":"2024-06-01T10:00:00Z","assignments":{"feature":"A"}}`),
+			wantExperiments: 1,
+			wantTotalRuns:   1,
+			wantLastRun:     "2024-06-01",
+		},
+		{
 			name:            "invalid JSON returns empty state",
 			input:           []byte(`not json`),
 			wantExperiments: 0,
 			wantTotalRuns:   0,
 			wantLastRun:     "",
+		},
+		{
+			name: "jsonl run ledger",
+			input: []byte(`{"run_id":"1","timestamp":"2024-06-01T10:00:00Z","assignments":{"feature":"A"}}
+{"run_id":"2","timestamp":"2024-06-15T12:00:00Z","assignments":{"feature":"B"}}`),
+			wantExperiments: 1,
+			wantTotalRuns:   2,
+			wantLastRun:     "2024-06-15",
+		},
+		{
+			name: "jsonl run ledger with baseline counts",
+			input: []byte(`{"run_id":"1","timestamp":"2024-06-01T10:00:00Z","assignments":{"feature":"A"},"baseline_counts":{"feature":{"A":2}}}
+{"run_id":"2","timestamp":"2024-06-15T12:00:00Z","assignments":{"feature":"B"}}`),
+			wantExperiments: 1,
+			wantTotalRuns:   2,
+			wantLastRun:     "2024-06-15",
 		},
 	}
 
@@ -119,6 +264,7 @@ func TestParseExperimentState(t *testing.T) {
 }
 
 func TestExperimentDetailsFromState(t *testing.T) {
+	t.Parallel()
 	state := &ExperimentState{
 		Counts: map[string]map[string]int{
 			"style":   {"concise": 4, "detailed": 6},
@@ -145,7 +291,48 @@ func TestExperimentDetailsFromState(t *testing.T) {
 	assert.Equal(t, 10, details.Experiments[1].Total, "style total")
 }
 
+func TestParseExperimentStateJSONLBaselineCounts(t *testing.T) {
+	t.Parallel()
+	state := parseExperimentState([]byte(`{"run_id":"1","timestamp":"2024-06-01T10:00:00Z","assignments":{"feature":"A"},"baseline_counts":{"feature":{"A":2,"B":1}}}
+{"run_id":"2","timestamp":"2024-06-15T12:00:00Z","assignments":{"feature":"B"}}`))
+
+	require.NotNil(t, state)
+	assert.Equal(t, map[string]map[string]int{
+		"feature": {"A": 3, "B": 2},
+	}, state.Counts)
+	assert.Len(t, state.Runs, 2)
+}
+
+func TestAppendExperimentRunAddsAssignmentToBaseline(t *testing.T) {
+	t.Parallel()
+	state := emptyExperimentState()
+	appendExperimentRun(state, ExperimentRunRecord{
+		RunID:       "1",
+		Timestamp:   "2026-08-18T12:00:00Z",
+		Assignments: map[string]string{"feature": "A"},
+		BaselineCounts: map[string]map[string]int{
+			"feature": {"A": 2, "B": 1},
+		},
+	})
+
+	assert.Equal(t, map[string]map[string]int{
+		"feature": {"A": 3, "B": 1},
+	}, state.Counts)
+}
+
+func TestParseExperimentStateJSONLSnapshotDiscardsEarlierRuns(t *testing.T) {
+	t.Parallel()
+	state := parseExperimentState([]byte(`{"run_id":"before","timestamp":"2026-08-18T10:00:00Z","assignments":{"feature":"A"}}
+{"counts":{"feature":{"B":2}}}
+{"run_id":"after","timestamp":"2026-08-18T12:00:00Z","assignments":{"feature":"B"}}`))
+
+	assert.Equal(t, map[string]map[string]int{"feature": {"B": 3}}, state.Counts)
+	require.Len(t, state.Runs, 1)
+	assert.Equal(t, "after", state.Runs[0].RunID)
+}
+
 func TestExperimentTotalRunsFallback(t *testing.T) {
+	t.Parallel()
 	// When no runs array present, sum variant counts.
 	state := &ExperimentState{
 		Counts: map[string]map[string]int{
@@ -156,6 +343,7 @@ func TestExperimentTotalRunsFallback(t *testing.T) {
 }
 
 func TestFormatAssignments(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    map[string]string
@@ -191,6 +379,7 @@ func TestFormatAssignments(t *testing.T) {
 }
 
 func TestParsePagedJSONArray(t *testing.T) {
+	t.Parallel()
 	type item struct {
 		Name string `json:"name"`
 	}
@@ -236,7 +425,38 @@ func TestParsePagedJSONArray(t *testing.T) {
 	}
 }
 
+func TestSummarizeMetricEvalResults(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"id":"quality","answer":"YES","runid":"100"}
+{"id":"quality","answer":"NO","runid":"101"}
+{"id":"quality","answer":"UNKNOWN","runid":"102"}
+{"id":"quality","answer":"MAYBE","runid":"103"}
+{"id":"coverage","answer":"YES","runid":"200"}
+`)
+	result := summarizeMetricEvalResults(data)
+	require.NotNil(t, result)
+
+	quality, ok := result["quality"]
+	require.True(t, ok)
+	assert.Equal(t, 1, quality.Yes)
+	assert.Equal(t, 1, quality.No)
+	assert.Equal(t, 2, quality.Unknown)
+	assert.Equal(t, 4, quality.Total)
+	assert.Equal(t, "MAYBE", quality.LatestAnswer)
+	assert.Equal(t, "103", quality.LatestRunID)
+
+	coverage, ok := result["coverage"]
+	require.True(t, ok)
+	assert.Equal(t, 1, coverage.Yes)
+	assert.Equal(t, 0, coverage.No)
+	assert.Equal(t, 0, coverage.Unknown)
+	assert.Equal(t, 1, coverage.Total)
+	assert.Equal(t, "YES", coverage.LatestAnswer)
+	assert.Equal(t, "200", coverage.LatestRunID)
+}
+
 func TestExperimentInfoJSONOutput(t *testing.T) {
+	t.Parallel()
 	experiments := []ExperimentInfo{
 		{
 			WorkflowID:  "my-workflow",
@@ -262,6 +482,7 @@ func TestExperimentInfoJSONOutput(t *testing.T) {
 }
 
 func TestExperimentDetailsJSONOutput(t *testing.T) {
+	t.Parallel()
 	details := ExperimentDetails{
 		WorkflowID: "my-workflow",
 		Branch:     "experiments/my-workflow",
@@ -297,6 +518,7 @@ func TestExperimentDetailsJSONOutput(t *testing.T) {
 }
 
 func TestNewExperimentsCommand(t *testing.T) {
+	t.Parallel()
 	cmd := NewExperimentsCommand()
 	require.NotNil(t, cmd, "command should be created")
 	assert.Equal(t, "experiments", cmd.Name(), "command name should be experiments")
@@ -313,6 +535,7 @@ func TestNewExperimentsCommand(t *testing.T) {
 }
 
 func TestExperimentsListSubcommandFlags(t *testing.T) {
+	t.Parallel()
 	cmd := NewExperimentsListSubcommand()
 	require.NotNil(t, cmd, "list subcommand should be created")
 
@@ -321,6 +544,7 @@ func TestExperimentsListSubcommandFlags(t *testing.T) {
 }
 
 func TestExperimentsAnalyzeSubcommandFlags(t *testing.T) {
+	t.Parallel()
 	cmd := NewExperimentsAnalyzeSubcommand()
 	require.NotNil(t, cmd, "analyze subcommand should be created")
 
@@ -329,9 +553,39 @@ func TestExperimentsAnalyzeSubcommandFlags(t *testing.T) {
 }
 
 func TestExperimentsAnalyzeRequiresArg(t *testing.T) {
+	t.Parallel()
 	cmd := NewExperimentsAnalyzeSubcommand()
 	require.NotNil(t, cmd, "analyze subcommand should be created")
 
 	err := cmd.Args(cmd, []string{})
 	assert.Error(t, err, "analyze should require exactly 1 argument")
+}
+
+func TestParseExperimentStateJSONLSkipsInvalidLines(t *testing.T) {
+	t.Parallel()
+	// Valid records plus an unrecognized line: the valid records should still be parsed.
+	data := `{"run_id":"1","timestamp":"2024-06-01T10:00:00Z","assignments":{"style":"concise"}}
+this is not valid json
+{"run_id":"2","timestamp":"2024-06-02T10:00:00Z","assignments":{"style":"detailed"}}`
+
+	state := parseExperimentState([]byte(data))
+
+	require.NotNil(t, state)
+	assert.Equal(t, map[string]map[string]int{
+		"style": {"concise": 1, "detailed": 1},
+	}, state.Counts, "should accumulate counts from valid lines despite invalid lines")
+	assert.Len(t, state.Runs, 2, "should have 2 run records")
+}
+
+func TestParseExperimentStateJSONLAllInvalid(t *testing.T) {
+	t.Parallel()
+	// When all lines are invalid, should return an empty state (not nil).
+	data := `not json at all
+also not json`
+
+	state := parseExperimentState([]byte(data))
+
+	require.NotNil(t, state)
+	assert.Empty(t, state.Counts, "should return empty counts for all-invalid input")
+	assert.Empty(t, state.Runs, "should return empty runs for all-invalid input")
 }

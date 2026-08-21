@@ -174,12 +174,26 @@ func TestClaudeEngineWithOutput(t *testing.T) {
 	}
 }
 
+func TestClaudeEngineNonAWFKeepsStderrOutOfTranscript(t *testing.T) {
+	engine := NewClaudeEngine()
+	workflowData := &WorkflowData{Name: "test-workflow"}
+
+	steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/agent-stdio.log")
+	require.Len(t, steps, 1)
+
+	stepContent := strings.Join([]string(steps[0]), "\n")
+	assert.Contains(t, stepContent, "--debug-file /tmp/gh-aw/agent/claude-debug.log")
+	assert.Contains(t, stepContent, `${GH_AW_MODEL_DETECTION_CLAUDE:+ --model "$GH_AW_MODEL_DETECTION_CLAUDE"} | tee -a /tmp/gh-aw/agent-stdio.log`)
+	assert.NotContains(t, stepContent, "2>&1 | tee -a /tmp/gh-aw/agent-stdio.log")
+	assert.NotContains(t, stepContent, "awf")
+}
+
 func TestClaudeEngineLLMProviderGitHubUsesCopilotCredentials(t *testing.T) {
 	engine := NewClaudeEngine()
 	workflowData := &WorkflowData{
 		Name: "test-workflow",
 		EngineConfig: &EngineConfig{
-			LLMProvider: "github",
+			LLMProvider: LLMProviderGitHub,
 		},
 		NetworkPermissions: &NetworkPermissions{
 			Firewall: &FirewallConfig{Enabled: true},
@@ -515,11 +529,11 @@ func TestClaudeEngineWithVersion(t *testing.T) {
 	engineConfig := &EngineConfig{
 		ID:      "claude",
 		Version: "v1.2.3",
-		Model:   "claude-3-5-sonnet-20241022",
 	}
 
 	workflowData := &WorkflowData{
 		Name:         "test-workflow",
+		Model:        "claude-3-5-sonnet-20241022",
 		EngineConfig: engineConfig,
 	}
 
@@ -567,12 +581,12 @@ func TestClaudeEngineWithoutVersion(t *testing.T) {
 
 	// Test without version (should use default)
 	engineConfig := &EngineConfig{
-		ID:    "claude",
-		Model: "claude-3-5-sonnet-20241022",
+		ID: "claude",
 	}
 
 	workflowData := &WorkflowData{
 		Name:         "test-workflow",
+		Model:        "claude-3-5-sonnet-20241022",
 		EngineConfig: engineConfig,
 	}
 

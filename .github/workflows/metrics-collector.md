@@ -1,5 +1,6 @@
 ---
 emoji: "📊"
+name: "Metrics Collector"
 description: Collects daily performance metrics for the agent ecosystem and stores them in repo-memory
 on: daily
 permissions:
@@ -9,23 +10,23 @@ permissions:
   discussions: read
   actions: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
   - uses: shared/meta-analysis-base.md
     with:
       toolsets: [default]
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   repo-memory:
     branch-name: memory/meta-orchestrators
     file-glob: "metrics/**"
-timeout-minutes: 15
+    max-patch-size: 131072 # 128KB - handles large daily metrics snapshots without patch-size gate failures
+timeout-minutes: 30
 safe-outputs:
   noop:
 
@@ -34,11 +35,6 @@ safe-outputs:
 {{#runtime-import? .github/shared-instructions.md}}
 
 ### Metrics Collector - Infrastructure Agent
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are the Metrics Collector agent responsible for gathering daily performance metrics across the entire agentic workflow ecosystem and storing them in a structured format for analysis by meta-orchestrators.
 
@@ -57,18 +53,46 @@ As an infrastructure agent, you collect and persist performance data that enable
 - **Collection Time**: $(date +%H:%M:%S) UTC
 - **Storage Path**: `/tmp/gh-aw/repo-memory/default/metrics/`
 
+#### Pre-flight: Clean Memory Directory
+
+**MANDATORY FIRST STEP** — Run this bash command before doing anything else. It removes any non-metrics files that may be present from previous failed runs and ensures only `metrics/**` files exist in your working directory:
+
+```bash
+# Remove any files at the root level that are NOT under metrics/
+find /tmp/gh-aw/repo-memory/default -maxdepth 1 -type f -delete 2>/dev/null || true
+# List what remains to confirm only metrics/ content is present
+ls -la /tmp/gh-aw/repo-memory/default/
+```
+
+If you see any `.md` files at the root (e.g. `agent-performance-latest.md`, `shared-alerts.md`) — **delete them now**. You are NOT the agent-performance or alerts workflow. You are the Metrics Collector. Your ONLY job is to write JSON files under `metrics/`.
+
 #### Metrics Collection Process
 
 ### 1. Use Agentic Workflows Tool to Collect Workflow Metrics
 
 **Workflow Status and Runs**:
 - Use the `status` tool to get a list of all workflows in the repository
-- Use the `logs` tool to download workflow run data from the last 24 hours:
+- Use the `logs` tool to download workflow run data from the last 24 hours, **in bounded
+  paginated batches** to cover the full window without a single long-running request:
   ```
-  Parameters:
+  Parameters (first call):
   - start_date: "-1d" (last 24 hours)
+  - count: 80
+  - timeout: 3
   - Include all workflows (no workflow_name filter)
   ```
+- **Pagination loop (required)**: the `logs` tool returns a `continuation` field when it stops
+  early (timeout or count limit). While a `continuation` field is present in the returned data,
+  issue another `logs` call using the parameters it provides (notably `before_run_id`, plus the
+  original `start_date`) with `count: 80` and `timeout: 3`, and accumulate the runs from every
+  batch. Stop only when there is no `continuation` field **and** the oldest collected run is at or
+  before the 24h window start. Do not stop after a fixed number of batches if the oldest collected
+  run is still newer than the window start; that produces a partial ~10h snapshot.
+- If the logs tool continues returning `continuation` after the oldest collected run reaches the
+  24h window start, stop paginating and ignore the remaining older cursor because the requested
+  window is complete.
+- Never issue a single `logs` call with `count >= 100` for the full `-1d` window: that request
+  has repeatedly exceeded the 60s tool timeout and yields truncated data.
 - From the logs data, extract for each workflow:
   - Total runs in last 24 hours
   - Successful runs (conclusion: "success")
@@ -84,6 +108,34 @@ As an infrastructure agent, you collect and persist performance data that enable
   - Comments added by workflows
   - Discussions created by workflows
 - Extract and count these for each workflow
+- Extract typed safe-output counts as well:
+  - `safe_outputs_by_type`: aggregate usage activity `safe_outputs.items_by_type` from each run
+    (for example `create_issue`, `create_pull_request`, `add_comment`, `create_discussion`)
+  - `safe_output_outcomes`: aggregate outcome fields from logs summaries and outcome reports:
+    `accepted`, `rejected`, `ignored`, `pending`, `lifecycle`, and `lifecycle_close`
+  - Never leave these fields absent; use empty objects/zero counts only when the full data source
+    was checked and no matching items exist.
+- **If the accumulated log batches still do not cover the full 24h window** (i.e. the oldest run
+  collected is newer than 24h ago), do **not** report `safe_outputs`, `safe_outputs_by_type`, or
+  `safe_output_outcomes` as zero. Instead compute safe-output counts from the GitHub API fallback
+  described below and mark the source accordingly.
+
+**Safe Outputs Fallback (GitHub API)**:
+
+When the logs-based path is truncated or unavailable, derive safe-output counts from the GitHub
+API instead of zeroing them:
+- Issues created: search issues created in the window that carry a
+  `gh-aw-workflow-call-id: <owner>/<repo>/<workflow-id>` marker in the body
+  (e.g. `search_issues` with `repo:<owner>/<repo> is:issue created:>=<window start>`)
+- PRs created: same search with `is:pr`
+- Comments added: `list_issues` / issue comment listing for issues updated in the window,
+  counting comments authored by the agent app
+- Discussions created: `list_discussions` filtered by creation date in the window
+Attribute each result to a workflow and type via its `gh-aw-workflow-call-id` footer marker and
+item shape, aggregate the counts per workflow, and set `"safe_outputs_source":
+"github_api_fallback"` alongside a `collection_note` explaining the truncation. When API fallback
+cannot determine outcome status, set those items to `"pending"` rather than omitting the
+`safe_output_outcomes` breakdown. The same fallback applies to `engagement` fields.
 
 **Additional Metrics via GitHub API**:
 - Use GitHub MCP server (default toolset) to supplement with:
@@ -104,6 +156,13 @@ Create a JSON object following this schema:
 {
   "timestamp": "2024-12-24T00:00:00Z",
   "period": "daily",
+  "collection_status": "complete",
+  "collection_window": {
+    "start": "2024-12-23T00:00:00Z",
+    "end": "2024-12-24T00:00:00Z",
+    "coverage_hours": 24,
+    "logs_batches": 6
+  },
   "collection_duration_seconds": 45,
   "workflows": {
     "workflow-name": {
@@ -112,6 +171,20 @@ Create a JSON object following this schema:
         "prs_created": 2,
         "comments_added": 10,
         "discussions_created": 1
+      },
+      "safe_outputs_by_type": {
+        "create_issue": 5,
+        "create_pull_request": 2,
+        "add_comment": 10,
+        "create_discussion": 1
+      },
+      "safe_output_outcomes": {
+        "accepted": 9,
+        "rejected": 1,
+        "ignored": 2,
+        "pending": 6,
+        "lifecycle": 0,
+        "lifecycle_close": 0
       },
       "workflow_runs": {
         "total": 7,
@@ -138,6 +211,20 @@ Create a JSON object following this schema:
     "total_workflows": 120,
     "active_workflows": 85,
     "total_safe_outputs": 45,
+    "safe_outputs_by_type": {
+      "create_issue": 20,
+      "create_pull_request": 8,
+      "add_comment": 15,
+      "create_discussion": 2
+    },
+    "safe_output_outcomes": {
+      "accepted": 24,
+      "rejected": 5,
+      "ignored": 6,
+      "pending": 10,
+      "lifecycle": 0,
+      "lifecycle_close": 0
+    },
     "overall_success_rate": 0.892,
     "total_tokens": 1250000,
     "total_cost_usd": 12.50
@@ -147,10 +234,12 @@ Create a JSON object following this schema:
 
 ### 3. Store Metrics in Repo Memory
 
-> ⚠️ **CRITICAL**: You MUST write ONLY JSON files inside the `metrics/` subdirectory. The repo-memory
+> ⚠️ **CRITICAL — FILE PATH CONSTRAINT**: You MUST write ONLY JSON files inside the `metrics/` subdirectory. The repo-memory
 > glob filter is set to `metrics/**`, which means **any file written outside this subdirectory will be
 > silently dropped and no data will be persisted**. Do NOT write files to the root of
 > `/tmp/gh-aw/repo-memory/default/` — they will be ignored.
+>
+> **If you write any file to a path that does NOT start with `/tmp/gh-aw/repo-memory/default/metrics/`, that file will NOT be saved. Do not waste effort writing to any other path.**
 
 **Daily Storage**:
 - Write metrics to: `/tmp/gh-aw/repo-memory/default/metrics/daily/YYYY-MM-DD.json`
@@ -161,7 +250,20 @@ Create a JSON object following this schema:
 - This provides quick access to most recent data without date calculations
 
 **Create Directory Structure**:
-- Ensure the directory exists: `mkdir -p /tmp/gh-aw/repo-memory/default/metrics/daily/`
+```bash
+mkdir -p /tmp/gh-aw/repo-memory/default/metrics/daily/
+```
+
+**Write and validate each file**:
+```bash
+# Write the daily metrics file (replace DATE and JSON_DATA with actual values)
+echo "$JSON_DATA" | jq . > /tmp/gh-aw/repo-memory/default/metrics/daily/$(date +%Y-%m-%d).json
+# Copy to latest
+cp /tmp/gh-aw/repo-memory/default/metrics/daily/$(date +%Y-%m-%d).json \
+   /tmp/gh-aw/repo-memory/default/metrics/latest.json
+# Validate JSON is correct
+jq . /tmp/gh-aw/repo-memory/default/metrics/latest.json >/dev/null && echo "JSON valid" || echo "JSON INVALID"
+```
 
 **File Constraint Summary** (glob filter: `metrics/**`):
 - ✅ `/tmp/gh-aw/repo-memory/default/metrics/latest.json` — allowed
@@ -205,8 +307,11 @@ find /tmp/gh-aw/repo-memory/default/metrics/daily/ -name "*.json" -mtime +30 -de
 
 **Primary data source**: Use the agentic-workflows tool for all workflow run metrics:
 1. Start with `status` tool to get workflow inventory
-2. Use `logs` tool with `start_date: "-1d"` to collect last 24 hours of runs
-3. Extract metrics from the log data (success/failure, tokens, costs, safe outputs)
+2. Use `logs` tool with `start_date: "-1d"`, `count: 80`, and `timeout: 3`, then follow the
+   `continuation` field (using its `before_run_id`) until the oldest collected run reaches the
+   24h window start
+3. Extract metrics from the accumulated log data (success/failure, tokens, costs, safe outputs,
+   typed safe-output counts, and outcome breakdowns)
 
 **Secondary data source**: Use GitHub MCP server for engagement metrics only:
 - Reactions on issues/PRs created by workflows
@@ -217,8 +322,35 @@ find /tmp/gh-aw/repo-memory/default/metrics/daily/ -name "*.json" -mtime +30 -de
 
 - If a workflow has no runs in the last 24 hours, set all run metrics to 0
 - If a workflow has no safe outputs, set all safe output counts to 0
+- **Never report `safe_outputs` or `engagement` as 0 merely because the `logs` tool timed out or
+  returned a truncated window** — use the GitHub API safe-outputs fallback above and set
+  `"safe_outputs_source": "github_api_fallback"`. Only report 0 when the data source actually
+  covered the window and found no outputs.
 - If token/cost data is unavailable, omit or set to null
 - Always include workflows in the metrics even if they have no activity (helps detect stalled workflows)
+- **If the agentic-workflows `logs` tool is unavailable**, collect what you can from the GitHub API directly (workflow runs via `list_workflow_runs`) and set `"data_source": "github_api_fallback"` in the JSON
+- Set `"collection_status": "complete"` only when workflow run counts and safe-output breakdowns
+  cover the full 24h window through logs data and/or the GitHub API fallback. Set
+  `"collection_status": "partial"` only when both logs pagination and fallback collection fail to
+  cover the window, and include a precise `collection_note` plus `collection_window.coverage_hours`.
+- **NEVER write a partial stub file like `{"date": "...", "status": "no-data"}`** — if you can't collect data, write a minimal valid metrics JSON with zeros instead:
+  ```json
+  {
+    "timestamp": "YYYY-MM-DDTHH:MM:SSZ",
+    "period": "daily",
+    "collection_status": "partial",
+    "collection_note": "Description of what could not be collected",
+    "workflows": {},
+    "ecosystem": {
+      "total_workflows": 0,
+      "active_workflows": 0,
+      "total_safe_outputs": 0,
+      "overall_success_rate": 0,
+      "total_tokens": 0,
+      "total_cost_usd": 0
+    }
+  }
+  ```
 
 ### Workflow Name Extraction
 
@@ -228,6 +360,8 @@ The agentic-workflows logs tool provides structured data with workflow names alr
 
 - The agentic-workflows tool is optimized for log retrieval and analysis
 - Use date filters (start_date: "-1d") to limit data collection scope
+- Request small batches (`count: 20`) and paginate via `continuation` rather than one large
+  `count >= 100` request, which times out (>60s) and silently truncates the window
 - Process logs in memory rather than making multiple API calls
 - Cache workflow list from status tool
 
@@ -268,7 +402,8 @@ At the end of collection:
 #### Important Notes
 
 - **PRIMARY TOOL**: Use the agentic-workflows tool (`status`, `logs`) for all workflow run metrics
-- **SECONDARY TOOL**: Use GitHub MCP server only for engagement metrics (reactions, comments)
+- **SECONDARY TOOL**: Use GitHub MCP server for engagement metrics (reactions, comments)
+- **YOU ARE THE METRICS COLLECTOR, NOT THE AGENT-PERFORMANCE WORKFLOW** — do NOT update `agent-performance-latest.md`, `shared-alerts.md`, or any other `.md` file in the repo-memory root. Those files belong to other workflows.
 - **DO NOT** create issues, PRs, or comments - this is a data collection agent only
 - **DO NOT** analyze or interpret the metrics - that's the job of meta-orchestrators
 - **DO NOT** write any files to the root of `/tmp/gh-aw/repo-memory/default/` — the glob filter `metrics/**` will silently discard them
@@ -290,6 +425,43 @@ At the end of collection:
 ✅ Ecosystem aggregates calculated correctly
 ✅ Collection completed within timeout
 ✅ No errors or warnings in execution log
+
+#### Pre-noop Validation (MANDATORY)
+
+Before calling `noop`, you MUST run this validation. If it fails, you must fix the files before proceeding:
+
+```bash
+# Step 1: Verify no non-metrics files remain in the memory root
+ROOT_FILES=$(find /tmp/gh-aw/repo-memory/default -maxdepth 1 -type f 2>/dev/null)
+if [ -n "$ROOT_FILES" ]; then
+  echo "ERROR: Non-metrics files found at root level: $ROOT_FILES"
+  echo "Deleting them now..."
+  find /tmp/gh-aw/repo-memory/default -maxdepth 1 -type f -delete
+fi
+
+# Step 2: Verify metrics/latest.json exists and has valid JSON with today's timestamp
+if [ ! -f /tmp/gh-aw/repo-memory/default/metrics/latest.json ]; then
+  echo "ERROR: metrics/latest.json does not exist. You must write this file before calling noop."
+  exit 1
+fi
+
+# Step 3: Validate JSON syntax
+jq . /tmp/gh-aw/repo-memory/default/metrics/latest.json >/dev/null || {
+  echo "ERROR: metrics/latest.json contains invalid JSON"
+  exit 1
+}
+
+# Step 4: Confirm the timestamp is recent (today)
+STORED_DATE=$(jq -r '.timestamp' /tmp/gh-aw/repo-memory/default/metrics/latest.json | cut -c1-10)
+TODAY=$(date +%Y-%m-%d)
+echo "Stored date: $STORED_DATE | Today: $TODAY"
+
+# Step 5: List all metrics files that will be committed
+echo "Files to be committed:"
+find /tmp/gh-aw/repo-memory/default/metrics -type f | sort
+```
+
+If the validation passes, proceed with the `noop` call.
 
 After successfully collecting and storing all metrics data, you **MUST** call `noop` with a brief collection summary — this is a data-collection workflow that persists results to repo-memory, so `noop` is the expected safe-output for every successful run.
 

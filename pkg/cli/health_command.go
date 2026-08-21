@@ -2,7 +2,6 @@ package cli
 
 import (
 	"cmp"
-	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -11,7 +10,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/gitutil"
+	"github.com/github/gh-aw/pkg/errorutil"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/workflow"
 	"github.com/spf13/cobra"
@@ -37,7 +36,7 @@ func NewHealthCommand() *cobra.Command {
 		Long: `Display workflow health metrics, success rates, and execution trends.
 
 Shows health metrics for workflows including:
-- Success/failure rates over time period
+- Success/failure rates over a time period
 - Trend indicators (↑ improving, → stable, ↓ degrading)
 - Average execution duration
 - Warnings when success rate drops below threshold
@@ -134,7 +133,7 @@ func RunHealth(config HealthConfig) error {
 	// Fetch workflow runs from GitHub
 	runs, err := fetchWorkflowRuns(workflowAPIName, startDate, config.RepoOverride, config.Verbose)
 	if err != nil {
-		if gitutil.IsRateLimitError(err.Error()) {
+		if errorutil.IsRateLimitError(err.Error()) {
 			// Rate limiting is a transient infrastructure condition, not a code error.
 			// Warn and exit cleanly so CI jobs are not marked as failed.
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Skipping health check: GitHub API rate limit exceeded"))
@@ -234,10 +233,23 @@ func displayHealthSummary(runs []WorkflowRun, config HealthConfig) error {
 	// Group runs by workflow
 	groupedRuns := GroupRunsByWorkflow(runs)
 
-	// Calculate health for each workflow
+	// Calculate health for each workflow, marking intentional-failure workflows so they
+	// are excluded from the fleet-health / prod-main success-rate rollup in CalculateHealthSummary.
+	// Only classify against the local checkout when no remote repo override is active; when
+	// --repo targets a different repository we cannot reliably read its frontmatter from the
+	// local filesystem, so we fail open (IntentionalFailure stays false).
 	workflowHealths := make([]WorkflowHealth, 0, len(groupedRuns))
 	for workflowName, workflowRuns := range groupedRuns {
 		health := CalculateWorkflowHealth(workflowName, workflowRuns, config.Threshold)
+		if config.RepoOverride == "" {
+			// Derive the workflow path from the first available run and check frontmatter.
+			for _, r := range workflowRuns {
+				if r.WorkflowPath != "" {
+					health.IntentionalFailure = workflow.IsIntentionalFailure(r.WorkflowPath)
+					break
+				}
+			}
+		}
 		workflowHealths = append(workflowHealths, health)
 	}
 
@@ -246,7 +258,7 @@ func displayHealthSummary(runs []WorkflowRun, config HealthConfig) error {
 		return cmp.Compare(a.SuccessRate, b.SuccessRate)
 	})
 
-	// Calculate summary
+	// Calculate summary (intentional-failure workflows excluded from rollup counts)
 	summary := CalculateHealthSummary(workflowHealths, fmt.Sprintf("Last %d Days", config.Days), config.Threshold)
 
 	// Output results
@@ -266,9 +278,9 @@ func displayDetailedHealth(runs []WorkflowRun, config HealthConfig) error {
 
 	// Output results
 	if config.JSONOutput {
-		jsonBytes, err := json.MarshalIndent(health, "", "  ")
+		jsonBytes, err := marshalIndentJSONOrWrap(health, "workflow health report")
 		if err != nil {
-			return fmt.Errorf("failed to marshal JSON: %w", err)
+			return err
 		}
 		fmt.Fprintln(os.Stdout, string(jsonBytes))
 		return nil
@@ -309,9 +321,9 @@ func displayDetailedHealth(runs []WorkflowRun, config HealthConfig) error {
 
 // outputHealthJSON outputs health summary in JSON format
 func outputHealthJSON(summary HealthSummary) error {
-	jsonBytes, err := json.MarshalIndent(summary, "", "  ")
+	jsonBytes, err := marshalIndentJSONOrWrap(summary, "health summary")
 	if err != nil {
-		return fmt.Errorf("failed to marshal JSON: %w", err)
+		return err
 	}
 	fmt.Fprintln(os.Stdout, string(jsonBytes))
 	return nil
@@ -331,7 +343,7 @@ func outputHealthTable(summary HealthSummary, threshold float64) error {
 		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("%d workflow(s) below %.0f%% success threshold", summary.BelowThreshold, threshold)))
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Run '%s health <workflow-name>' for details", string(constants.CLIExtensionPrefix))))
 	} else {
-		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("All workflows above %.0f%% success threshold", threshold)))
+		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("All evaluated workflows above %.0f%% success threshold", threshold)))
 	}
 
 	return nil

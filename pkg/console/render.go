@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	lipgloss "charm.land/lipgloss/v2"
+
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
@@ -111,8 +113,8 @@ func computeMaxFieldLen(val reflect.Value) int {
 			fieldName = tag.header
 		}
 
-		if len(fieldName) > maxFieldLen {
-			maxFieldLen = len(fieldName)
+		if lipgloss.Width(fieldName) > maxFieldLen {
+			maxFieldLen = lipgloss.Width(fieldName)
 		}
 	})
 	return maxFieldLen
@@ -125,6 +127,9 @@ func walkInlineFields(val reflect.Value, visit func(field reflect.Value, fieldTy
 		fieldType := typ.Field(i)
 
 		if fieldType.Anonymous {
+			if parseConsoleTag(fieldType.Tag.Get("console")).skip {
+				continue
+			}
 			if embedded, ok := embeddedStructValue(field); ok {
 				walkInlineFields(embedded, visit)
 				continue
@@ -171,7 +176,7 @@ func renderStructField(field reflect.Value, fieldName string, tag consoleTag, ma
 		renderValue(field, subTitle, output, depth+1)
 	default:
 		// Simple field – render as key-value pair with alignment
-		paddedName := fmt.Sprintf("%-*s", maxFieldLen, fieldName)
+		paddedName := lipgloss.NewStyle().Width(maxFieldLen).Render(fieldName)
 		fmt.Fprintf(output, "  %s: %v\n", paddedName, formatFieldValueWithTag(field, tag))
 	}
 }
@@ -290,6 +295,9 @@ func collectTableFields(t reflect.Type, prefix []int) []tableField {
 		fieldPath[len(prefix)] = i
 
 		if field.Anonymous {
+			if parseConsoleTag(field.Tag.Get("console")).skip {
+				continue
+			}
 			if embeddedType, ok := embeddedStructType(field.Type); ok {
 				fields = append(fields, collectTableFields(embeddedType, fieldPath)...)
 				continue
@@ -584,37 +592,46 @@ func applyTagFormat(val reflect.Value, format, baseValue string) string {
 	return baseValue
 }
 
-// applyNumberFormat formats a value as a human-readable number (e.g., "1k", "1.2M").
-func applyNumberFormat(val reflect.Value, baseValue string) string {
+// applyIntegerFormat formats integer values via a shared dispatcher used by
+// number/filesize tag formatters.
+func applyIntegerFormat(val reflect.Value, baseValue string, format func(int64) string) string {
 	if val.CanInterface() {
 		switch v := val.Interface().(type) {
 		case int:
-			return FormatNumber(v)
+			return format(int64(v))
 		case int64:
-			// #nosec G115 - Converting int64 to int for display formatting
-			return FormatNumber(int(v))
+			return format(v)
 		case int32:
-			return FormatNumber(int(v))
+			return format(int64(v))
 		case uint:
-			// #nosec G115 - Converting uint to int for display formatting
-			return FormatNumber(int(v))
+			// #nosec G115 -- Converting uint to int64 for display formatting
+			return format(int64(v))
 		case uint64:
-			// #nosec G115 - Converting uint64 to int for display formatting
-			return FormatNumber(int(v))
+			// #nosec G115 -- Converting uint64 to int64 for display formatting
+			return format(int64(v))
 		case uint32:
-			return FormatNumber(int(v))
+			return format(int64(v))
 		}
 	}
+
 	// Fallback: use integer kind directly, keeping signed and unsigned separate
 	// to avoid calling Int() on an unsigned kind (which panics).
 	switch {
 	case val.Kind() >= reflect.Int && val.Kind() <= reflect.Int64:
-		return FormatNumber(int(val.Int()))
+		return format(val.Int())
 	case val.Kind() >= reflect.Uint && val.Kind() <= reflect.Uint64:
-		// #nosec G115 - Converting uint to int for display formatting
-		return FormatNumber(int(val.Uint()))
+		// #nosec G115 -- Converting uint to int64 for display formatting
+		return format(int64(val.Uint()))
 	}
 	return baseValue
+}
+
+// applyNumberFormat formats a value as a human-readable number (e.g., "1k", "1.2M").
+func applyNumberFormat(val reflect.Value, baseValue string) string {
+	return applyIntegerFormat(val, baseValue, func(v int64) string {
+		// #nosec G115 -- Converting int64 to int for display formatting
+		return FormatNumber(int(v))
+	})
 }
 
 // applyCostFormat formats a value as currency with $ prefix.
@@ -641,33 +658,7 @@ func applyCostFormat(val reflect.Value, baseValue string) string {
 
 // applyFilesizeFormat formats a value as a human-readable file size (e.g., "1.2 MB").
 func applyFilesizeFormat(val reflect.Value, baseValue string) string {
-	if val.CanInterface() {
-		switch v := val.Interface().(type) {
-		case int:
-			return FormatFileSize(int64(v))
-		case int64:
-			return FormatFileSize(v)
-		case int32:
-			return FormatFileSize(int64(v))
-		case uint:
-			// #nosec G115 - Converting uint to int64 for file size display
-			return FormatFileSize(int64(v))
-		case uint64:
-			// #nosec G115 - Converting uint64 to int64 for file size display
-			return FormatFileSize(int64(v))
-		case uint32:
-			return FormatFileSize(int64(v))
-		}
-	}
-	// Fallback for integer kinds
-	if val.Kind() >= reflect.Int && val.Kind() <= reflect.Int64 {
-		return FormatFileSize(val.Int())
-	}
-	if val.Kind() >= reflect.Uint && val.Kind() <= reflect.Uint64 {
-		// #nosec G115 - Converting uint to int64 for file size display
-		return FormatFileSize(int64(val.Uint()))
-	}
-	return baseValue
+	return applyIntegerFormat(val, baseValue, FormatFileSize)
 }
 
 // FormatNumber formats large numbers in a human-readable way (e.g., "1k", "1.2k", "1.12M")

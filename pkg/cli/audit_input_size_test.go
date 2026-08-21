@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 // TestAuditDataJSONIncludesInputSizes verifies that JSON output includes input sizes
 func TestAuditDataJSONIncludesInputSizes(t *testing.T) {
+	t.Parallel()
 	run := WorkflowRun{
 		DatabaseID:   888999,
 		WorkflowName: "JSON Test",
@@ -43,7 +45,7 @@ func TestAuditDataJSONIncludesInputSizes(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 
 	// Verify tool usage data includes input sizes
 	if len(auditData.ToolUsage) == 0 {
@@ -75,6 +77,7 @@ func TestAuditDataJSONIncludesInputSizes(t *testing.T) {
 
 // TestToolUsageInfoStructure verifies the ToolUsageInfo structure has correct fields
 func TestToolUsageInfoStructure(t *testing.T) {
+	t.Parallel()
 	toolInfo := ToolUsageInfo{
 		Name:          "test_tool",
 		CallCount:     5,

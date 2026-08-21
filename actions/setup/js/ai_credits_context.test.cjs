@@ -174,6 +174,28 @@ describe("ai_credits_context max_ai_credits_exceeded detection", () => {
       expect(result.aiCredits).toBe("");
       expect(result.maxAICredits).toBe("1000");
     });
+
+    it("reports aiCreditsRateLimitError when rate-limit signal present but under budget", () => {
+      // Reproduces the failing run scenario: gateway log detected a 429 while the agent
+      // was under budget (236 AIC used vs 1000 max).  Before the fix, the check
+      // `aiCredits >= maxAICredits` suppressed this signal, causing the conclusion handler
+      // to fall through to the generic "unexpected engine termination" path.
+      writeAuditLog([{ type: "response", ai_credits_rate_limit_error: true, ai_credits: 236, max_ai_credits: 1000 }]);
+      const result = resolveAICreditsFailureState();
+      expect(result.aiCreditsRateLimitError).toBe(true);
+      expect(result.maxAICreditsExceeded).toBe(false);
+    });
+
+    it("reports aiCreditsRateLimitError from env signal combined with env AIC evidence when under budget", () => {
+      writeAuditLog([{ type: "response", status: 200 }]);
+      process.env.GH_AW_AI_CREDITS_RATE_LIMIT_ERROR = "true";
+      process.env.GH_AW_AIC = "236.079";
+      process.env.GH_AW_MAX_AI_CREDITS = "1000";
+      const result = resolveAICreditsFailureState();
+      expect(result.aiCreditsRateLimitError).toBe(true);
+      expect(result.maxAICreditsExceeded).toBe(false);
+      expect(result.aiCredits).toBe("236.079");
+    });
   });
 });
 
@@ -200,6 +222,33 @@ describe("ai_credits_context unknown_model_ai_credits detection", () => {
     const auditDir = path.join(tmpDir, "sandbox", "firewall", "audit");
     fs.mkdirSync(auditDir, { recursive: true });
     const logPath = path.join(auditDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  function writeEventLog(lines, filename = "event-logs.jsonl") {
+    const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  function writeEventLog(lines, filename = "event-logs.jsonl") {
+    const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  function writeEventLog(lines, filename = "event-logs.jsonl") {
+    const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, filename);
     fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
     process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
     return logPath;
@@ -245,6 +294,149 @@ describe("ai_credits_context unknown_model_ai_credits detection", () => {
   it("does not detect other error types as unknown_model_ai_credits", () => {
     writeAuditLog([{ type: "ai_credits_rate_limit_error" }]);
     expect(parseUnknownModelAICreditsFromAuditLog()).toBe(false);
+  });
+});
+
+describe("ai_credits_context parseUnknownModelAICreditsAndModelFromAuditLog", () => {
+  let tmpDir;
+  let parseUnknownModelAICreditsAndModelFromAuditLog;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aic-unknown-model-test-"));
+    delete process.env.GH_AW_AGENT_OUTPUT;
+    const mod = await import("./ai_credits_context.cjs");
+    const exports = mod.default || mod;
+    parseUnknownModelAICreditsAndModelFromAuditLog = exports.parseUnknownModelAICreditsAndModelFromAuditLog;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.GH_AW_AGENT_OUTPUT;
+  });
+
+  function writeAuditLog(lines, filename = "log.jsonl") {
+    const auditDir = path.join(tmpDir, "sandbox", "firewall", "audit");
+    fs.mkdirSync(auditDir, { recursive: true });
+    const logPath = path.join(auditDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  function writeEventLog(lines, filename = "event-logs.jsonl") {
+    const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  it("detects and returns model name from matching entry", () => {
+    writeAuditLog([{ type: "unknown_model_ai_credits", model: "claude-opus-5" }]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: true, modelName: "claude-opus-5" });
+  });
+
+  it("detects without model name when model field is absent", () => {
+    writeAuditLog([{ type: "unknown_model_ai_credits" }]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: true, modelName: "" });
+  });
+
+  it("returns first model name from matching entry in multi-entry log", () => {
+    writeAuditLog([
+      { type: "response", status: 200 },
+      { type: "unknown_model_ai_credits", model: "gpt-4.1-mini" },
+      { type: "response", status: 200 },
+    ]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: true, modelName: "gpt-4.1-mini" });
+  });
+
+  it("returns model name from first entry with model when earlier entry has no model", () => {
+    writeAuditLog([{ type: "unknown_model_ai_credits" }, { type: "unknown_model_ai_credits", model: "my-model" }]);
+    const result = parseUnknownModelAICreditsAndModelFromAuditLog();
+    expect(result.detected).toBe(true);
+    expect(result.modelName).toBe("my-model");
+  });
+
+  it("detects and returns model name from firewall event-logs.jsonl", () => {
+    writeEventLog([{ type: "unknown_model_ai_credits", model: "claude-opus-5" }]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: true, modelName: "claude-opus-5" });
+  });
+
+  it("detects and returns model name from firewall events.jsonl fallback", () => {
+    writeEventLog([{ type: "unknown_model_ai_credits", model: "gpt-4.1-mini" }], "events.jsonl");
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: true, modelName: "gpt-4.1-mini" });
+  });
+
+  it("returns { detected: false, modelName: '' } when no matching entry", () => {
+    writeAuditLog([{ type: "response", status: 200 }]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: false, modelName: "" });
+  });
+
+  it("returns default for missing audit log", () => {
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog("/nonexistent/path/log.jsonl")).toEqual({ detected: false, modelName: "" });
+  });
+
+  it("does not detect other error types", () => {
+    writeAuditLog([{ type: "ai_credits_rate_limit_error", model: "some-model" }]);
+    expect(parseUnknownModelAICreditsAndModelFromAuditLog()).toEqual({ detected: false, modelName: "" });
+  });
+});
+
+describe("ai_credits_context parseMaxCacheMissesExceededFromEventLog", () => {
+  let tmpDir;
+  let parseMaxCacheMissesExceededFromEventLog;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aic-cache-misses-test-"));
+    delete process.env.GH_AW_AGENT_OUTPUT;
+    const mod = await import("./ai_credits_context.cjs");
+    const exports = mod.default || mod;
+    parseMaxCacheMissesExceededFromEventLog = exports.parseMaxCacheMissesExceededFromEventLog;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.GH_AW_AGENT_OUTPUT;
+  });
+
+  function writeEventLog(lines, filename = "event-logs.jsonl") {
+    const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, filename);
+    fs.writeFileSync(logPath, lines.map(l => JSON.stringify(l)).join("\n") + "\n", "utf8");
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    return logPath;
+  }
+
+  it("detects max_cache_misses_exceeded in event-logs.jsonl", () => {
+    writeEventLog([{ type: "max_cache_misses_exceeded", consecutive_cache_misses: 6, max_cache_misses: 5 }]);
+    expect(parseMaxCacheMissesExceededFromEventLog()).toBe(true);
+  });
+
+  it("detects max_cache_misses_exceeded in events.jsonl fallback", () => {
+    writeEventLog([{ type: "max_cache_misses_exceeded", consecutive_cache_misses: 7, max_cache_misses: 5 }], "events.jsonl");
+    expect(parseMaxCacheMissesExceededFromEventLog()).toBe(true);
+  });
+
+  it("returns false when no matching event is present", () => {
+    writeEventLog([{ type: "response", status: 200 }]);
+    expect(parseMaxCacheMissesExceededFromEventLog()).toBe(false);
+  });
+
+  it("returns false for missing event log", () => {
+    process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "output.json");
+    expect(parseMaxCacheMissesExceededFromEventLog("/nonexistent/path/event-logs.jsonl")).toBe(false);
+  });
+
+  it("does not detect other error types", () => {
+    writeEventLog([{ type: "unknown_model_ai_credits" }]);
+    expect(parseMaxCacheMissesExceededFromEventLog()).toBe(false);
   });
 });
 

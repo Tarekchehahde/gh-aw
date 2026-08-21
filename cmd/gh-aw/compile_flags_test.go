@@ -5,6 +5,7 @@ package main
 import "testing"
 
 func TestCompileCommandShortFlags(t *testing.T) {
+	t.Parallel()
 	forceFlag := compileCmd.Flags().Lookup("force")
 	if forceFlag == nil {
 		t.Fatal("expected --force flag on compile command")
@@ -21,11 +22,27 @@ func TestCompileCommandShortFlags(t *testing.T) {
 		t.Fatalf("expected --logical-repo shorthand to be -l, got -%s", logicalRepoFlag.Shorthand)
 	}
 
-	noModelsDevLookupFlag := compileCmd.Flags().Lookup("no-models-dev-lookup")
-	if noModelsDevLookupFlag == nil {
-		t.Fatal("expected --no-models-dev-lookup flag on compile command")
+	grantFlag := compileCmd.Flags().Lookup("grant")
+	if grantFlag == nil {
+		t.Fatal("expected --grant flag on compile command")
 	}
-	if noModelsDevLookupFlag.DefValue != "false" {
-		t.Fatalf("expected --no-models-dev-lookup default to be false, got %s", noModelsDevLookupFlag.DefValue)
+	if grantFlag.DefValue != "false" {
+		t.Fatalf("expected --grant default to be false, got %s", grantFlag.DefValue)
+	}
+
+	forceRefreshContainerPinsFlag := compileCmd.Flags().Lookup("force-refresh-container-pins")
+	if forceRefreshContainerPinsFlag == nil {
+		t.Fatal("expected --force-refresh-container-pins flag on compile command")
+	}
+	if forceRefreshContainerPinsFlag.DefValue != "false" {
+		t.Fatalf("expected --force-refresh-container-pins default to be false, got %s", forceRefreshContainerPinsFlag.DefValue)
+	}
+}
+
+func TestCompileOptionsPropagateForceRefreshContainerPins(t *testing.T) {
+	t.Parallel()
+	config := (&compileCmdOptions{forceRefreshContainerPins: true}).toCompileConfig(nil)
+	if !config.ForceRefreshContainerPins {
+		t.Fatal("expected ForceRefreshContainerPins to be propagated to CompileConfig")
 	}
 }

@@ -2,8 +2,9 @@
 /// <reference types="@actions/github-script" />
 
 const { sanitizeContent } = require("./sanitize_content.cjs");
-const { closeOlderEntities, MAX_CLOSE_COUNT: SHARED_MAX_CLOSE_COUNT } = require("./close_older_entities.cjs");
-const { buildMarkerSearchQuery, filterByMarker, logFilterSummary } = require("./close_older_search_helpers.cjs");
+const { MAX_CLOSE_COUNT: SHARED_MAX_CLOSE_COUNT } = require("./close_older_entities.cjs");
+const { searchOlderEntitiesByMarker } = require("./close_older_search_helpers.cjs");
+const { createCloseOlderSearchAdapter, closeOlderWithDescriptor } = require("./close_older_handler_factory.cjs");
 
 /**
  * Maximum number of older pull requests to close
@@ -32,44 +33,28 @@ const API_DELAY_MS = 500;
  * @returns {Promise<Array<{number: number, title: string, html_url: string, labels: Array<{name: string}>, created_at: string}>>} Matching pull requests
  */
 async function searchOlderPullRequests(github, owner, repo, workflowId, excludeNumber, callerWorkflowId, closeOlderKey) {
-  core.info(`Starting search for older pull requests in ${owner}/${repo}`);
-  core.info(`  Workflow ID: ${workflowId || "(none)"}`);
-  core.info(`  Exclude PR number: ${excludeNumber}`);
-
-  if (!workflowId && !closeOlderKey) {
-    core.info("No workflow ID or close-older-key provided - cannot search for older pull requests");
-    return [];
-  }
-
-  const { searchQuery, exactMarker } = buildMarkerSearchQuery({
+  return searchOlderEntitiesByMarker({
     owner,
     repo,
     workflowId,
+    excludeNumber,
+    entityType: "pull request",
     callerWorkflowId,
     closeOlderKey,
     entityQualifier: "is:pr",
-  });
-  core.info(`Executing GitHub search with query: ${searchQuery}`);
-
-  const result = await github.rest.search.issuesAndPullRequests({
-    q: searchQuery,
-    per_page: 50,
-  });
-
-  core.info(`Search API returned ${result?.data?.items?.length || 0} total results`);
-
-  if (!result || !result.data || !result.data.items) {
-    core.info("No results returned from search API");
-    return [];
-  }
-
-  core.info("Filtering search results...");
-
-  const { filtered: filteredItems, counters } = filterByMarker({
-    items: result.data.items,
-    excludeNumber,
-    exactMarker,
-    entityType: "pull request",
+    executeSearch: searchQuery =>
+      github.rest.search.issuesAndPullRequests({
+        q: searchQuery,
+        per_page: 50,
+      }),
+    getItems: result => result?.data?.items,
+    mapItem: item => ({
+      number: item.number,
+      title: item.title,
+      html_url: item.html_url,
+      labels: item.labels || [],
+      created_at: item.created_at,
+    }),
     additionalFilter: (item, extra) => {
       if (!item.pull_request) {
         extra.issueCount = (extra.issueCount || 0) + 1;
@@ -77,23 +62,8 @@ async function searchOlderPullRequests(github, owner, repo, workflowId, excludeN
       }
       return true;
     },
-  });
-
-  const filtered = filteredItems.map(item => ({
-    number: item.number,
-    title: item.title,
-    html_url: item.html_url,
-    labels: item.labels || [],
-    created_at: item.created_at,
-  }));
-
-  logFilterSummary({
-    entityTypePlural: "pull requests",
-    counters,
     extraLabels: [["issueCount", "Excluded issues"]],
   });
-
-  return filtered;
 }
 
 /**
@@ -185,13 +155,17 @@ function getCloseOlderPullRequestMessage({ newPullRequestUrl, newPullRequestNumb
  * @returns {Promise<Array<{number: number, html_url: string}>>} List of closed pull requests
  */
 async function closeOlderPullRequests(github, owner, repo, workflowId, newPullRequest, workflowName, runUrl, callerWorkflowId, closeOlderKey) {
-  const result = await closeOlderEntities(github, owner, repo, workflowId, newPullRequest, workflowName, runUrl, {
+  return closeOlderWithDescriptor({
+    github,
+    owner,
+    repo,
+    workflowId,
+    newEntity: newPullRequest,
+    workflowName,
+    runUrl,
     entityType: "pull request",
     entityTypePlural: "pull requests",
-    // Use a closure so callerWorkflowId and closeOlderKey are forwarded to searchOlderPullRequests
-    // without going through the closeOlderEntities extraArgs mechanism (which appends
-    // excludeNumber last)
-    searchOlderEntities: (gh, o, r, wid, excludeNumber) => searchOlderPullRequests(gh, o, r, wid, excludeNumber, callerWorkflowId, closeOlderKey),
+    searchOlderEntities: createCloseOlderSearchAdapter(searchOlderPullRequests, [], [callerWorkflowId, closeOlderKey]),
     getCloseMessage: params =>
       getCloseOlderPullRequestMessage({
         newPullRequestUrl: params.newEntityUrl,
@@ -204,13 +178,11 @@ async function closeOlderPullRequests(github, owner, repo, workflowId, newPullRe
     delayMs: API_DELAY_MS,
     getEntityId: entity => entity.number,
     getEntityUrl: entity => entity.html_url,
+    mapClosedEntity: item => ({
+      number: item.number,
+      html_url: item.html_url || "",
+    }),
   });
-
-  // Map to pull-request-specific return type
-  return result.map(item => ({
-    number: item.number,
-    html_url: item.html_url || "",
-  }));
 }
 
 module.exports = {

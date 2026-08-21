@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,7 +69,7 @@ type GitHubWorkflow struct {
 }
 
 // fetchGitHubWorkflows fetches workflow information from GitHub
-func fetchGitHubWorkflows(repoOverride string, verbose bool) (map[string]*GitHubWorkflow, error) {
+func fetchGitHubWorkflows(ctx context.Context, repoOverride string, verbose bool) (map[string]*GitHubWorkflow, error) {
 	workflowsLog.Printf("Fetching GitHub workflows: repoOverride=%s", repoOverride)
 
 	// Start spinner for network operation (only if not in verbose mode)
@@ -81,7 +82,7 @@ func fetchGitHubWorkflows(repoOverride string, verbose bool) (map[string]*GitHub
 	if repoOverride != "" {
 		args = append(args, "--repo", repoOverride)
 	}
-	cmd := workflow.ExecGH(args...)
+	cmd := workflow.ExecGHContext(ctx, args...)
 	output, err := cmd.Output()
 
 	if err != nil {
@@ -176,14 +177,14 @@ func extractWorkflowNameFromPath(path string) string {
 }
 
 // getWorkflowStatus gets the status of a single workflow by name
-func getWorkflowStatus(workflowIdOrName string, repoOverride string, verbose bool) (*GitHubWorkflow, error) {
+func getWorkflowStatus(ctx context.Context, workflowIdOrName string, repoOverride string, verbose bool) (*GitHubWorkflow, error) {
 	workflowsLog.Printf("Getting workflow status: workflow=%s", workflowIdOrName)
 
 	// Extract workflow name for lookup
-	filename := strings.TrimSuffix(filepath.Base(workflowIdOrName), ".md")
+	filename := normalizeWorkflowID(workflowIdOrName)
 
 	// Get all GitHub workflows
-	githubWorkflows, err := fetchGitHubWorkflows(repoOverride, verbose)
+	githubWorkflows, err := fetchGitHubWorkflows(ctx, repoOverride, verbose)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch GitHub workflows: %w", err)
 	}
@@ -243,7 +244,7 @@ func getAvailableWorkflowNames() []string {
 	}
 
 	return sliceutil.Map(mdFiles, func(file string) string {
-		return strings.TrimSuffix(filepath.Base(file), ".md")
+		return normalizeWorkflowID(file)
 	})
 }
 
@@ -256,7 +257,7 @@ func suggestWorkflowNames(target string) []string {
 	}
 
 	// Normalize target: strip .md extension and get basename if it's a path
-	normalizedTarget := strings.TrimSuffix(filepath.Base(target), ".md")
+	normalizedTarget := normalizeWorkflowID(target)
 
 	workflowsLog.Printf("Suggesting workflow names for %q (available: %d)", normalizedTarget, len(availableNames))
 	// Use the existing FindClosestMatches function from parser package
@@ -355,10 +356,6 @@ func filterMarkdownFilesWithFrontmatter(mdFiles []string) ([]string, error) {
 // Returns an error if frontmatter is opened but never closed.
 func fastParseTitleFromReader(r io.Reader) (string, error) {
 	scanner := bufio.NewScanner(r)
-	frontmatterDelimiter := []byte("---")
-	h1Prefix := []byte("# ")
-	h2Prefix := []byte("## ")
-	h3Prefix := []byte("### ")
 	// Reuse the small initial scanner buffer across calls while still allowing
 	// growth up to 1 MB for large frontmatter values or long base64-encoded lines.
 	pooled := workflowTitleScannerBufferPool.Get()
@@ -381,26 +378,33 @@ func fastParseTitleFromReader(r io.Reader) (string, error) {
 	firstLine := true
 	inFrontmatter := false
 	for scanner.Scan() {
-		trimmed := bytes.TrimSpace(scanner.Bytes())
+		line := scanner.Bytes()
 		if firstLine {
 			firstLine = false
-			if bytes.Equal(trimmed, frontmatterDelimiter) {
+			if isFrontmatterDelimiter(line) {
+				inFrontmatter = true
+				continue
+			}
+			if trimmed := bytes.TrimSpace(line); isFrontmatterDelimiter(trimmed) {
 				inFrontmatter = true
 				continue
 			}
 		} else if inFrontmatter {
-			if bytes.Equal(trimmed, frontmatterDelimiter) {
+			if isFrontmatterDelimiter(line) {
+				inFrontmatter = false
+			} else if trimmed := bytes.TrimSpace(line); isFrontmatterDelimiter(trimmed) {
 				inFrontmatter = false
 			}
 			continue
 		}
-		switch {
-		case bytes.HasPrefix(trimmed, h1Prefix):
-			return string(bytes.TrimSpace(trimmed[2:])), nil
-		case bytes.HasPrefix(trimmed, h2Prefix):
-			return string(bytes.TrimSpace(trimmed[3:])), nil
-		case bytes.HasPrefix(trimmed, h3Prefix):
-			return string(bytes.TrimSpace(trimmed[4:])), nil
+
+		if title, ok := extractHeadingTitle(line); ok {
+			return title, nil
+		}
+		if trimmed := bytes.TrimSpace(line); !bytes.Equal(trimmed, line) {
+			if title, ok := extractHeadingTitle(trimmed); ok {
+				return title, nil
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -413,6 +417,23 @@ func fastParseTitleFromReader(r io.Reader) (string, error) {
 	}
 
 	return "", nil
+}
+
+func isFrontmatterDelimiter(line []byte) bool {
+	return len(line) == 3 && line[0] == '-' && line[1] == '-' && line[2] == '-'
+}
+
+func extractHeadingTitle(line []byte) (string, bool) {
+	switch {
+	case len(line) >= 2 && line[0] == '#' && line[1] == ' ':
+		return string(bytes.TrimSpace(line[2:])), true
+	case len(line) >= 3 && line[0] == '#' && line[1] == '#' && line[2] == ' ':
+		return string(bytes.TrimSpace(line[3:])), true
+	case len(line) >= 4 && line[0] == '#' && line[1] == '#' && line[2] == '#' && line[3] == ' ':
+		return string(bytes.TrimSpace(line[4:])), true
+	default:
+		return "", false
+	}
 }
 
 // extractWorkflowNameFromFile extracts the workflow name from a file's H1 header
@@ -456,7 +477,7 @@ func extractWorkflowNameFromFile(filePath string) (title string, err error) {
 func extractEngineIDFromFrontmatter(frontmatter map[string]any) string {
 	// Use the workflow package's ExtractEngineConfig to handle both string and object formats
 	compiler := &workflow.Compiler{}
-	engineSetting, engineConfig := compiler.ExtractEngineConfig(frontmatter)
+	engineSetting, engineConfig, _ := compiler.ExtractEngineConfig(frontmatter)
 
 	if engineConfig != nil && engineConfig.ID != "" {
 		return engineConfig.ID

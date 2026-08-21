@@ -29,6 +29,7 @@ type universalLLMBackendProfile struct {
 	coreSecretNames []string
 	env             map[string]string
 	baseURLEnvName  string
+	extraURLEnvName string // additional URL env var set to the same gateway URL (e.g. OPENAI_BASE_URL for copilot backend)
 	gatewayPort     int
 }
 
@@ -36,12 +37,12 @@ func resolveUniversalLLMBackendFromModel(model string) (UniversalLLMBackend, err
 	universalLLMConsumerLog.Printf("Resolving LLM backend from model: %q", model)
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return "", errors.New("for universal consumer engines (OpenCode/Crush), engine.model is required and must use provider/model format (supported providers: copilot, anthropic, openai, codex)")
+		return "", errors.New("for universal consumer engines, engine.model is required and must use provider/model format (supported providers: copilot, anthropic, openai, codex)")
 	}
 
 	parts := strings.SplitN(model, "/", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return "", errors.New("for universal consumer engines (OpenCode/Crush), engine.model must use provider/model format (for example: copilot/gpt-5, anthropic/claude-sonnet-4, openai/gpt-4.1)")
+		return "", errors.New("for universal consumer engines, engine.model must use provider/model format (for example: copilot/gpt-5, anthropic/claude-sonnet-4, openai/gpt-4.1)")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(parts[0])) {
@@ -93,8 +94,9 @@ func getUniversalLLMBackendProfile(backend UniversalLLMBackend, useCopilotReques
 				"COPILOT_GITHUB_TOKEN": copilotToken,
 				"OPENAI_API_KEY":       copilotToken,
 			},
-			baseURLEnvName: "GITHUB_COPILOT_BASE_URL",
-			gatewayPort:    constants.CopilotLLMGatewayPort,
+			baseURLEnvName:  "GITHUB_COPILOT_BASE_URL",
+			extraURLEnvName: "OPENAI_BASE_URL",
+			gatewayPort:     constants.CopilotLLMGatewayPort,
 		}
 	}
 }
@@ -102,7 +104,7 @@ func getUniversalLLMBackendProfile(backend UniversalLLMBackend, useCopilotReques
 func (e *UniversalLLMConsumerEngine) resolveBackend(workflowData *WorkflowData) UniversalLLMBackend {
 	model := ""
 	if workflowData != nil && workflowData.EngineConfig != nil {
-		model = workflowData.EngineConfig.Model
+		model = workflowData.Model
 	}
 	backend, err := resolveUniversalLLMBackendFromModel(model)
 	if err != nil {
@@ -158,10 +160,11 @@ func extractToolsConfig(workflowData *WorkflowData) (*ToolsConfig, map[string]an
 func (e *UniversalLLMConsumerEngine) GetUniversalSecretValidationStep(workflowData *WorkflowData, engineName, docsURL string) GitHubActionStep {
 	backend := e.resolveBackend(workflowData)
 	profile := getUniversalLLMBackendProfile(backend, hasCopilotRequestsWritePermission(workflowData))
-	if len(profile.coreSecretNames) == 0 {
-		return GitHubActionStep{}
-	}
-	return BuildDefaultSecretValidationStep(workflowData, profile.coreSecretNames, engineName, docsURL)
+	return BuildEngineSecretValidationStep(workflowData, EngineSecretValidationConfig{
+		SecretNames: profile.coreSecretNames,
+		EngineName:  engineName,
+		DocsURL:     docsURL,
+	})
 }
 
 func (e *UniversalLLMConsumerEngine) ApplyUniversalProviderEnv(env map[string]string, workflowData *WorkflowData, firewallEnabled bool) {
@@ -169,9 +172,21 @@ func (e *UniversalLLMConsumerEngine) ApplyUniversalProviderEnv(env map[string]st
 	universalLLMConsumerLog.Printf("Applying provider env for backend=%s, firewallEnabled=%t", backend, firewallEnabled)
 	profile := getUniversalLLMBackendProfile(backend, hasCopilotRequestsWritePermission(workflowData))
 	maps.Copy(env, profile.env)
+	switch backend {
+	case UniversalLLMBackendAnthropic:
+		env["GH_AW_LLM_PROVIDER"] = string(LLMProviderAnthropic)
+	case UniversalLLMBackendCodex:
+		env["GH_AW_LLM_PROVIDER"] = string(LLMProviderOpenAI)
+	default:
+		env["GH_AW_LLM_PROVIDER"] = string(LLMProviderGitHub)
+	}
 	if firewallEnabled {
 		universalLLMConsumerLog.Printf("Setting %s to gateway port %d", profile.baseURLEnvName, profile.gatewayPort)
 		env[profile.baseURLEnvName] = fmt.Sprintf("http://host.docker.internal:%d", profile.gatewayPort)
+		if profile.extraURLEnvName != "" {
+			universalLLMConsumerLog.Printf("Setting extra URL env %s to gateway port %d", profile.extraURLEnvName, profile.gatewayPort)
+			env[profile.extraURLEnvName] = fmt.Sprintf("http://host.docker.internal:%d", profile.gatewayPort)
+		}
 	}
 }
 
@@ -204,22 +219,22 @@ type UniversalCLIEngineExecutionConfig struct {
 	// EngineConstant is the engine name used for firewall allowed-domain resolution.
 	EngineConstant constants.EngineName
 	// DefaultCommandName is the CLI binary name used when engine.command is not set
-	// (e.g. "crush", "opencode").
+	// (e.g. a behavior-defined CLI engine).
 	DefaultCommandName string
 	// ExtraCLIArgs are additional flags passed to the CLI run subcommand before the
-	// prompt argument (e.g. []string{"--verbose"} for Crush).
+	// prompt argument.
 	ExtraCLIArgs []string
 	// MCPConfigFile is the workspace-relative path of the permissions/MCP config file.
 	// It is used to populate GH_AW_MCP_CONFIG when MCP servers are configured.
 	MCPConfigFile string
-	// StepName is the GitHub Actions step name (e.g. "Execute Crush CLI").
+	// StepName is the GitHub Actions step name (e.g. "Execute My CLI").
 	StepName string
 	// ConfigStep is the pre-built config-writing step that precedes the execution step.
 	// Typically writes a JSON file that grants all permissions so the agent never hangs
 	// on an interactive prompt in CI.
 	ConfigStep GitHubActionStep
 	// ModelEnvVarName is the native environment variable used by the CLI for model
-	// selection (e.g. "CRUSH_MODEL", "OPENCODE_MODEL"). When empty, model selection
+	// selection (e.g. "MY_CLI_MODEL"). When empty, model selection
 	// via env var is skipped.
 	ModelEnvVarName string
 	// WriteTimestamp controls whether the non-firewall fallback command writes the
@@ -228,7 +243,7 @@ type UniversalCLIEngineExecutionConfig struct {
 }
 
 // BuildCLIEngineExecutionSteps generates the GitHub Actions execution steps for a
-// universal CLI engine (e.g. Crush, OpenCode). It handles firewall-aware command
+// universal CLI engine. It handles firewall-aware command
 // construction, common AWF environment variable injection, and step formatting.
 // Engines call this from their GetExecutionSteps implementation, supplying engine-
 // specific parameters via cfg.
@@ -247,7 +262,7 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 		steps = append(steps, cfg.ConfigStep)
 	}
 
-	modelConfigured := workflowData.EngineConfig != nil && workflowData.EngineConfig.Model != ""
+	modelConfigured := workflowData.Model != ""
 
 	// Build CLI command: <binary> run <extra-args> "<prompt-file>".
 	cliArgs := append([]string{}, cfg.ExtraCLIArgs...)
@@ -264,7 +279,7 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 	if firewallEnabled {
 		model := ""
 		if modelConfigured {
-			model = workflowData.EngineConfig.Model
+			model = workflowData.Model
 		}
 		// Get allowed domains: prefer the pre-warmed cache on WorkflowData to avoid
 		// re-running the expensive map+sort operation.
@@ -285,7 +300,10 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 		}
 
 		npmPathSetup := GetNpmBinPathSetup()
-		engineCommandWithPath := fmt.Sprintf("%s && %s", npmPathSetup, engineCommand)
+		// Propagate no_proxy inside the AWF container.  --env-all forwards NO_PROXY
+		// from the YAML env block, but Bun (and other runtimes) also check the
+		// lowercase variant, so we export it explicitly from the uppercase value.
+		engineCommandWithPath := fmt.Sprintf("export no_proxy=\"${NO_PROXY:-}\" && %s && %s", npmPathSetup, engineCommand)
 		if mcpCLIPath := GetMCPCLIPathSetup(workflowData); mcpCLIPath != "" {
 			engineCommandWithPath = fmt.Sprintf("%s && %s", mcpCLIPath, engineCommandWithPath)
 		}
@@ -299,17 +317,22 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 			AllowedDomains: allowedDomains,
 		})
 	} else if cfg.WriteTimestamp {
-		command = fmt.Sprintf("set -o pipefail\nprintf '%%s' \"$(date +%%s%%3N)\" > %s\n%s 2>&1 | tee -a %s",
+		command = fmt.Sprintf("set -o pipefail\nexport no_proxy=\"${NO_PROXY:-}\"\nprintf '%%s' \"$(date +%%s%%3N)\" > %s\n%s 2>&1 | tee -a %s",
 			AgentCLIStartMsPath, engineCommand, logFile)
 	} else {
-		command = fmt.Sprintf("set -o pipefail\n%s 2>&1 | tee -a %s", engineCommand, logFile)
+		command = fmt.Sprintf("set -o pipefail\nexport no_proxy=\"${NO_PROXY:-}\"\n%s 2>&1 | tee -a %s", engineCommand, logFile)
 	}
 
 	env := map[string]string{
 		"GH_AW_PROMPT":     constants.AwPromptsFile,
 		"GITHUB_WORKSPACE": "${{ github.workspace }}",
 		"RUNNER_TEMP":      "${{ runner.temp }}",
-		"NO_PROXY":         "localhost,127.0.0.1",
+		// Set NO_PROXY so that the AWF agent's HTTP client skips the squid proxy
+		// for local endpoints. The lowercase no_proxy variant is exported inside
+		// the run script rather than as a YAML env key because GitHub's workflow
+		// parser rejects case-insensitive duplicate env keys (NO_PROXY/no_proxy),
+		// which causes workflow_dispatch to fail with "failed to parse workflow".
+		"NO_PROXY": constants.AWFNoProxyHosts,
 	}
 	injectWorkflowCallNetworkAllowedEnv(env, workflowData)
 	e.ApplyUniversalProviderEnv(env, workflowData, firewallEnabled)
@@ -331,8 +354,8 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 
 	// Model env var (only when explicitly configured and the engine supports it).
 	if modelConfigured && cfg.ModelEnvVarName != "" {
-		universalLLMConsumerLog.Printf("Setting %s env var for model: %s", cfg.ModelEnvVarName, workflowData.EngineConfig.Model)
-		env[cfg.ModelEnvVarName] = workflowData.EngineConfig.Model
+		universalLLMConsumerLog.Printf("Setting %s env var for model: %s", cfg.ModelEnvVarName, workflowData.Model)
+		env[cfg.ModelEnvVarName] = workflowData.Model
 	}
 
 	// Custom env from engine config (allows provider key override).
@@ -353,7 +376,7 @@ func (e *UniversalLLMConsumerEngine) BuildCLIEngineExecutionSteps(
 	}
 	allowedSecrets := e.GetUniversalRequiredSecretNames(workflowData)
 	filteredEnv := FilterEnvForSecrets(env, allowedSecrets)
-	stepLines = FormatStepWithCommandAndEnv(stepLines, command, filteredEnv)
+	stepLines = FormatStepWithCommandAndEnv(stepLines, wrapAgentExecutionCommand(command), filteredEnv)
 
 	steps = append(steps, GitHubActionStep(stepLines))
 	return steps

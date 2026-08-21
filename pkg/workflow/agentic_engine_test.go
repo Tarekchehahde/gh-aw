@@ -4,8 +4,12 @@ package workflow
 
 import (
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +19,7 @@ func TestEngineRegistry(t *testing.T) {
 		registry := NewEngineRegistry()
 		supportedEngines := registry.GetSupportedEngines()
 
-		expectedEngineIDs := []string{"claude", "codex", "copilot", "gemini", "opencode", "crush"}
+		expectedEngineIDs := []string{"claude", "codex", "copilot", "gemini"}
 		for _, engineID := range expectedEngineIDs {
 			assert.True(t, slices.Contains(supportedEngines, engineID), "expected engine %q to be registered", engineID)
 		}
@@ -29,8 +33,6 @@ func TestEngineRegistry(t *testing.T) {
 			{engineID: "codex"},
 			{engineID: "copilot"},
 			{engineID: "gemini"},
-			{engineID: "opencode"},
-			{engineID: "crush"},
 		}
 
 		for _, tt := range tests {
@@ -52,7 +54,7 @@ func TestEngineRegistry(t *testing.T) {
 	t.Run("IsValidEngine", func(t *testing.T) {
 		registry := NewEngineRegistry()
 
-		validEngines := []string{"claude", "codex", "copilot", "gemini", "opencode", "crush"}
+		validEngines := []string{"claude", "codex", "copilot", "gemini"}
 		for _, id := range validEngines {
 			assert.True(t, registry.IsValidEngine(id), "IsValidEngine(%q) should return true", id)
 		}
@@ -114,7 +116,7 @@ func TestEngineRegistry_Register(t *testing.T) {
 		// getDedicatedLLMGatewayPort, triggering the validation path in Register.
 		err := registry.Register(&negativePortEngine{CodingAgentEngine: NewClaudeEngine()})
 		require.Error(t, err, "registering an engine with dedicatedLLMGatewayPort = -1 should return an error")
-		assert.Contains(t, err.Error(), "dedicatedLLMGatewayPort must be >= 0", "error message should describe the constraint")
+		require.ErrorContains(t, err, "dedicatedLLMGatewayPort must be >= 0", "error message should describe the constraint")
 		assert.False(t, registry.IsValidEngine("claude"), "invalid engine should not be registered on error")
 	})
 }
@@ -143,7 +145,7 @@ func TestGetGlobalEngineRegistry(t *testing.T) {
 
 	t.Run("singleton contains expected built-in engines", func(t *testing.T) {
 		registry := GetGlobalEngineRegistry()
-		expectedEngineIDs := []string{"claude", "codex", "copilot", "gemini", "opencode", "crush"}
+		expectedEngineIDs := []string{"claude", "codex", "copilot", "gemini"}
 		supportedEngines := registry.GetSupportedEngines()
 		for _, engineID := range expectedEngineIDs {
 			assert.True(t, slices.Contains(supportedEngines, engineID), "global registry should contain built-in engine %q", engineID)
@@ -195,40 +197,87 @@ func TestEngineRegistry_GetAllAgentManifestFolders(t *testing.T) {
 	})
 }
 
-func TestEngineRegistry_GetAllAgentManifestFiles(t *testing.T) {
-	t.Run("result is sorted", func(t *testing.T) {
-		registry := NewEngineRegistry()
-		files := registry.GetAllAgentManifestFiles()
-		for i := 1; i < len(files); i++ {
-			assert.LessOrEqual(t, files[i-1], files[i], "manifest files should be sorted alphabetically")
-		}
-	})
+// TestAllEnginesEmitTimeoutMinutes verifies that every registered agentic engine
+// emits a timeout-minutes field on the agentic_execution step. This prevents
+// silent 6-hour timeouts when timeout-minutes is not forwarded to the step.
+func TestAllEnginesEmitTimeoutMinutes(t *testing.T) {
+	defaultTimeout := strconv.Itoa(int(constants.DefaultAgenticWorkflowTimeout / time.Minute))
 
-	t.Run("includes engine-specific instruction files", func(t *testing.T) {
-		registry := NewEngineRegistry()
-		files := registry.GetAllAgentManifestFiles()
-		// Known instruction files contributed by built-in engines
-		expectedFiles := []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
-		for _, file := range expectedFiles {
-			assert.Contains(t, files, file, "manifest files should include instruction file %q", file)
-		}
-	})
+	tests := []struct {
+		name         string
+		workflowData *WorkflowData
+		wantTimeout  string
+		description  string
+	}{
+		{
+			name:         "no timeout set — default emitted",
+			workflowData: &WorkflowData{Name: "test-workflow"},
+			wantTimeout:  defaultTimeout,
+			description:  "engine should emit the default timeout when none is specified",
+		},
+		{
+			name:         "explicit timeout-minutes: 15",
+			workflowData: &WorkflowData{Name: "test-workflow", ParsedFrontmatter: &FrontmatterConfig{TimeoutMinutes: func() *TemplatableInt32 { v := TemplatableInt32("15"); return &v }()}},
+			wantTimeout:  "15",
+			description:  "engine should forward the explicit timeout value",
+		},
+		{
+			name:         "timeout as expression",
+			workflowData: &WorkflowData{Name: "test-workflow", ParsedFrontmatter: &FrontmatterConfig{TimeoutMinutes: func() *TemplatableInt32 { v := TemplatableInt32("${{ inputs.timeout }}"); return &v }()}},
+			wantTimeout:  "${{ inputs.timeout }}",
+			description:  "engine should forward GitHub Actions expressions verbatim",
+		},
+		{
+			name:         "legacy timeout-minutes field (numeric)",
+			workflowData: &WorkflowData{Name: "test-workflow", TimeoutMinutes: "timeout-minutes: 30"},
+			wantTimeout:  "30",
+			description:  "engine should honor already-extracted timeout-minutes values",
+		},
+		{
+			name:         "legacy timeout-minutes field (expression)",
+			workflowData: &WorkflowData{Name: "test-workflow", TimeoutMinutes: "timeout-minutes: ${{ inputs.timeout }}"},
+			wantTimeout:  "${{ inputs.timeout }}",
+			description:  "engine should honor already-extracted expression timeout values",
+		},
+		{
+			name:         "legacy timeout-minutes field — malformed value falls back to default",
+			workflowData: &WorkflowData{Name: "test-workflow", TimeoutMinutes: "timeout-minutes: not-a-number\ninjected: yaml"},
+			wantTimeout:  defaultTimeout,
+			description:  "engine must fall back to default for non-integer, non-expression raw values to prevent malformed YAML",
+		},
+	}
 
-	t.Run("no duplicates in result", func(t *testing.T) {
-		registry := NewEngineRegistry()
-		files := registry.GetAllAgentManifestFiles()
-		seen := make(map[string]struct{})
-		for _, file := range files {
-			assert.NotContains(t, seen, file, "manifest files should not contain duplicates, found %q twice", file)
-			seen[file] = struct{}{}
-		}
-	})
+	registry := NewEngineRegistry()
+	engineIDs := registry.GetSupportedEngines()
 
-	t.Run("empty registry returns empty slice", func(t *testing.T) {
-		// Use direct struct initialization so there are no engines; this verifies
-		// the empty-input case without interference from built-in engine files.
-		registry := &EngineRegistry{engines: make(map[string]CodingAgentEngine)}
-		files := registry.GetAllAgentManifestFiles()
-		assert.Empty(t, files, "empty registry should return no manifest files")
-	})
+	for _, engineID := range engineIDs {
+		t.Run(engineID, func(t *testing.T) {
+			engine, err := registry.GetEngine(engineID)
+			require.NoError(t, err)
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					execSteps := engine.GetExecutionSteps(tt.workflowData, "/tmp/gh-aw/test.log")
+					require.NotEmpty(t, execSteps, "engine must return at least one execution step")
+
+					// Find the agentic_execution step (it may not be the first step for engines
+					// that prepend settings-write steps, e.g. Gemini).
+					var agentStep GitHubActionStep
+					for _, step := range execSteps {
+						stepContent := strings.Join([]string(step), "\n")
+						if strings.Contains(stepContent, "id: agentic_execution") {
+							agentStep = step
+							break
+						}
+					}
+					require.NotNil(t, agentStep, "execution steps must include a step with id: agentic_execution")
+
+					stepContent := strings.Join([]string(agentStep), "\n")
+					expected := "timeout-minutes: " + tt.wantTimeout
+					assert.Contains(t, stepContent, expected,
+						"%s: %s\ngot step:\n%s", engineID, tt.description, stepContent)
+				})
+			}
+		})
+	}
 }

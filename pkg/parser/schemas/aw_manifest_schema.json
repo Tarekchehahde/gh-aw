@@ -28,9 +28,36 @@
     },
     "includes": {
       "type": "array",
-      "description": "Installable package entries. Use folder naming conventions to infer type: workflows under workflows/, agentic-workflows/, or .github/workflows/; skill directories under skills/ or .github/skills/; agent files under agents/ or .github/agents/.",
+      "description": "Installable package entries. String entries use folder naming conventions to infer type: workflows under workflows/, agentic-workflows/, or .github/workflows/; skill directories under skills/ or .github/skills/; agent files under agents/ or .github/agents/. Object entries map a package-relative 'source' to a repository-root-relative 'destination' under .github/workflows/.",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "description": "Source-to-destination mapping. 'source' is resolved relative to the package root (including nested packages); 'destination' is resolved relative to the consuming repository root.",
+            "required": ["source", "destination"],
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Package-relative path of the file to install (.md agentic workflow or .yml action workflow)."
+              },
+              "destination": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Repository-root-relative install path. Must be a direct child of .github/workflows/."
+              },
+              "kind": {
+                "type": "string",
+                "enum": ["agentic-workflow", "action-workflow"],
+                "description": "Optional explicit entry kind. Must match the file extension: agentic-workflow for .md, action-workflow for .yml."
+              }
+            }
+          }
+        ]
       }
     },
     "files": {
@@ -52,6 +79,25 @@
       "description": "Agent markdown file paths relative to the package root. Each entry must be a .md file under an agents/ directory; the file is installed to the agentic engine agents folder.",
       "items": {
         "type": "string"
+      }
+    },
+    "resources": {
+      "type": "array",
+      "description": "Declarative repository assets installed as-is from immutable package content. Each entry maps a package-relative source to an allowlisted repository destination.",
+      "items": {
+        "type": "object",
+        "required": ["source", "destination"],
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destination": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "branding": {
@@ -327,6 +373,198 @@
         }
       },
       "additionalProperties": false
+    },
+    "config": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "anyOf": [
+          {
+            "description": "require-owner-type: enforce a repository owner type constraint",
+            "type": "object",
+            "required": ["type", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "require-owner-type"
+              },
+              "owner": {
+                "type": "string",
+                "const": "repo"
+              },
+              "value": {
+                "type": "string",
+                "enum": ["any", "org", "user"]
+              }
+            }
+          },
+          {
+            "description": "repo-variable: prompt for a repository variable value",
+            "type": "object",
+            "required": ["type", "name", "prompt"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "repo-variable"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "default": {
+                "type": "string"
+              },
+              "optional": {
+                "type": "boolean"
+              },
+              "enum": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "description": "repo-secret: prompt for a repository secret value",
+            "type": "object",
+            "required": ["type", "name", "prompt"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "repo-secret"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "optional": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "description": "github-app: configure GitHub App credentials",
+            "type": "object",
+            "required": ["type", "app-id-variable", "private-key-secret"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "github-app"
+              },
+              "owner": {
+                "type": "string",
+                "const": "repo"
+              },
+              "name": {
+                "type": "string"
+              },
+              "app-id-variable": {
+                "type": "string",
+                "minLength": 1
+              },
+              "private-key-secret": {
+                "type": "string",
+                "minLength": 1
+              },
+              "app-name": {
+                "type": "string"
+              },
+              "homepage-url": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["create-or-existing", "existing"]
+              },
+              "existing-only": {
+                "type": "boolean"
+              },
+              "permissions": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "description": "copilot-auth: configure Copilot authentication",
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "copilot-auth"
+              },
+              "secret": {
+                "type": "string"
+              },
+              "strategy": {
+                "type": "string",
+                "const": "prompt-if-actions-auth-unavailable"
+              }
+            }
+          },
+          {
+            "description": "commit-and-push: stage, commit, and push local repository changes",
+            "type": "object",
+            "required": ["type", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "commit-and-push"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          {
+            "description": "handoff: display a message and hand off to the user",
+            "type": "object",
+            "required": ["type", "message"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "handoff"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
+      }
     }
   }
 }

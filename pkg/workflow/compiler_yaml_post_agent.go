@@ -67,7 +67,7 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 		paths = append(paths, constants.TmpGhAwDirSlash+constants.SafeOutputsFilename)
 		// Processed agent output JSON produced by collect_ndjson_output.cjs
 		paths = append(paths, constants.TmpGhAwDirSlash+constants.AgentOutputFilename)
-		if data.SafeOutputs.CommentMemory != nil {
+		if data.CommentMemoryConfig != nil {
 			paths = append(paths, constants.TmpCommentMemoryDir)
 		}
 	}
@@ -83,11 +83,14 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 	threatDetectionNeedsPatches := IsDetectionJobEnabled(data.SafeOutputs)
 	if usesPatchesAndCheckouts(data.SafeOutputs) || threatDetectionNeedsPatches {
 		paths = append(paths, constants.TmpAwPatchGlob)
-		// Bundle files are generated when patch-format: bundle is configured.
-		// Both formats use the same download path in the safe_outputs job, so
-		// include the bundle glob unconditionally alongside the patch glob.
-		// The artifact upload step already sets if-no-files-found: ignore, so
-		// this is safe even when no bundle files exist.
+		// Bundle files are generated when patch-format: bundle is configured and are
+		// required downstream to apply changes while preserving merge topology.
+		// Bundles are binary and cannot be text-scanned directly, but they are built
+		// from the same git commit range as the accompanying .patch file, so the
+		// .patch scanning above already covers the underlying diff content
+		// (see isKnownUnscannedButAllowedForUpload in step_order_validation.go). The
+		// artifact upload step already sets if-no-files-found: ignore, so including
+		// the bundle glob here is safe even when no bundle files exist.
 		paths = append(paths, constants.TmpAwBundleGlob)
 	}
 
@@ -119,6 +122,7 @@ func (c *Compiler) collectArtifactPaths(data *WorkflowData, engine CodingAgentEn
 		paths = rewriteTmpGhAwPathsForArcDind(paths)
 	}
 
+	compilerYamlLog.Printf("Collected %d artifact path(s) for unified agent upload", len(paths))
 	return paths
 }
 
@@ -171,6 +175,7 @@ func (c *Compiler) generateSummarySteps(yaml *strings.Builder, data *WorkflowDat
 // post-steps, the unified artifact upload, token invalidation, dev-mode actions restore,
 // and step-order validation.
 func (c *Compiler) generatePostAgentCollectionAndUpload(yaml *strings.Builder, data *WorkflowData, engine CodingAgentEngine, artifactPaths []string, logFileFull string, checkoutMgr *CheckoutManager) error {
+	compilerYamlLog.Print("Generating post-agent collection and upload steps")
 	// Generate engine output cleanup step so workspace files are removed after collection.
 	// The engine-declared output paths are gathered by collectArtifactPaths below.
 	if len(getEngineArtifactPaths(engine)) > 0 {
@@ -243,6 +248,8 @@ func (c *Compiler) generatePostAgentCollectionAndUpload(yaml *strings.Builder, d
 	// Generate single unified artifact upload with all collected paths.
 	// In workflow_call context, apply the per-invocation prefix to avoid name clashes.
 	agentArtifactPrefix := artifactPrefixExprForDownstreamJob(data)
+	compilerYamlLog.Printf("Emitting unified agent artifact upload with %d path(s)", len(artifactPaths))
+	c.generateAgentOutputFallbackUpload(yaml, data, agentArtifactPrefix)
 	c.generateUnifiedArtifactUpload(yaml, artifactPaths, agentArtifactPrefix)
 
 	// In dev mode the setup action is referenced via a local path (./actions/setup), so its files

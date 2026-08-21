@@ -3,6 +3,21 @@
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 
+const STANDARD_ROLES = new Set(["admin", "maintain", "write", "triage", "read"]);
+
+// Base roles a custom organization repository role can be derived from. `admin` is
+// deliberately excluded: custom repository roles can never confer admin access.
+const CUSTOM_ROLE_BASE_ROLES = new Set(["maintain", "write", "triage", "read"]);
+
+/**
+ * Normalize GitHub permission/role aliases to the canonical values used by on.roles.
+ * @param {string} role
+ * @returns {string}
+ */
+function normalizeRoleName(role) {
+  return role === "maintainer" ? "maintain" : role;
+}
+
 /**
  * Shared utility for repository permission validation
  * Used by both check_permissions.cjs and check_membership.cjs
@@ -54,7 +69,7 @@ function isAllowedBot(actor, allowedBots) {
  * Returns `true` only when the flag is explicitly set to the boolean `true` in a
  * valid JSON aw_context object.  Any parse error or missing field returns `false`.
  *
- * @param {object|undefined} payload - The GitHub event payload (context.payload)
+ * @param {any|undefined} payload - The GitHub event payload (context.payload)
  * @returns {boolean}
  */
 function readAllowBotAuthoredTriggerComment(payload) {
@@ -86,14 +101,14 @@ function readAllowBotAuthoredTriggerComment(payload) {
  *
  * @param {string} actor - The current github.actor
  * @param {string} eventName - The GitHub event name (e.g. "pull_request", "issue_comment")
- * @param {object|undefined} payload - The GitHub event payload (context.payload)
+ * @param {any|undefined} payload - The GitHub event payload (context.payload)
  * @returns {boolean} true if the event looks like a confused deputy attack
  */
 function isConfusedDeputyAttack(actor, eventName, payload) {
   if (!payload) return false;
 
-  // For pull_request events, only check on the `synchronize` action AND only when the
-  // actor is a bot (login ends with "[bot]").
+  // For pull_request and pull_request_target events, only check on the `synchronize`
+  // action AND only when the actor is a bot (login ends with "[bot]").
   // The confused deputy attack (@dependabot recreate) triggers a synchronize event
   // with actor=dependabot[bot] but pull_request.user = original human author.
   // Other pull_request actions (labeled, unlabeled, assigned, review_requested, etc.)
@@ -102,7 +117,7 @@ function isConfusedDeputyAttack(actor, eventName, payload) {
   // Restricting to bot actors is necessary because a human team member pushing commits
   // to a PR they did not open is legitimate collaboration, not a confused deputy attack.
   // The permission check further down validates the human's own repository permissions.
-  if (eventName === "pull_request" && payload.action === "synchronize" && actor.endsWith("[bot]")) {
+  if ((eventName === "pull_request" || eventName === "pull_request_target") && payload.action === "synchronize" && actor.endsWith("[bot]")) {
     const prAuthor = payload.pull_request?.user?.login;
     if (prAuthor !== undefined && prAuthor !== actor) {
       return true;
@@ -242,27 +257,65 @@ async function checkRepositoryPermission(actor, owner, repo, requiredPermissions
       username: actor,
     });
 
-    const permission = repoPermission.data.permission;
-    const rawRoleName = repoPermission.data.role_name;
+    /** @type {{ permission: string, role_name?: unknown }} */
+    const repoPermissionData = repoPermission.data;
+    const permission = repoPermissionData.permission;
+    const rawRoleName = repoPermissionData.role_name;
     const roleName = rawRoleName == null ? "" : typeof rawRoleName === "string" ? rawRoleName : "";
-    const normalizedRoleName = roleName === "maintainer" ? "maintain" : roleName;
-    const normalizedPermission = permission === "maintainer" ? "maintain" : permission;
+    const normalizedRoleName = normalizeRoleName(roleName);
+    const normalizedPermission = normalizeRoleName(permission);
     const effectiveRole = normalizedRoleName || normalizedPermission;
     const logDetails = normalizedRoleName && normalizedRoleName !== normalizedPermission ? `${normalizedPermission} (role: ${normalizedRoleName})` : normalizedPermission;
     core.info(`Repository permission level: ${logDetails}`);
 
-    // Check if user has one of the required permission levels.
-    // Prefer role_name (API's precise repository role) when present; fall back to permission.
-    const hasPermission = requiredPermissions.some(requiredPerm => {
-      const normalizedRequired = requiredPerm === "maintainer" ? "maintain" : requiredPerm;
-      return normalizedRequired === effectiveRole;
-    });
+    // Standard GitHub repository permission levels. Custom org repository roles (e.g.
+    // "Security Champions") have a role_name that is not one of these — for those, fall back
+    // to the standard `permission` level reported by the same endpoint so the actor is not
+    // blocked simply because their custom role name is not literally listed in on.roles.
+    // A custom role can never grant admin: GitHub derives custom repository roles from the
+    // read/triage/write/maintain base roles only, so `admin` is refused here even if the API
+    // unexpectedly reports it for a custom role.
+    const isCustomRole = normalizedRoleName !== "" && !STANDARD_ROLES.has(normalizedRoleName);
+    const resolvedBaseRole = isCustomRole && CUSTOM_ROLE_BASE_ROLES.has(normalizedPermission) ? normalizedPermission : "";
+    const debugRoleName = normalizedRoleName || "<empty>";
+    const debugBaseRole = resolvedBaseRole || "<empty>";
+    core.debug?.(`Repository permission API fields for '${actor}': permission='${normalizedPermission}', role='${debugRoleName}'`);
+    core.debug?.(`Repository permission computed roles for '${actor}': effective='${effectiveRole}', custom_role=${isCustomRole}, base_role='${debugBaseRole}'`);
+    if (isCustomRole && normalizedPermission === "admin") {
+      core.warning(`Ignoring 'admin' permission reported for custom repository role '${normalizedRoleName}': custom roles cannot grant admin access`);
+    }
+    if (isCustomRole && resolvedBaseRole === "") {
+      core.info(`Repository permission fallback unavailable for custom role '${normalizedRoleName}' because GitHub did not report a standard permission level`);
+    }
 
-    if (hasPermission) {
+    // Check if user has one of the required permission levels.
+    // For standard roles, use role_name (precise: maintain/triage are not collapsed to
+    // write/read). For custom org roles, fall back to the standard `permission` level that
+    // GitHub already computes for the actor (readable with the repository-scoped
+    // GITHUB_TOKEN); fail closed if it is not one of the non-admin base roles.
+    /** @type {{ permission: string, roleMatchType: string }|null} */
+    let permissionMatch = null;
+    for (const requiredPerm of requiredPermissions) {
+      const normalizedRequired = normalizeRoleName(requiredPerm);
+      if (normalizedRequired === effectiveRole) {
+        permissionMatch = { permission: normalizedRequired, roleMatchType: "effective-role" };
+        break;
+      }
+      if (resolvedBaseRole !== "" && normalizedRequired === resolvedBaseRole) {
+        permissionMatch = { permission: normalizedRequired, roleMatchType: "base-role" };
+        break;
+      }
+    }
+
+    if (permissionMatch) {
+      if (permissionMatch.roleMatchType === "base-role") {
+        core.info(`Custom repository role '${normalizedRoleName}' satisfied required role '${permissionMatch.permission}' via base role`);
+      }
       core.info(`✅ User has ${effectiveRole} access to repository`);
       return { authorized: true, permission: effectiveRole };
     }
 
+    core.debug?.(`Repository permission did not match required roles: ${requiredPermissions.join(", ")}`);
     core.warning(`User permission '${effectiveRole}' does not meet requirements: ${requiredPermissions.join(", ")}`);
     return { authorized: false, permission: effectiveRole };
   } catch (repoError) {

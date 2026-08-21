@@ -4,6 +4,7 @@ emoji: "🦅"
 name: Dev Hawk
 description: Monitors development workflow activities and provides real-time alerts and insights on pull requests and CI status
 on:
+  roles: [admin, maintainer, write]
   workflow_run:
     workflows:
       - Dev
@@ -11,20 +12,20 @@ on:
       - completed
     branches:
       - 'copilot/*'
-if: ${{ github.event.workflow_run.event == 'workflow_dispatch' }}
+if: >-
+  ${{ github.event.workflow_run.event == 'workflow_dispatch' &&
+  contains(fromJSON('["pelikhan","cmuto09","dsyme","mnkiefer","davidslater","zarenner","lpcox","salmanmkc","gh-aw-bot"]'), github.event.workflow_run.actor.login) }}
 permissions:
   contents: read
   actions: read
   pull-requests: read
   copilot-requests: write
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tools:
   bash:
     - "gh agent-task create *"
@@ -45,6 +46,13 @@ imports:
       toolsets: [pull_requests, actions, repos]
   - shared/reporting.md
   - shared/otlp.md
+evals:
+  - id: comment-posted
+    question: Did the agent post a comment with PR or CI analysis?
+  - id: insights-provided
+    question: Does the agent output include specific insights about pull request status or CI results?
+features:
+  gh-aw-detection: true
 ---
 
 # Dev Hawk - Development Workflow Monitor

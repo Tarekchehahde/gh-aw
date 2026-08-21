@@ -30,7 +30,7 @@ safe-outputs:
     allowed-exts: [.png, .jpg, .jpeg, .svg]
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 tools:
   agentic-workflows:
   bash:
@@ -39,7 +39,7 @@ features:
   gh-aw-detection: true
 steps:
   - name: Setup Python
-    uses: actions/setup-python@v6.3.0
+    uses: actions/setup-python@v7.0.0
     with:
       python-version: "3.12"
   - name: Setup local chart workspace
@@ -89,6 +89,11 @@ steps:
         echo '{"runs":[],"summary":{}}' > /tmp/gh-aw/token-audit/workflow-logs.json
       fi
 timeout-minutes: 25
+evals:
+  - id: date_range_analyzed
+    question: Did the agent analyze AIC usage for the user-specified date range?
+  - id: trend_report_created
+    question: Was a trend report created with per-workflow AIC data for the requested period?
 ---
 
 # On-Demand Agentic Workflow AIC Trend Audit

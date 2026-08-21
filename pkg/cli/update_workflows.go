@@ -14,10 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/github/gh-aw/pkg/constants"
-
 	"github.com/github/gh-aw/pkg/console"
-	"github.com/github/gh-aw/pkg/gitutil"
+	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/errorutil"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/semverutil"
 	"github.com/github/gh-aw/pkg/workflow"
@@ -25,6 +24,7 @@ import (
 
 var defaultBranchCache sync.Map
 var branchCommitCache sync.Map
+var updateNoticeCache sync.Map
 
 // updatePublicAPIClient is a shared HTTP client used for unauthenticated GitHub
 // API fallback calls in the update workflow path. It carries a timeout to
@@ -35,6 +35,21 @@ var updatePublicAPIClient = &http.Client{Timeout: constants.DefaultHTTPClientTim
 type repoBranchKey struct {
 	repo   string
 	branch string
+}
+
+type latestBranchCommitInfo struct {
+	SHA         string
+	CommittedAt time.Time
+}
+
+type cachedDefaultBranch struct {
+	branch string
+	err    error
+}
+
+type cachedBranchCommit struct {
+	info latestBranchCommitInfo
+	err  error
 }
 
 // clearUpdateResolutionCaches clears per-run ref-resolution caches so update
@@ -48,7 +63,18 @@ func clearUpdateResolutionCaches() {
 		branchCommitCache.Delete(key)
 		return true
 	})
+	updateNoticeCache.Range(func(key, value any) bool {
+		updateNoticeCache.Delete(key)
+		return true
+	})
 	clearVersionLabelCache()
+}
+
+func printUpdateInfoOnce(message string) {
+	if _, loaded := updateNoticeCache.LoadOrStore(message, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintln(os.Stderr, console.FormatInfoMessage(message))
 }
 
 // UpdateWorkflowsOptions configures workflow update behavior.
@@ -68,6 +94,7 @@ type UpdateWorkflowsOptions struct {
 	NoCompile              bool
 	NoRedirect             bool
 	CoolDown               time.Duration
+	Approve                bool
 }
 
 // UpdateWorkflows updates workflows from their source repositories
@@ -140,13 +167,12 @@ func UpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error {
 	}
 
 	// Show summary
-	showUpdateSummary(successfulUpdates, failedUpdates)
+	showUpdateSummary(successfulUpdates, failedUpdates, opts.NoCompile)
 
 	if len(successfulUpdates) == 0 {
 		// If all failures were due to GitHub API rate limiting, treat as non-fatal.
 		// Rate limiting is a transient infrastructure condition, not a code error.
 		if len(failedUpdates) > 0 && allFailuresAreRateLimited(failedUpdates) {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("All workflow updates skipped due to GitHub API rate limiting"))
 			return nil
 		}
 		return errors.New("no workflows were successfully updated")
@@ -160,7 +186,7 @@ func UpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error {
 // (non-fatal) from genuine update failures (fatal).
 func allFailuresAreRateLimited(failures []updateFailure) bool {
 	for _, f := range failures {
-		if !gitutil.IsRateLimitError(f.Error) {
+		if !errorutil.IsRateLimitError(f.Error) {
 			return false
 		}
 	}
@@ -254,7 +280,24 @@ func findWorkflowsWithSource(workflowsDir string, filterNames []string, verbose 
 }
 
 // resolveLatestRef resolves the latest ref for a workflow source
+type latestRefResolution struct {
+	Ref             string
+	CoolDownBlocked bool
+}
+
 func resolveLatestRef(ctx context.Context, repo, currentRef string, allowMajor, verbose bool, coolDown time.Duration) (string, error) {
+	result, err := resolveLatestRefWithDeps(ctx, defaultWorkflowUpdateDeps(), repo, currentRef, allowMajor, verbose, coolDown)
+	if err != nil {
+		return "", err
+	}
+	return result.Ref, nil
+}
+
+func resolveLatestRefWithResult(ctx context.Context, repo, currentRef string, allowMajor, verbose bool, coolDown time.Duration) (latestRefResolution, error) {
+	return resolveLatestRefWithDeps(ctx, defaultWorkflowUpdateDeps(), repo, currentRef, allowMajor, verbose, coolDown)
+}
+
+func resolveLatestRefWithDeps(ctx context.Context, deps workflowUpdateDeps, repo, currentRef string, allowMajor, verbose bool, coolDown time.Duration) (latestRefResolution, error) {
 	updateLog.Printf("Resolving latest ref: repo=%s, currentRef=%s, allowMajor=%v", repo, currentRef, allowMajor)
 
 	if verbose {
@@ -264,7 +307,8 @@ func resolveLatestRef(ctx context.Context, repo, currentRef string, allowMajor, 
 	// Check if current ref is a tag (looks like a semantic version)
 	if isSemanticVersionTag(currentRef) {
 		updateLog.Print("Current ref is semantic version tag, resolving latest release")
-		return resolveLatestRelease(ctx, repo, currentRef, allowMajor, verbose, coolDown)
+		ref, err := resolveLatestReleaseWithDeps(ctx, deps, repo, currentRef, allowMajor, verbose, coolDown)
+		return latestRefResolution{Ref: ref}, err
 	}
 
 	// Check if current ref is a commit SHA (40-character hex string)
@@ -272,7 +316,7 @@ func resolveLatestRef(ctx context.Context, repo, currentRef string, allowMajor, 
 		updateLog.Printf("Current ref is a commit SHA: %s, fetching latest from default branch", currentRef)
 		// The source field only contains a pinned SHA with no branch information.
 		// Fetch the latest commit from the default branch to check for updates.
-		return resolveLatestCommitFromDefaultBranch(ctx, repo, currentRef, verbose)
+		return resolveLatestCommitFromDefaultBranchWithDeps(ctx, deps, repo, currentRef, verbose, effectiveCommitCoolDown(coolDown))
 	}
 
 	// Otherwise, treat as branch and get latest commit
@@ -281,28 +325,37 @@ func resolveLatestRef(ctx context.Context, repo, currentRef string, allowMajor, 
 	}
 
 	// Get the latest commit SHA for the branch
-	latestSHA, err := getLatestBranchCommitSHACached(ctx, repo, currentRef)
+	latestCommit, err := deps.getLatestBranchCommit(ctx, repo, currentRef)
 	if err != nil {
-		return "", fmt.Errorf("failed to get latest commit for branch %s: %w", currentRef, err)
+		return latestRefResolution{}, fmt.Errorf("failed to get latest commit for branch %s: %w", currentRef, err)
 	}
 
-	updateLog.Printf("Latest commit for branch %s: %s", currentRef, latestSHA)
+	updateLog.Printf("Latest commit for branch %s: %s", currentRef, latestCommit.SHA)
+
+	commitCoolDown := effectiveCommitCoolDown(coolDown)
+	if !isExemptFromCoolDown(repo) && commitCoolDown > 0 {
+		if result := checkCommitCoolDownWithDate(repo, currentRef, latestCommit.CommittedAt, commitCoolDown); result.InCoolDown {
+			cooldownLog.Printf("Workflow source %s branch %s: %s", repo, currentRef, result.Message)
+			printUpdateInfoOnce(fmt.Sprintf("Skipping commit candidate %s@%s: %s", repo, currentRef, result.Message))
+			return latestRefResolution{Ref: currentRef, CoolDownBlocked: true}, nil
+		}
+	}
 
 	// Return the SHA for comparison so we can detect upstream changes.
 	// The caller (updateWorkflow) preserves the branch name in the source
 	// field to avoid SHA-pinning — see isBranchRef() usage there.
-	return latestSHA, nil
+	return latestRefResolution{Ref: latestCommit.SHA}, nil
 }
 
-// resolveLatestCommitFromDefaultBranch fetches the latest commit SHA from
+// resolveLatestCommitFromDefaultBranchWithDeps fetches the latest commit SHA from
 // the default branch of a repo. This is used when the source field is pinned
 // to a commit SHA with no branch information — in that case we can only
 // logically track the default branch.
-func resolveLatestCommitFromDefaultBranch(ctx context.Context, repo, currentSHA string, verbose bool) (string, error) {
+func resolveLatestCommitFromDefaultBranchWithDeps(ctx context.Context, deps workflowUpdateDeps, repo, currentSHA string, verbose bool, coolDown time.Duration) (latestRefResolution, error) {
 	// Get the default branch name
-	defaultBranch, err := getRepoDefaultBranchCached(ctx, repo)
+	defaultBranch, err := deps.getRepoDefaultBranch(ctx, repo)
 	if err != nil {
-		return "", fmt.Errorf("failed to get default branch for %s: %w", repo, err)
+		return latestRefResolution{}, fmt.Errorf("failed to get default branch for %s: %w", repo, err)
 	}
 
 	updateLog.Printf("Source is pinned to commit SHA, tracking default branch %q of %s", defaultBranch, repo)
@@ -311,49 +364,50 @@ func resolveLatestCommitFromDefaultBranch(ctx context.Context, repo, currentSHA 
 	}
 
 	// Get the latest commit SHA from the default branch
-	latestSHA, err := getLatestBranchCommitSHACached(ctx, repo, defaultBranch)
+	latestCommit, err := deps.getLatestBranchCommit(ctx, repo, defaultBranch)
 	if err != nil {
-		return "", fmt.Errorf("failed to get latest commit for default branch %s: %w", defaultBranch, err)
+		return latestRefResolution{}, fmt.Errorf("failed to get latest commit for default branch %s: %w", defaultBranch, err)
 	}
 
-	updateLog.Printf("Latest commit on default branch %s: %s (current: %s)", defaultBranch, latestSHA, currentSHA)
+	updateLog.Printf("Latest commit on default branch %s: %s (current: %s)", defaultBranch, latestCommit.SHA, currentSHA)
+	if !isExemptFromCoolDown(repo) && coolDown > 0 {
+		if result := checkCommitCoolDownWithDate(repo, defaultBranch, latestCommit.CommittedAt, coolDown); result.InCoolDown {
+			cooldownLog.Printf("Workflow source %s default branch %s: %s", repo, defaultBranch, result.Message)
+			printUpdateInfoOnce(fmt.Sprintf("Skipping commit candidate %s@%s: %s", repo, defaultBranch, result.Message))
+			return latestRefResolution{Ref: currentSHA, CoolDownBlocked: true}, nil
+		}
+	}
 
-	return latestSHA, nil
+	return latestRefResolution{Ref: latestCommit.SHA}, nil
 }
 
 // getRepoDefaultBranchCached wraps getRepoDefaultBranch with a cache to avoid
 // repeating identical GitHub API calls during batched update runs.
 func getRepoDefaultBranchCached(ctx context.Context, repo string) (string, error) {
 	if cached, ok := defaultBranchCache.Load(repo); ok {
-		if branch, isString := cached.(string); isString {
-			return branch, nil
+		if result, ok := cached.(cachedDefaultBranch); ok {
+			return result.branch, result.err
 		}
 	}
 
 	branch, err := getRepoDefaultBranch(ctx, repo)
-	if err != nil {
-		return "", err
-	}
-	defaultBranchCache.Store(repo, branch)
-	return branch, nil
+	defaultBranchCache.Store(repo, cachedDefaultBranch{branch: branch, err: err})
+	return branch, err
 }
 
-// getLatestBranchCommitSHACached wraps getLatestBranchCommitSHA with a cache
+// getLatestBranchCommitInfoCached wraps getLatestBranchCommitInfo with a cache
 // keyed by repo+branch to reduce repeated branch-head API lookups.
-func getLatestBranchCommitSHACached(ctx context.Context, repo, branch string) (string, error) {
+func getLatestBranchCommitInfoCached(ctx context.Context, repo, branch string) (latestBranchCommitInfo, error) {
 	key := repoBranchKey{repo: repo, branch: branch}
 	if cached, ok := branchCommitCache.Load(key); ok {
-		if sha, isString := cached.(string); isString {
-			return sha, nil
+		if result, ok := cached.(cachedBranchCommit); ok {
+			return result.info, result.err
 		}
 	}
 
-	sha, err := getLatestBranchCommitSHA(ctx, repo, branch)
-	if err != nil {
-		return "", err
-	}
-	branchCommitCache.Store(key, sha)
-	return sha, nil
+	info, err := getLatestBranchCommitInfo(ctx, repo, branch)
+	branchCommitCache.Store(key, cachedBranchCommit{info: info, err: err})
+	return info, err
 }
 
 // fetchPublicGitHubAPI makes an unauthenticated GET request to the GitHub public
@@ -385,10 +439,39 @@ func fetchPublicGitHubAPI(ctx context.Context, endpoint string) ([]byte, error) 
 	return body, nil
 }
 
+func fetchPublicReleaseTagsPaginated(ctx context.Context, repo string) ([]string, error) {
+	var tags []string
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("/repos/%s/releases?per_page=100&page=%d", repo, page)
+		body, err := fetchPublicGitHubAPI(ctx, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		var releases []struct {
+			TagName string `json:"tag_name"`
+		}
+		if err := json.Unmarshal(body, &releases); err != nil {
+			return nil, fmt.Errorf("failed to parse releases response: %w", err)
+		}
+		if len(releases) == 0 {
+			break
+		}
+		for _, r := range releases {
+			if r.TagName != "" {
+				tags = append(tags, r.TagName)
+			}
+		}
+		if len(releases) < 100 {
+			break
+		}
+	}
+	return tags, nil
+}
+
 // getRepoDefaultBranch fetches the default branch name for a repository.
 func getRepoDefaultBranch(ctx context.Context, repo string) (string, error) {
 	output, err := workflow.RunGHContext(ctx, "Fetching repo info...", "api", "/repos/"+repo, "--jq", ".default_branch")
-	if err != nil && gitutil.IsAuthError(err.Error()) {
+	if err != nil && errorutil.IsAuthError(err.Error()) {
 		updateLog.Printf("GitHub API auth failed for %s, retrying without token", repo)
 		body, fallbackErr := fetchPublicGitHubAPI(ctx, "/repos/"+repo)
 		if fallbackErr != nil {
@@ -417,79 +500,80 @@ func getRepoDefaultBranch(ctx context.Context, repo string) (string, error) {
 	return branch, nil
 }
 
-// getLatestBranchCommitSHA fetches the latest commit SHA for a given branch.
-func getLatestBranchCommitSHA(ctx context.Context, repo, branch string) (string, error) {
+// getLatestBranchCommitInfo fetches the latest commit SHA and commit date for a given branch.
+func getLatestBranchCommitInfo(ctx context.Context, repo, branch string) (latestBranchCommitInfo, error) {
 	// URL-encode the branch name since it may contain slashes (e.g. "feature/foo")
-	endpoint := fmt.Sprintf("/repos/%s/branches/%s", repo, url.PathEscape(branch))
-	output, err := workflow.RunGHContext(ctx, "Fetching branch info...", "api", endpoint, "--jq", ".commit.sha")
-	if err != nil && gitutil.IsAuthError(err.Error()) {
+	endpoint := fmt.Sprintf("/repos/%s/commits/%s", repo, url.PathEscape(branch))
+	output, err := workflow.RunGHContext(ctx, "Fetching commit info...", "api", endpoint)
+	if err != nil && errorutil.IsAuthError(err.Error()) {
 		updateLog.Printf("GitHub API auth failed for branch %s of %s, retrying without token", branch, repo)
 		body, fallbackErr := fetchPublicGitHubAPI(ctx, endpoint)
 		if fallbackErr != nil {
-			return "", fmt.Errorf("failed (with token: %w; without token: %w)", err, fallbackErr)
+			return latestBranchCommitInfo{}, fmt.Errorf("failed (with token: %w; without token: %w)", err, fallbackErr)
 		}
-		var result struct {
-			Commit struct {
-				SHA string `json:"sha"`
-			} `json:"commit"`
-		}
-		if fallbackErr = json.Unmarshal(body, &result); fallbackErr != nil {
-			return "", fmt.Errorf("failed to parse branch response: %w", fallbackErr)
-		}
-		if result.Commit.SHA == "" {
-			return "", fmt.Errorf("empty commit SHA returned for branch %s", branch)
-		}
-		return result.Commit.SHA, nil
+		return parseLatestBranchCommitInfo(branch, body)
 	}
 	if err != nil {
-		return "", err
+		return latestBranchCommitInfo{}, err
 	}
+	return parseLatestBranchCommitInfo(branch, output)
+}
 
-	sha := strings.TrimSpace(string(output))
-	if sha == "" {
-		return "", fmt.Errorf("empty commit SHA returned for branch %s", branch)
+func parseLatestBranchCommitInfo(branch string, data []byte) (latestBranchCommitInfo, error) {
+	var result struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Committer struct {
+				Date string `json:"date"`
+			} `json:"committer"`
+			Author struct {
+				Date string `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
 	}
-
-	return sha, nil
+	if err := json.Unmarshal(data, &result); err != nil {
+		return latestBranchCommitInfo{}, fmt.Errorf("failed to parse commit response: %w", err)
+	}
+	if result.SHA == "" {
+		return latestBranchCommitInfo{}, fmt.Errorf("empty commit SHA returned for branch %s", branch)
+	}
+	dateStr := result.Commit.Committer.Date
+	if dateStr == "" {
+		return latestBranchCommitInfo{SHA: result.SHA}, nil
+	}
+	committedAt, err := time.Parse(time.RFC3339, dateStr)
+	if err != nil {
+		return latestBranchCommitInfo{}, fmt.Errorf("invalid commit date for branch %s: %w", branch, err)
+	}
+	return latestBranchCommitInfo{SHA: result.SHA, CommittedAt: committedAt}, nil
 }
 
 type workflowUpdateDeps struct {
-	runReleasesAPI func(ctx context.Context, repo string) ([]byte, error)
+	runReleasesAPI        func(ctx context.Context, repo string) ([]byte, error)
+	checkCoolDown         func(ctx context.Context, repo, tag string, coolDown time.Duration) coolDownCheckResult
+	getRepoDefaultBranch  func(ctx context.Context, repo string) (string, error)
+	getLatestBranchCommit func(ctx context.Context, repo, branch string) (latestBranchCommitInfo, error)
 }
 
 func defaultWorkflowUpdateDeps() workflowUpdateDeps {
 	return workflowUpdateDeps{
+		checkCoolDown:         checkReleaseCoolDown,
+		getRepoDefaultBranch:  getRepoDefaultBranchCached,
+		getLatestBranchCommit: getLatestBranchCommitInfoCached,
 		runReleasesAPI: func(ctx context.Context, repo string) ([]byte, error) {
 			endpoint := fmt.Sprintf("/repos/%s/releases", repo)
-			output, err := workflow.RunGHContext(ctx, "Fetching releases...", "api", endpoint, "--jq", ".[].tag_name")
-			if err != nil && gitutil.IsAuthError(err.Error()) {
+			output, err := workflow.RunGHContext(ctx, "Fetching releases...", "api", "--paginate", endpoint, "--jq", ".[].tag_name")
+			if err != nil && errorutil.IsAuthError(err.Error()) {
 				updateLog.Printf("GitHub API auth failed for releases of %s, retrying without token", repo)
-				body, fallbackErr := fetchPublicGitHubAPI(ctx, endpoint)
+				tags, fallbackErr := fetchPublicReleaseTagsPaginated(ctx, repo)
 				if fallbackErr != nil {
 					return nil, fmt.Errorf("failed (with token: %w; without token: %w)", err, fallbackErr)
-				}
-				var releases []struct {
-					TagName string `json:"tag_name"`
-				}
-				if fallbackErr = json.Unmarshal(body, &releases); fallbackErr != nil {
-					return nil, fmt.Errorf("failed to parse releases response: %w", fallbackErr)
-				}
-				var tags []string
-				for _, r := range releases {
-					if r.TagName != "" {
-						tags = append(tags, r.TagName)
-					}
 				}
 				return []byte(strings.Join(tags, "\n")), nil
 			}
 			return output, err
 		},
 	}
-}
-
-// resolveLatestRelease resolves the latest compatible release for a workflow source
-func resolveLatestRelease(ctx context.Context, repo, currentRef string, allowMajor, verbose bool, coolDown time.Duration) (string, error) {
-	return resolveLatestReleaseWithDeps(ctx, defaultWorkflowUpdateDeps(), repo, currentRef, allowMajor, verbose, coolDown)
 }
 
 func resolveLatestReleaseWithDeps(ctx context.Context, deps workflowUpdateDeps, repo, currentRef string, allowMajor, verbose bool, coolDown time.Duration) (string, error) {
@@ -540,50 +624,57 @@ func resolveLatestReleaseWithDeps(ctx context.Context, deps workflowUpdateDeps, 
 		return latestStable, nil
 	}
 
-	// Find the latest compatible non-prerelease release.
+	// Find all compatible non-prerelease releases.
 	// Per semver rules, v1.1.0-beta.1 > v1.0.0, so without this filter a prerelease
 	// of a higher base version could be incorrectly selected as the upgrade target.
-	var latestCompatible string
-	var latestCompatibleVersion *semverutil.SemanticVersion
+	compatibleReleases := sortedCompatibleReleaseCandidates(releases, currentVer, allowMajor)
 
-	for _, release := range releases {
-		releaseVer := parseVersion(release)
-		if releaseVer == nil || releaseVer.Pre != "" {
-			continue
-		}
-
-		// Check if compatible based on major version
-		if !allowMajor && releaseVer.Major != currentVer.Major {
-			continue
-		}
-
-		// Check if this is newer than what we have
-		if latestCompatibleVersion == nil || releaseVer.IsNewer(latestCompatibleVersion) {
-			latestCompatible = release
-			latestCompatibleVersion = releaseVer
-		}
-	}
-
-	if latestCompatible == "" {
+	if len(compatibleReleases) == 0 {
 		return "", errors.New("no compatible release found")
 	}
 
-	// Apply cooldown: if the latest release is newer than the current and the repo is not
-	// exempt from cooldown, check whether the release is recent enough to be held back.
-	if latestCompatible != currentRef && !isExemptFromCoolDown(repo) {
-		if result := checkReleaseCoolDown(ctx, repo, latestCompatible, coolDown); result.InCoolDown {
-			cooldownLog.Printf("Workflow source %s: %s", repo, result.Message)
-			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Skipping update for %s: %s", repo, result.Message)))
-			// Return the current ref — no update until cooldown expires.
-			return currentRef, nil
+	// Collect upgrade candidates: releases strictly newer than current.
+	upgradeCandidates := newerReleaseCandidates(compatibleReleases, currentVer)
+
+	// No upgrade available – already at the latest compatible release.
+	if len(upgradeCandidates) == 0 {
+		return currentRef, nil
+	}
+
+	// If the repo is exempt from cooldown, return the best (newest) upgrade candidate.
+	if isExemptFromCoolDown(repo) {
+		if verbose {
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Found newer release: "+upgradeCandidates[0].tag))
+		}
+		return upgradeCandidates[0].tag, nil
+	}
+
+	// Iterate from newest to oldest upgrade candidate, stopping at the first release
+	// that has passed the cooldown period.  This lets users receive the latest cooled
+	// release rather than being blocked on a single too-recent version.
+	loggedCandidateSkip := false
+	cooldownSkippedCount := 0
+	for _, c := range upgradeCandidates {
+		result := deps.checkCoolDown(ctx, repo, c.tag, coolDown)
+		if !result.InCoolDown {
+			if verbose {
+				fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Found newer release: "+c.tag))
+			}
+			return c.tag, nil
+		}
+		cooldownSkippedCount++
+		cooldownLog.Printf("Workflow source %s: %s", repo, result.Message)
+		if !loggedCandidateSkip {
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Skipping release candidate %s@%s: %s", repo, c.tag, result.Message)))
+			loggedCandidateSkip = true
 		}
 	}
-
-	if verbose && latestCompatible != currentRef {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Found newer release: "+latestCompatible))
+	if cooldownSkippedCount > 1 {
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Evaluated %d release candidates for %s; all are still in cooldown", cooldownSkippedCount, repo)))
 	}
 
-	return latestCompatible, nil
+	// All upgrade candidates are still within the cooldown window.
+	return currentRef, nil
 }
 
 // updateWorkflow updates a single workflow from its source
@@ -613,6 +704,10 @@ func updateWorkflow(ctx context.Context, wf *workflowWithSource, opts UpdateWork
 	latestRef := resolvedLocation.latestRef
 	sourceFieldRef := resolvedLocation.sourceFieldRef
 	newContent := resolvedLocation.content
+
+	if resolvedLocation.coolDownBlocked {
+		return nil
+	}
 
 	if opts.Verbose {
 		fmt.Fprintln(os.Stderr, console.FormatVerboseMessage("Current ref: "+currentRef))
@@ -644,7 +739,7 @@ func updateWorkflow(ctx context.Context, wf *workflowWithSource, opts UpdateWork
 		if hasLocalModifications(string(sourceContent), string(currentContent), wf.SourceSpec, filepath.Dir(wf.Path), opts.Verbose) {
 			updateLog.Printf("Local modifications detected in workflow: %s", wf.Name)
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Workflow %s is already up to date (%s)", wf.Name, shortRef(currentRef))))
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("⚠️  Local copy of %s has been modified from source", wf.Name)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Local copy of %s has been modified from source", wf.Name)))
 			return nil
 		}
 
@@ -815,10 +910,10 @@ func updateWorkflow(ctx context.Context, wf *workflowWithSource, opts UpdateWork
 	updateLog.Printf("Successfully updated workflow %s from %s to %s", wf.Name, currentRef, latestRef)
 	fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Updated %s from %s to %s", wf.Name, shortRef(currentRef), shortRef(latestRef))))
 
-	// Compile the updated workflow with refreshStopTime enabled (unless --no-compile is set)
+	// Compile the updated workflow using the same path as the compile command.
 	if !opts.NoCompile {
 		updateLog.Printf("Compiling updated workflow: %s", wf.Name)
-		if err := compileWorkflowWithRefresh(ctx, wf.Path, opts.Verbose, false, opts.EngineOverride, true); err != nil {
+		if err := compileWorkflowsForUpdate(ctx, []string{wf.Path}, opts.WorkflowsDir, opts.EngineOverride, opts.Verbose, opts.Approve); err != nil {
 			updateLog.Printf("Compilation failed for workflow %s: %v", wf.Name, err)
 			return fmt.Errorf("failed to compile updated workflow: %w", err)
 		}

@@ -15,11 +15,15 @@ on:
 permissions:
   contents: read
 name: Smoke Copilot SDK
+model: gpt-5.4
 engine:
   id: copilot
   copilot-sdk: true
-  model: gpt-5.4
   bare: true
+imports:
+  - shared/smoke-test-brevity.md
+  - shared/reporting.md
+max-tool-denials: 3
 tools:
   bash:
     - "*"
@@ -34,11 +38,13 @@ safe-outputs:
 timeout-minutes: 10
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Smoke Test: Copilot SDK Engine Validation
-
-**IMPORTANT: Keep all outputs extremely short and concise.**
 
 ## Tasks
 

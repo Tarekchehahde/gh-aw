@@ -16,6 +16,7 @@ engine: copilot
 strict: true
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:
@@ -38,6 +39,11 @@ safe-outputs:
     run-success: "✅ Stale PR cleanup complete! [{workflow_name}]({run_url}) has triaged the 30+ day PR backlog."
     run-failure: "❌ Stale PR cleanup failed! [{workflow_name}]({run_url}) {status}. Some PRs may not be processed."
 timeout-minutes: 30
+evals:
+  - id: stale-prs-triaged
+    question: Did the workflow review pull requests open for 30 or more days and classify them according to the cleanup policy?
+  - id: actions-taken-or-noop
+    question: Were the appropriate stale PR comments, labels, and closures applied when needed, or was noop used correctly when no action was required?
 ---
 
 # Stale PR Cleanup Agent 🧹
@@ -180,8 +186,6 @@ Add warning comment (do not close):
 ```
 
 ### Step 4: Generate Summary Report
-
-**Report Formatting**: Use h3 (###) or lower for all headers in the report. Wrap long sections (>10 items) in `<details><summary>Section Name</summary>` tags to improve readability.
 
 Output the following summary to stdout after processing:
 

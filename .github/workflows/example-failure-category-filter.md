@@ -4,9 +4,6 @@ name: Example Failure Category Filter
 on:
   workflow_dispatch:
 
-sandbox:
-  agent:
-    sudo: false
 
 safe-outputs:
   report-failure-as-issue:
@@ -20,6 +17,11 @@ safe-outputs:
     # - ai_credits_rate_limit_error: AI rate limits
     # - mcp_policy_error: MCP policy violations
   create-issue:
+imports:
+  - shared/reporting.md
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Example: Failure Category Filtering

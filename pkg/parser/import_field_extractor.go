@@ -18,50 +18,55 @@ import (
 // BFS import traversal. It accumulates results from all imported files and provides
 // a method to convert the accumulated state into the final ImportsResult.
 type importAccumulator struct {
-	toolsBuilder             strings.Builder
-	mcpServersBuilder        strings.Builder
-	markdownBuilder          strings.Builder // imports with substituted inputs or schema defaults (compile-time substitution)
-	importPaths              []string        // Import paths for runtime-import macro generation
-	promptImports            []PromptImportEntry
-	stepsBuilder             strings.Builder
-	copilotSetupStepsBuilder strings.Builder // Steps from copilot-setup-steps.yml (inserted at start)
-	preStepsBuilder          strings.Builder
-	preAgentStepsBuilder     strings.Builder
-	runtimesBuilder          strings.Builder
-	servicesBuilder          strings.Builder
-	networkBuilder           strings.Builder
-	permissionsBuilder       strings.Builder
-	secretMaskingBuilder     strings.Builder
-	postStepsBuilder         strings.Builder
-	jobsBuilder              strings.Builder   // Jobs from imported YAML workflows
-	envBuilder               strings.Builder   // env vars from imported workflows (JSON, one object per line)
-	envSources               map[string]string // env var name → source import path (for conflict detection and header listing)
-	observabilityConfigs     []string          // observability config JSON blobs from all imports (merged into endpoint array)
-	engines                  []string
-	safeOutputs              []string
-	mcpScripts               []string
-	bots                     []string
-	botsSet                  map[string]bool
-	labels                   []string
-	labelsSet                map[string]bool
-	skipRoles                []string
-	skipRolesSet             map[string]bool
-	skipBots                 []string
-	skipBotsSet              map[string]bool
-	skipIfMatch              string
-	skipIfNoMatch            string
-	sandboxAgentMounts       []string
-	sandboxAgentMountsSet    map[string]bool
-	caches                   []string
-	features                 []map[string]any
-	models                   []map[string][]string // model alias maps from each imported file (appended in import order)
-	modelPolicies            []map[string][]string // model policy sets from each imported file (appended in import order)
-	modelCosts               []map[string]any      // model pricing overlays from each imported file (appended in import order)
-	runInstallScripts        bool                  // true if any imported workflow sets runtimes.node.run-install-scripts: true
-	agentFile                string
-	agentImportSpec          string
-	repositoryImports        []string
-	importInputs             map[string]any
+	toolsBuilder               strings.Builder
+	mcpServersBuilder          strings.Builder
+	markdownBuilder            strings.Builder // imports with substituted inputs or schema defaults (compile-time substitution)
+	importPaths                []string        // Import paths for runtime-import macro generation
+	promptImports              []PromptImportEntry
+	stepsBuilder               strings.Builder
+	copilotSetupStepsBuilder   strings.Builder // Steps from copilot-setup-steps.yml (inserted at start)
+	preStepsBuilder            strings.Builder
+	preAgentStepsBuilder       strings.Builder
+	runtimesBuilder            strings.Builder
+	servicesBuilder            strings.Builder
+	networkBuilder             strings.Builder
+	permissionsBuilder         strings.Builder
+	secretMaskingBuilder       strings.Builder
+	postStepsBuilder           strings.Builder
+	jobsBuilder                strings.Builder   // Jobs from imported YAML workflows
+	envBuilder                 strings.Builder   // env vars from imported workflows (JSON, one object per line)
+	envSources                 map[string]string // env var name → source import path (for conflict detection and header listing)
+	observabilityConfigs       []string          // observability config JSON blobs from all imports (merged into endpoint array)
+	engines                    []string
+	plugins                    []string
+	safeOutputs                []string
+	mcpScripts                 []string
+	bots                       []string
+	botsSet                    map[string]bool
+	labels                     []string
+	labelsSet                  map[string]bool
+	skipRoles                  []string
+	skipRolesSet               map[string]bool
+	skipBots                   []string
+	skipBotsSet                map[string]bool
+	skipIfMatch                string
+	skipIfNoMatch              string
+	ambientFolders             []string
+	ambientFoldersSet          map[string]bool
+	sandboxAgentMounts         []string
+	sandboxAgentMountsSet      map[string]bool
+	sandboxAgentRuntimeInstall *bool // false if any import sets sandbox.agent.runtime-install: false
+	caches                     []string
+	features                   []map[string]any
+	models                     []map[string][]string // model alias maps from each imported file (appended in import order)
+	modelPolicies              []map[string][]string // model policy sets from each imported file (appended in import order)
+	modelCosts                 []map[string]any      // model pricing overlays from each imported file (appended in import order)
+	defaultAiCreditsPricing    map[string]any        // first models.default-ai-credits-pricing object found in imports (first-wins)
+	runInstallScripts          bool                  // true if any imported workflow sets runtimes.node.run-install-scripts: true
+	agentFile                  string
+	agentImportSpec            string
+	repositoryImports          []string
+	importInputs               map[string]any
 	// First on.github-token / on.github-app found across all imported files (first-wins strategy)
 	activationGitHubToken string
 	activationGitHubApp   string // JSON-encoded GitHubAppConfig
@@ -85,6 +90,9 @@ type importAccumulator struct {
 	mergedMaxTurnCacheMisses string
 	mergedMaxAICredits       string
 	mergedMaxDailyAICredits  string
+	// Union of excluded-env lists from all imported files (deduplicated).
+	excludedEnv    []string
+	excludedEnvSet map[string]bool
 	// Best-effort sub-agent frontmatter warnings collected during BFS traversal.
 	warnings []string
 }
@@ -103,9 +111,11 @@ func newImportAccumulator() *importAccumulator {
 		labelsSet:             make(map[string]bool),
 		skipRolesSet:          make(map[string]bool),
 		skipBotsSet:           make(map[string]bool),
+		ambientFoldersSet:     make(map[string]bool),
 		importInputs:          make(map[string]any),
 		envSources:            make(map[string]string),
 		sandboxAgentMountsSet: make(map[string]bool),
+		excludedEnvSet:        make(map[string]bool),
 	}
 }
 
@@ -232,13 +242,13 @@ func (acc *importAccumulator) extractToolsContent(rawContent string, item import
 	if wasSubstituted {
 		toolsContent, err := extractToolsFromContent(rawContent)
 		if err != nil {
-			return "", fmt.Errorf("failed to extract tools from '%s': %w", item.fullPath, err)
+			return "", fmt.Errorf("tools content in '%s' is not recognized, expected a 'Tools:' section with a valid YAML block: %w", item.fullPath, err)
 		}
 		return toolsContent, nil
 	}
 	toolsContent, err := processIncludedFileWithVisited(item.fullPath, item.sectionName, true, visited)
 	if err != nil {
-		return "", fmt.Errorf("failed to process imported file '%s': %w", item.fullPath, err)
+		return "", fmt.Errorf("imported file '%s' could not be processed, expected a readable markdown file with valid frontmatter: %w", item.fullPath, err)
 	}
 	return toolsContent, nil
 }
@@ -256,7 +266,7 @@ func (acc *importAccumulator) trackRuntimeOrInlineImport(fullPath, importRelPath
 	parserLog.Printf("Import %s has substituted inputs - will be inlined for compile-time substitution", importRelPath)
 	markdownContent, err := ExtractMarkdownContent(rawContent)
 	if err != nil {
-		return fmt.Errorf("failed to extract markdown from imported file '%s': %w", fullPath, err)
+		return fmt.Errorf("markdown content in imported file '%s' is not recognized, expected content after the frontmatter delimiters: %w", fullPath, err)
 	}
 	appendMarkdownWithSeparator(&acc.markdownBuilder, markdownContent)
 	acc.promptImports = append(acc.promptImports, PromptImportEntry{Markdown: markdownContent})
@@ -296,6 +306,11 @@ func parseFrontmatterForExtraction(rawContent string, wasSubstituted bool, origF
 // Side effects: acc.engines, acc.mergedEngineMCPToolTimeout,
 // acc.mergedEngineMCPSessionTimeout, acc.mergedEngineModel.
 func (acc *importAccumulator) extractEngineConfig(fm map[string]any, fullPath string) {
+	if modelStr, ok := fm["model"].(string); ok && modelStr != "" && acc.mergedEngineModel == "" {
+		acc.mergedEngineModel = modelStr
+		parserLog.Printf("Extracted top-level model preference from import %s: %s", fullPath, modelStr)
+	}
+
 	engineVal, hasEngine := fm["engine"]
 	if !hasEngine {
 		return
@@ -312,22 +327,7 @@ func (acc *importAccumulator) extractEngineConfig(fm map[string]any, fullPath st
 		// Object engine — extract engine.mcp.* settings first, then decide
 		// whether to add to engines based on whether an engine ID is present.
 		if mcpVal, hasMCP := v["mcp"]; hasMCP {
-			if mcpMap, ok := mcpVal.(map[string]any); ok {
-				// Extract tool-timeout (first-wins across all imports)
-				if acc.mergedEngineMCPToolTimeout == "" {
-					if ttStr, ok := mcpMap["tool-timeout"].(string); ok && ttStr != "" {
-						acc.mergedEngineMCPToolTimeout = ttStr
-						parserLog.Printf("Extracted engine.mcp.tool-timeout from import %s: %s", fullPath, ttStr)
-					}
-				}
-				// Extract session-timeout (first-wins across all imports)
-				if acc.mergedEngineMCPSessionTimeout == "" {
-					if stStr, ok := mcpMap["session-timeout"].(string); ok && stStr != "" {
-						acc.mergedEngineMCPSessionTimeout = stStr
-						parserLog.Printf("Extracted engine.mcp.session-timeout from import %s: %s", fullPath, stStr)
-					}
-				}
-			}
+			acc.extractEngineMCPSettings(mcpVal, fullPath)
 		}
 		// Only add to engines list if this config specifies an actual engine
 		// (i.e. it carries an 'id' or 'runtime' field). Configs with only
@@ -358,6 +358,27 @@ func (acc *importAccumulator) extractEngineConfig(fm map[string]any, fullPath st
 	}
 }
 
+// extractEngineMCPSettings extracts engine.mcp.tool-timeout and engine.mcp.session-timeout
+// from mcpVal (first-wins across all imports).
+func (acc *importAccumulator) extractEngineMCPSettings(mcpVal any, fullPath string) {
+	mcpMap, ok := mcpVal.(map[string]any)
+	if !ok {
+		return
+	}
+	if acc.mergedEngineMCPToolTimeout == "" {
+		if ttStr, ok := mcpMap["tool-timeout"].(string); ok && ttStr != "" {
+			acc.mergedEngineMCPToolTimeout = ttStr
+			parserLog.Printf("Extracted engine.mcp.tool-timeout from import %s: %s", fullPath, ttStr)
+		}
+	}
+	if acc.mergedEngineMCPSessionTimeout == "" {
+		if stStr, ok := mcpMap["session-timeout"].(string); ok && stStr != "" {
+			acc.mergedEngineMCPSessionTimeout = stStr
+			parserLog.Printf("Extracted engine.mcp.session-timeout from import %s: %s", fullPath, stStr)
+		}
+	}
+}
+
 // extractConfigFields extracts scalar and builder-based configuration fields from the
 // frontmatter map and writes them into the appropriate accumulator builders and slices.
 //
@@ -375,6 +396,7 @@ func (acc *importAccumulator) extractConfigFields(fm map[string]any, fullPath st
 	acc.extractFirstWinsJSONField(fm, fullPath, "max-daily-ai-credits", &acc.mergedMaxDailyAICredits)
 
 	acc.appendJSONBuilderField(fm, "mcp-servers", "{}", &acc.mcpServersBuilder)
+	acc.plugins = append(acc.plugins, parseStringSliceField(fm["plugins"], false)...)
 	acc.appendJSONSliceField(fm, "safe-outputs", "{}", &acc.safeOutputs)
 	acc.appendJSONSliceField(fm, "mcp-scripts", "{}", &acc.mcpScripts)
 	acc.appendYAMLBuilderField(fm, "steps", &acc.stepsBuilder)
@@ -382,6 +404,7 @@ func (acc *importAccumulator) extractConfigFields(fm map[string]any, fullPath st
 	acc.appendYAMLBuilderField(fm, "services", &acc.servicesBuilder)
 	acc.appendJSONBuilderField(fm, "network", "{}", &acc.networkBuilder)
 	acc.mergeSandboxAgentMounts(fm)
+	acc.mergeSandboxAgentRuntimeInstall(fm)
 	acc.appendJSONBuilderField(fm, "permissions", "{}", &acc.permissionsBuilder)
 	acc.appendJSONBuilderField(fm, "secret-masking", "{}", &acc.secretMaskingBuilder)
 }
@@ -429,6 +452,48 @@ func (acc *importAccumulator) mergeSandboxAgentMounts(fm map[string]any) {
 	}
 }
 
+// mergeSandboxAgentRuntimeInstall extracts sandbox.agent.runtime-install from an
+// imported workflow's frontmatter. False wins: if any import sets runtime-install
+// to false the accumulated value becomes false and stays false.
+func (acc *importAccumulator) mergeSandboxAgentRuntimeInstall(fm map[string]any) {
+	// Already locked to false — no need to inspect further imports.
+	if acc.sandboxAgentRuntimeInstall != nil && !*acc.sandboxAgentRuntimeInstall {
+		return
+	}
+
+	sandboxVal, hasSandbox := fm["sandbox"]
+	if !hasSandbox {
+		return
+	}
+	sandboxMap, ok := sandboxVal.(map[string]any)
+	if !ok {
+		return
+	}
+	agentVal, hasAgent := sandboxMap["agent"]
+	if !hasAgent {
+		return
+	}
+	agentMap, ok := agentVal.(map[string]any)
+	if !ok {
+		return
+	}
+	riVal, hasRI := agentMap["runtime-install"]
+	if !hasRI {
+		return
+	}
+	ri, ok := riVal.(bool)
+	if !ok {
+		return
+	}
+	if !ri {
+		f := false
+		acc.sandboxAgentRuntimeInstall = &f
+	} else if acc.sandboxAgentRuntimeInstall == nil {
+		t := true
+		acc.sandboxAgentRuntimeInstall = &t
+	}
+}
+
 func (acc *importAccumulator) extractFirstWinsJSONField(fm map[string]any, fullPath, field string, target *string) {
 	if *target != "" {
 		return
@@ -467,7 +532,7 @@ func (acc *importAccumulator) appendYAMLBuilderField(fm map[string]any, field st
 
 // extractActivationFields extracts activation and authentication-related fields from
 // the frontmatter map: bots, skip-roles, skip-bots, skip-if-match, skip-if-no-match,
-// on.github-token, on.github-app, top-level github-app, and checkout.
+// top-level ambient-folders, on.github-token, on.github-app, top-level github-app, and checkout.
 //
 // Side effects: acc.bots, acc.botsSet, acc.skipRoles, acc.skipRolesSet, acc.skipBots,
 // acc.skipBotsSet, acc.skipIfMatch, acc.skipIfNoMatch, acc.activationGitHubToken,
@@ -476,6 +541,7 @@ func (acc *importAccumulator) extractActivationFields(fm map[string]any, item im
 	acc.mergeBots(fm)
 	acc.mergeSkipRoles(fm)
 	acc.mergeSkipBots(fm)
+	acc.mergeAmbientFolders(fm)
 	acc.extractActivationSkipMatchFields(fm, item.fullPath)
 	acc.extractActivationGitHubToken(fm, item.fullPath)
 	acc.extractActivationGitHubAppFields(fm, item.fullPath)
@@ -494,6 +560,12 @@ func (acc *importAccumulator) mergeSkipRoles(fm map[string]any) {
 
 func (acc *importAccumulator) mergeSkipBots(fm map[string]any) {
 	mergeJSONStringListField(fm, "skip-bots", "[]", acc.skipBotsSet, &acc.skipBots, extractOnSectionFieldFromMap)
+}
+
+func (acc *importAccumulator) mergeAmbientFolders(fm map[string]any) {
+	mergeJSONStringListField(fm, "ambient-folders", "[]", acc.ambientFoldersSet, &acc.ambientFolders, func(m map[string]any, field string) (string, error) {
+		return extractFieldJSONFromMap(m, field, "[]")
+	})
 }
 
 func mergeJSONStringListField(
@@ -624,11 +696,11 @@ func (acc *importAccumulator) extractStepAndJobFields(fm map[string]any, importP
 }
 
 // extractFeatureAndObservabilityFields extracts labels, cache, feature flags, model
-// aliases, the run-install-scripts flag, and observability configuration from the
-// frontmatter map.
+// aliases, the run-install-scripts flag, observability configuration, and excluded-env
+// from the frontmatter map.
 //
 // Side effects: acc.labels, acc.labelsSet, acc.caches, acc.features, acc.models,
-// acc.runInstallScripts, acc.observabilityConfigs.
+// acc.runInstallScripts, acc.observabilityConfigs, acc.excludedEnv, acc.excludedEnvSet.
 func (acc *importAccumulator) extractFeatureAndObservabilityFields(fm map[string]any, fullPath string) {
 	acc.mergeLabels(fm)
 	acc.appendCacheField(fm)
@@ -636,6 +708,13 @@ func (acc *importAccumulator) extractFeatureAndObservabilityFields(fm map[string
 	acc.appendModelsField(fm, fullPath)
 	acc.extractRunInstallScripts(fm, fullPath)
 	acc.appendObservabilityField(fm, fullPath)
+	acc.mergeExcludedEnv(fm)
+}
+
+func (acc *importAccumulator) mergeExcludedEnv(fm map[string]any) {
+	mergeJSONStringListField(fm, "excluded-env", "[]", acc.excludedEnvSet, &acc.excludedEnv, func(m map[string]any, field string) (string, error) {
+		return extractFieldJSONFromMap(m, field, "[]")
+	})
 }
 
 func (acc *importAccumulator) mergeLabels(fm map[string]any) {
@@ -682,12 +761,22 @@ func (acc *importAccumulator) appendModelsField(fm map[string]any, importPath st
 			parserLog.Printf("Extracted model costs from import: providers=%d", len(providerMap))
 		}
 	}
+	if acc.defaultAiCreditsPricing == nil {
+		if defaultPricing, hasDefaultPricing := rawModels["default-ai-credits-pricing"]; hasDefaultPricing {
+			if pricingMap, ok := defaultPricing.(map[string]any); ok {
+				acc.defaultAiCreditsPricing = maps.Clone(pricingMap)
+				parserLog.Printf("Extracted default-ai-credits-pricing from import: %s", importPath)
+			} else {
+				acc.warnings = append(acc.warnings, fmt.Sprintf("import %q: models.default-ai-credits-pricing must be an object; skipping invalid value", importPath))
+			}
+		}
+	}
 
 	aliasModels := make(map[string]any, len(rawModels))
 	for key, value := range rawModels {
 		// providers is reserved for model-cost overlays and should not be treated
 		// as an alias key, even when aliases and providers coexist.
-		if key == "providers" || isModelPolicyKey(key) {
+		if key == "providers" || key == "default-ai-credits-pricing" || isModelPolicyKey(key) {
 			continue
 		}
 		aliasModels[key] = value
@@ -856,61 +945,73 @@ func (acc *importAccumulator) appendObservabilityField(fm map[string]any, fullPa
 func (acc *importAccumulator) toImportsResult(topologicalOrder []string) *ImportsResult {
 	parserLog.Printf("Building ImportsResult: importedFiles=%d, importPaths=%d, engines=%d, bots=%d, labels=%d",
 		len(topologicalOrder), len(acc.importPaths), len(acc.engines), len(acc.bots), len(acc.labels))
+	result := acc.buildImportsResult()
+	result.ImportedFiles = topologicalOrder
+	return result
+}
+
+// buildImportsResult constructs the ImportsResult from accumulated state, excluding
+// ImportedFiles which is populated separately from the topological sort order.
+func (acc *importAccumulator) buildImportsResult() *ImportsResult {
 	return &ImportsResult{
-		MergedTools:                   acc.toolsBuilder.String(),
-		MergedMCPServers:              acc.mcpServersBuilder.String(),
-		MergedEngines:                 acc.engines,
-		MergedSafeOutputs:             acc.safeOutputs,
-		MergedMCPScripts:              acc.mcpScripts,
-		MergedMarkdown:                acc.markdownBuilder.String(),
-		ImportPaths:                   acc.importPaths,
-		PromptImports:                 acc.promptImports,
-		MergedSteps:                   acc.stepsBuilder.String(),
-		CopilotSetupSteps:             acc.copilotSetupStepsBuilder.String(),
-		MergedPreSteps:                acc.preStepsBuilder.String(),
-		MergedPreAgentSteps:           acc.preAgentStepsBuilder.String(),
-		MergedRuntimes:                acc.runtimesBuilder.String(),
-		MergedRunInstallScripts:       acc.runInstallScripts,
-		MergedServices:                acc.servicesBuilder.String(),
-		MergedNetwork:                 acc.networkBuilder.String(),
-		MergedSandboxAgentMounts:      acc.sandboxAgentMounts,
-		MergedPermissions:             acc.permissionsBuilder.String(),
-		MergedSecretMasking:           acc.secretMaskingBuilder.String(),
-		MergedBots:                    acc.bots,
-		MergedSkipRoles:               acc.skipRoles,
-		MergedSkipBots:                acc.skipBots,
-		MergedSkipIfMatch:             acc.skipIfMatch,
-		MergedSkipIfNoMatch:           acc.skipIfNoMatch,
-		MergedPostSteps:               acc.postStepsBuilder.String(),
-		MergedLabels:                  acc.labels,
-		MergedCaches:                  acc.caches,
-		MergedJobs:                    acc.jobsBuilder.String(),
-		MergedEnv:                     acc.envBuilder.String(),
-		MergedEnvSources:              acc.envSources,
-		MergedFeatures:                acc.features,
-		MergedModels:                  acc.models,
-		MergedModelPolicies:           acc.modelPolicies,
-		MergedModelCosts:              acc.modelCosts,
-		MergedObservability:           mergeObservabilityConfigs(acc.observabilityConfigs),
-		ImportedFiles:                 topologicalOrder,
-		AgentFile:                     acc.agentFile,
-		AgentImportSpec:               acc.agentImportSpec,
-		RepositoryImports:             acc.repositoryImports,
-		ImportInputs:                  acc.importInputs,
-		MergedActivationGitHubToken:   acc.activationGitHubToken,
-		MergedActivationGitHubApp:     acc.activationGitHubApp,
-		MergedTopLevelGitHubApp:       acc.topLevelGitHubApp,
-		MergedCheckout:                strings.Join(acc.checkouts, "\n"),
-		MergedEngineMCPToolTimeout:    acc.mergedEngineMCPToolTimeout,
-		MergedEngineMCPSessionTimeout: acc.mergedEngineMCPSessionTimeout,
-		MergedEngineModel:             acc.mergedEngineModel,
-		MergedMaxTurns:                acc.mergedMaxTurns,
-		MergedMaxToolDenials:          acc.mergedMaxToolDenials,
-		MergedMaxRuns:                 acc.mergedMaxRuns,
-		MergedMaxTurnCacheMisses:      acc.mergedMaxTurnCacheMisses,
-		MergedMaxAICredits:            acc.mergedMaxAICredits,
-		MergedMaxDailyAICredits:       acc.mergedMaxDailyAICredits,
-		Warnings:                      acc.warnings,
+		MergedTools:                      acc.toolsBuilder.String(),
+		MergedMCPServers:                 acc.mcpServersBuilder.String(),
+		MergedEngines:                    acc.engines,
+		MergedPlugins:                    acc.plugins,
+		MergedSafeOutputs:                acc.safeOutputs,
+		MergedMCPScripts:                 acc.mcpScripts,
+		MergedMarkdown:                   acc.markdownBuilder.String(),
+		ImportPaths:                      acc.importPaths,
+		PromptImports:                    acc.promptImports,
+		MergedSteps:                      acc.stepsBuilder.String(),
+		CopilotSetupSteps:                acc.copilotSetupStepsBuilder.String(),
+		MergedPreSteps:                   acc.preStepsBuilder.String(),
+		MergedPreAgentSteps:              acc.preAgentStepsBuilder.String(),
+		MergedRuntimes:                   acc.runtimesBuilder.String(),
+		MergedRunInstallScripts:          acc.runInstallScripts,
+		MergedServices:                   acc.servicesBuilder.String(),
+		MergedNetwork:                    acc.networkBuilder.String(),
+		MergedSandboxAgentMounts:         acc.sandboxAgentMounts,
+		MergedSandboxAgentRuntimeInstall: acc.sandboxAgentRuntimeInstall,
+		MergedPermissions:                acc.permissionsBuilder.String(),
+		MergedSecretMasking:              acc.secretMaskingBuilder.String(),
+		MergedBots:                       acc.bots,
+		MergedSkipRoles:                  acc.skipRoles,
+		MergedSkipBots:                   acc.skipBots,
+		MergedSkipIfMatch:                acc.skipIfMatch,
+		MergedSkipIfNoMatch:              acc.skipIfNoMatch,
+		MergedAmbientFolders:             acc.ambientFolders,
+		MergedPostSteps:                  acc.postStepsBuilder.String(),
+		MergedLabels:                     acc.labels,
+		MergedCaches:                     acc.caches,
+		MergedJobs:                       acc.jobsBuilder.String(),
+		MergedEnv:                        acc.envBuilder.String(),
+		MergedEnvSources:                 acc.envSources,
+		MergedFeatures:                   acc.features,
+		MergedModels:                     acc.models,
+		MergedModelPolicies:              acc.modelPolicies,
+		MergedModelCosts:                 acc.modelCosts,
+		MergedDefaultAiCreditsPricing:    acc.defaultAiCreditsPricing,
+		MergedObservability:              mergeObservabilityConfigs(acc.observabilityConfigs),
+		AgentFile:                        acc.agentFile,
+		AgentImportSpec:                  acc.agentImportSpec,
+		RepositoryImports:                acc.repositoryImports,
+		ImportInputs:                     acc.importInputs,
+		MergedActivationGitHubToken:      acc.activationGitHubToken,
+		MergedActivationGitHubApp:        acc.activationGitHubApp,
+		MergedTopLevelGitHubApp:          acc.topLevelGitHubApp,
+		MergedCheckout:                   strings.Join(acc.checkouts, "\n"),
+		MergedEngineMCPToolTimeout:       acc.mergedEngineMCPToolTimeout,
+		MergedEngineMCPSessionTimeout:    acc.mergedEngineMCPSessionTimeout,
+		MergedEngineModel:                acc.mergedEngineModel,
+		MergedMaxTurns:                   acc.mergedMaxTurns,
+		MergedMaxToolDenials:             acc.mergedMaxToolDenials,
+		MergedMaxRuns:                    acc.mergedMaxRuns,
+		MergedMaxTurnCacheMisses:         acc.mergedMaxTurnCacheMisses,
+		MergedMaxAICredits:               acc.mergedMaxAICredits,
+		MergedMaxDailyAICredits:          acc.mergedMaxDailyAICredits,
+		MergedExcludedEnv:                acc.excludedEnv,
+		Warnings:                         acc.warnings,
 	}
 }
 

@@ -1,14 +1,15 @@
 ---
-description: Create new agentic workflows using GitHub Agentic Workflows (gh-aw) with concise guidance on triggers, tools, and security.
+description: Design and create new agentic workflows using GitHub Agentic Workflows (gh-aw) — unified interview-first experience with concise guidance on triggers, tools, and security.
 disable-model-invocation: true
 ---
 
-# GitHub Agentic Workflow Creator
+# GitHub Agentic Workflow Designer & Creator
 
-Create new workflow files under `.github/workflows/` using the installed `gh aw` CLI.
+Design and create new workflow files under `.github/workflows/` using the installed `gh aw` CLI.
 
 ## Load These References First
 
+- [designer.md](designer.md)
 - [github-agentic-workflows.md](github-agentic-workflows.md)
 - [workflow-editing.md](workflow-editing.md)
 - [workflow-constraints.md](workflow-constraints.md)
@@ -19,14 +20,18 @@ Create new workflow files under `.github/workflows/` using the installed `gh aw`
 
 Load these topic files only when relevant:
 
+- [maintainer.md](maintainer.md) for recurring repository maintenance, backlog triage, owned-PR upkeep, or long-term code health
 - [campaign.md](campaign.md) for campaign, KPI, pacing, cadence, or `stop-after`
 - [experiments.md](experiments.md) for experiments, A/B tests, variants, or prompt comparisons
 - [visual-regression.md](visual-regression.md) for screenshot comparison workflows
 - [deployment-status.md](deployment-status.md) for external deployment monitoring
 - [charts.md](charts.md) for chart-generation workflows
 - [report.md](report.md) for reporting output structure and recurring report lifecycle
+- [release-workflow.md](release-workflow.md) for release workflows that build, test, publish a GitHub release, and generate release highlights
+- [linter-workflows.md](linter-workflows.md) for mining, refining, or applying custom linter rules
+- [agent-runtime-instructions.md](agent-runtime-instructions.md) when choosing or debugging Docker, gVisor, Docker sbx, ARC DinD, self-hosted runners, or `sandbox.agent.runtime-install`
 
-## Two Modes
+## Modes
 
 ### Interactive mode
 
@@ -34,7 +39,37 @@ Start with exactly:
 
 > What do you want to automate today?
 
-Then ask only the next question needed.
+Then follow a progressive interview — ask one question at a time, advance only when the current phase is clear:
+
+1. **Goal** — confirm workflow name (kebab-case), brief description, optional emoji.
+2. **Repository survey for maintenance workflows** — before choosing a portfolio or cadence, inspect the target repository using [maintainer.md](maintainer.md). Infer project type, contribution and validation rules, repository layout, recent activity, issue and pull request state, labels, releases, and CI health. Summarize the observed signals and derive an initial low-risk strategy; ask only for policy or capacity information that cannot be inferred.
+3. **Trigger** — ask "When should this run?" and map to an `on:` block (see trigger mapping in [designer-mappings.md](designer-mappings.md)). For scheduled workflows that create issues or pull requests, also choose how previous results are handled using [Choose the previous-result strategy](#choose-the-previous-result-strategy).
+4. **Scope** — ask what it reads and what it creates or updates; map to `permissions:`, `tools:`, and `safe-outputs:`.
+5. **Data strategy** — ask whether GitHub data should be pre-fetched with `gh` + `jq` (DataOps default); map to `steps:`.
+6. **Guardrails** — ask whether it should block, advise, or silently log; guide toward `noop` and safe-output behavior.
+7. **Context & network** — ask about external APIs, MCP servers, and required secrets; map to `network.allowed` and `env:`.
+8. **Engine** (skip if obvious) — if ambiguous, suggest Copilot as the default.
+9. **Confirmation** — present a structured summary before generating:
+
+   ```text
+   Proposed workflow:
+   - Name: <workflow-id>
+   - Trigger: <event + key options>
+   - Engine: <engine or default>
+   - Tools: <tool summary>
+   - Safe outputs: <list or none>
+   - Network: <allowed summary>
+   - Integrations/Auth: <service/mcp + required secrets/env vars>
+   - Repository signals: <maintenance workflows only>
+   - Initial maintenance portfolio: <maintenance workflows only>
+   - Intent: <one-sentence task>
+   ```
+
+   Ask: **"Ready to generate, or want to adjust anything?"**
+
+Skip phases when the answer is already clear from earlier statements. Apply progressive disclosure: at most 5 questions before presenting the confirmation summary; then ask "anything else?" if needed. Detect done signals (`that's it`, `looks good`, `generate it`) and proceed to generation.
+
+For detailed trigger/safe-output/network/tool decision heuristics and integration auth setup patterns, load [designer-mappings.md](designer-mappings.md). For token-optimization defaults, load [designer.md](designer.md).
 
 ### Issue-form mode
 
@@ -44,7 +79,6 @@ When triggered from a workflow-creation issue form, read the form fields and gen
 
 - Keep the conversation short and iterative.
 - Translate user intent into workflow structure.
-- Ask about the trigger, desired action, and required write outputs.
 - When the user asks for exploration, evaluation, or scenario design rather than file creation, stay in ad hoc evaluation mode.
 - In ad hoc evaluation mode, do not create `.github/workflows/*.md`.
 - Do not overwhelm the user with long option dumps unless they ask.
@@ -60,6 +94,45 @@ Use this mode for exploratory testing, persona walkthroughs, and "what workflow 
 - Exit ad hoc evaluation mode only when the user explicitly asks to create, implement, or write the workflow file.
 - End by offering to turn the recommendation into `.github/workflows/<workflow-id>.md` if the user wants to proceed.
 
+### Invocation Surface
+
+Ad hoc evaluation is reached by addressing the `agentic-workflows` custom agent directly in conversation (chat prompt, issue comment, or PR comment) — it is **not** a CLI flag or MCP tool parameter. The `gh aw` CLI and MCP tools (`compile`, `audit`, `status`, `update`, etc.) only manage existing workflow files and do not accept a `prompt`/`scenario`/`query` parameter; passing one will fail with an "Unknown parameter" error. Use the example prompt below instead of trying to script evaluation through a tool call.
+
+### Single-Scenario Evaluation Example
+
+> agentic-workflows evaluate this scenario without creating files: Information Worker — weekly summary of stale documentation files not updated in the last 90 days
+
+Return a single recommendation table using the same fields as the multi-scenario example below (trigger, scope, read tools, safe outputs, permissions, noop condition). Only create `.github/workflows/<workflow-id>.md` if the user then explicitly asks to proceed.
+
+### Multi-Scenario Evaluation Example
+
+To compare multiple persona or task slices in a single request, use the following prompt format:
+
+> agentic-workflows evaluate these scenarios without creating files:
+> 1. Information Worker — weekly digest of open issues and PRs assigned to me
+> 2. Product Manager — recurring backlog triage report sorted by staleness
+> 3. Backend Engineer — API contract diff review on every pull request
+
+Expected comparison output: return one combined table with one row per scenario (not a separate table per scenario), so the trigger/tool/safe-output choices can be compared side by side. Use the scenario's persona/task label as the row key and cover these columns:
+
+| Scenario | Trigger | Scope | Read tools | Safe outputs | Permissions | Noop condition |
+|---|---|---|---|---|---|---|
+| Information Worker — weekly digest | `schedule` + `workflow_dispatch` | 7-day window, grouped by assignee | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: write` | window has no assigned issues/PRs |
+| Product Manager — backlog triage | `schedule` + `workflow_dispatch` | recurring window, grouped by staleness bucket | `github` (`gh-proxy`, default toolset) | `create-issue` with `close-older-issues: true` | `contents: read`, `issues: write` | no items cross the staleness threshold |
+| Backend Engineer — API contract review | `pull_request` with `paths:` scoped to API/schema files | per-PR, no window | `github` (`gh-proxy`, default toolset) | `add-comment` on the PR | `contents: read`, `pull-requests: write` | no API contract files changed in the PR |
+
+This is the same invocation surface as [Single-Scenario Evaluation Example](#single-scenario-evaluation-example) above — reached only by addressing the `agentic-workflows` custom agent directly in conversation, never via a CLI/MCP tool parameter. After the comparison table, call out any scenario that shares a trigger or write path with another (for example two digests that could share a schedule) before offering to generate files.
+
+### Failure Classification
+
+When evaluating scenarios, classify any failure before stopping:
+
+| Failure type | Symptom | Action |
+|---|---|---|
+| Transient issue | Network error, timeout, or quota exceeded | Retry once; if it persists, record `invocation_unavailable` and continue with partial results |
+| Unsupported command | Unknown subcommand or unrecognized option | Record `command_not_supported`, document the gap, and fall back to providing the recommendation directly from local gh-aw guidance |
+| Product gap | Invocation succeeds but returns no workflow-design guidance | Record `response_unavailable`, note the scenario, and surface it as a missing capability rather than treating it as an error |
+
 ## Design Checklist
 
 ### 1. Pick the workflow ID
@@ -70,22 +143,12 @@ Use this mode for exploratory testing, persona walkthroughs, and "what workflow 
 
 ### 2. Choose the trigger
 
-Use the smallest trigger that matches the request.
-
-Common mappings:
-
-- issue automation → `on: issues:`
-- pull request automation → `on: pull_request:`
-- scheduled reporting → fuzzy `schedule:` such as `daily on weekdays`
-- on-demand comments → `slash_command`
-- UI-driven actions → `label_command`
-- GitHub Actions pipeline monitoring → `workflow_run`
-- external deployment monitoring → `deployment_status`
+Use the smallest trigger that matches the request. See the [Decision Matrix](triggers.md#decision-matrix) in triggers.md for the base trigger-to-use-case mapping.
 
 | Scenario | Trigger and default output | Details |
 |---|---|---|
 | Recurring reports and stakeholder digests | `schedule` (+ `workflow_dispatch` for reruns), usually `create-issue` | [Reporting/digest guidance](create-agentic-workflow-trigger-details.md#reporting-and-digest-guidance) |
-| Persona-oriented requests (PM, design governance, compliance policy) | `schedule` or `pull_request` with scoped `paths:` | [Persona scenario map](create-agentic-workflow-trigger-details.md#persona-oriented-scenario-map) |
+| Persona-oriented requests (PM, design governance, compliance policy) | `pull_request` with scoped `paths:` when the request is framed around changed files (`tokens/**`, `**/*tokens*.json`, `**/theme/**`, `policy/**`, `compliance/**`, `controls/**`, `docs/policies/**`); `schedule` (+ `workflow_dispatch`) for recurring audits | [Persona scenario map](create-agentic-workflow-trigger-details.md#persona-oriented-scenario-map) |
 | Backend schema/API review | `pull_request` with backend contract `paths:` and `add-comment` | [Backend review guidance](create-agentic-workflow-trigger-details.md#backend-review-guidance) |
 | PR analyzers deciding comment vs issue vs noop | `pull_request` + escalation logic | [PR analyzer escalation](create-agentic-workflow-trigger-details.md#pr-analyzer-escalation-guidance) |
 | Incident workflows | `workflow_run` / `deployment_status` with `create-issue` dedup | [Incident dedup-key templates](create-agentic-workflow-trigger-details.md#incident-dedup-key-templates-workflow_run-and-deployment_status) |
@@ -94,12 +157,21 @@ Common mappings:
 
 Use [triggers.md](triggers.md), [workflow-patterns.md](workflow-patterns.md), and [create-agentic-workflow-trigger-details.md](create-agentic-workflow-trigger-details.md) for detailed trigger-selection patterns.
 
+#### Choose the previous-result strategy
+
+For every daily or scheduled workflow that creates issues or pull requests, choose the strategy that best matches the workflow's goal:
+
+- **Wait for the previous result** when only one active result should exist. Configure `on.skip-if-match` to skip the entire agent execution while the issue or pull request created by an earlier run remains open. The workflow resumes after that item is closed or merged.
+- **Replace previous results** when the newest result supersedes older reports. For issues, configure `safe-outputs.create-issue.close-older-issues: true` and use `close-older-key` when an explicit matching key is needed.
+- **Keep previous results** when each run should produce a distinct item or preserve a history of work. Instruct the agent to search for and review existing issues or pull requests before acting, then select a materially different scope so it does not repeat previous work. Treat those existing items as the workflow's memory.
+
+Do not default every scheduled workflow to the same strategy. Base the choice on whether the workflow needs a single active item, a latest-only result, or a continuing series of distinct results, and include the selected behavior in the generated workflow.
+
 ### 3. Keep permissions read-only
 
-The main agent job must stay read-only.
+See [workflow-constraints.md](workflow-constraints.md) for the read-only security posture. Specific to workflow creation:
 
 - Do not grant `issues: write`, `pull-requests: write`, or `contents: write` to the agent job.
-- Route GitHub writes through `safe-outputs:`.
 - When targeting the Copilot coding agent, recommend `permissions: { copilot-requests: write }` so Copilot can authenticate with `${{ github.token }}`.
 - If the user asks for direct writes, explain why the safe-output pattern is required.
 
@@ -260,6 +332,7 @@ Before finalizing any `pull_request`-triggered reporting workflow, verify:
 Before finalizing any newly generated workflow, verify:
 
 - [ ] **Trigger fit**: trigger matches user intent and event granularity (for example `pull_request`, `workflow_run`, `deployment_status`, `schedule`, `slash_command`)
+- [ ] **Maintenance baseline**: recurring maintenance strategies are derived from a bounded repository survey, with observed signals separated from recommendations
 - [ ] **Tool fit**: enabled tools are the minimal set needed for reads/analysis (prefer `gh-proxy`; add `playwright`/`cache-memory` only when required)
 - [ ] **Safe outputs**: all visible writes route through `safe-outputs:` and include `noop` for explicit no-op outcomes
 - [ ] **Permissions**: agent job remains read-only; no direct write scopes granted
@@ -270,7 +343,7 @@ Before finalizing any newly generated workflow, verify:
 
 Before finalizing any newly generated workflow, verify:
 
-- [ ] **Paths scope**: include `paths:`/`paths-ignore:` when the automation should ignore unrelated files (for backend reviews, include migration/schema/API contract globs)
+- [ ] **Paths scope**: include `paths:`/`paths-ignore:` when the automation should ignore unrelated files (for backend reviews, include migration/schema/API contract globs; for design governance, include design-token/theme globs like `tokens/**` and `**/theme/**`; for compliance policy reviews, include policy/control docs like `policy/**`, `compliance/**`, `controls/**`, `docs/policies/**`)
 - [ ] **Labels scope**: define required labels (for example `label_command` names or PR/issue label filters) when label-based routing is expected
 - [ ] **Workflow-name scope**: for `workflow_run`, explicitly set `workflows:` to named targets and gate conclusions via `if:` on `${{ github.event.workflow_run.conclusion }}` (for incident triage, prefer failure-only outcomes)
 - [ ] **Date-window scope**: for reporting/triage, state the exact window (for example `last 24h`, `since previous run`, `current week`)
@@ -278,12 +351,13 @@ Before finalizing any newly generated workflow, verify:
 
 ## Multi-Repository Requests
 
-For cross-repository workflows:
+For cross-repository workflows, first determine whether the question is **finite and bounded**:
 
-- enable the GitHub toolsets needed to read external repositories
-- configure cross-repo authentication in `safe-outputs:`
-- tell the agent to set `target-repo`
-- explain that the workflow still cannot wait for external workflows or create multi-job orchestration
+- If the answer requires arbitrary source-code extraction, full file contents, or other unbounded access:
+  - enable the GitHub toolsets needed to read external repositories
+  - configure cross-repo authentication in `safe-outputs:`
+  - tell the agent to set `target-repo`
+  - explain that the workflow still cannot wait for external workflows or create multi-job orchestration
 
 Use [workflow-patterns.md](workflow-patterns.md) for the compact cross-repo pattern.
 

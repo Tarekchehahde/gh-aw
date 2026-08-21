@@ -104,6 +104,38 @@ describe("push_to_pull_request_branch bundle integration", () => {
     expect(actualFiles.sort()).toEqual([".changeset/fix.md", "docs/guide.md"]);
   });
 
+  it("fetches a HEAD-only bundle after its named branch ref is absent", () => {
+    const branchName = "autoloop/head-only-bundle";
+    const sourceRepo = createRepo("push-pr-head-only-source-");
+    const targetRepo = createRepo("push-pr-head-only-target-");
+    tempDirs.push(sourceRepo, targetRepo);
+
+    writeRepoFile(sourceRepo, "README.md", "base\n");
+    execGit(["add", "README.md"], { cwd: sourceRepo });
+    execGit(["commit", "-m", "base"], { cwd: sourceRepo });
+    execGit(["branch", "-M", "main"], { cwd: sourceRepo });
+    const baseSha = execGit(["rev-parse", "HEAD"], { cwd: sourceRepo }).stdout.trim();
+
+    execGit(["checkout", "-b", branchName], { cwd: sourceRepo });
+    writeRepoFile(sourceRepo, "head-only.txt", "bundle change\n");
+    execGit(["add", "head-only.txt"], { cwd: sourceRepo });
+    execGit(["commit", "-m", "HEAD-only bundle change"], { cwd: sourceRepo });
+    const bundleHead = execGit(["rev-parse", "HEAD"], { cwd: sourceRepo }).stdout.trim();
+
+    const bundlePath = path.join(sourceRepo, "head-only.bundle");
+    execGit(["bundle", "create", bundlePath, "HEAD"], { cwd: sourceRepo });
+
+    fetchBaseCommit(targetRepo, sourceRepo, baseSha, branchName);
+    const bundleRef = "refs/bundles/test-head-only-bundle";
+    const namedRefFetch = execGit(["fetch", bundlePath, `refs/heads/${branchName}:${bundleRef}`], { cwd: targetRepo, allowFailure: true });
+    expect(namedRefFetch.status).not.toBe(0);
+    expect(execGit(["bundle", "list-heads", bundlePath], { cwd: targetRepo }).stdout).toBe(`${bundleHead} HEAD\n`);
+
+    execGit(["fetch", bundlePath, `HEAD:${bundleRef}`], { cwd: targetRepo });
+
+    expect(execGit(["rev-parse", bundleRef], { cwd: targetRepo }).stdout.trim()).toBe(bundleHead);
+  });
+
   it("includes files introduced through merge-commit bundle history", async () => {
     const branchName = "autoloop/merge-bundle";
     const sourceRepo = createRepo("push-pr-merge-source-");
@@ -138,5 +170,38 @@ describe("push_to_pull_request_branch bundle integration", () => {
     const actualFiles = await getBundlePreApplyFiles(createExecApi(targetRepo), {}, baseSha, bundleRef);
 
     expect(actualFiles.sort()).toEqual(["feature.txt", "main.txt"]);
+  });
+
+  it("resolves filenames that git would otherwise quote (non-ASCII characters)", async () => {
+    const branchName = "autoloop/quoted-path-bundle";
+    const sourceRepo = createRepo("push-pr-quoted-source-");
+    const targetRepo = createRepo("push-pr-quoted-target-");
+    tempDirs.push(sourceRepo, targetRepo);
+
+    writeRepoFile(sourceRepo, "README.md", "base\n");
+    execGit(["add", "README.md"], { cwd: sourceRepo });
+    execGit(["commit", "-m", "base"], { cwd: sourceRepo });
+    execGit(["branch", "-M", "main"], { cwd: sourceRepo });
+    const baseSha = execGit(["rev-parse", "HEAD"], { cwd: sourceRepo }).stdout.trim();
+
+    execGit(["checkout", "-b", branchName], { cwd: sourceRepo });
+    const quotedFileName = "résumé.txt";
+    writeRepoFile(sourceRepo, quotedFileName, "quoted path change\n");
+    execGit(["add", quotedFileName], { cwd: sourceRepo });
+    execGit(["commit", "-m", "quoted path change"], { cwd: sourceRepo });
+
+    const bundlePath = path.join(sourceRepo, "quoted.bundle");
+    execGit(["bundle", "create", bundlePath, `refs/heads/${branchName}`], { cwd: sourceRepo });
+
+    fetchBaseCommit(targetRepo, sourceRepo, baseSha, branchName);
+    const bundleRef = "refs/bundles/test-quoted-bundle";
+    execGit(["fetch", bundlePath, `refs/heads/${branchName}:${bundleRef}`], { cwd: targetRepo });
+
+    const actualFiles = await getBundlePreApplyFiles(createExecApi(targetRepo), {}, baseSha, bundleRef);
+
+    // Without NUL-delimited (`-z`) diff output, git would quote this path (e.g. "r\303\251sum\303\251.txt"),
+    // causing downstream filesystem lookups keyed on the raw name to fail and silently drop the file
+    // from size/protection checks.
+    expect(actualFiles).toEqual([quotedFileName]);
   });
 });

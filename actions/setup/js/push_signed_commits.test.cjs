@@ -24,6 +24,7 @@ const require = createRequire(import.meta.url);
 
 // Import module once – globals are resolved at call time, not import time.
 const { pushSignedCommits, unquoteCPath } = require("./push_signed_commits.cjs");
+const { resolveExperimentStateRebaseConflict } = require("./push_experiment_state.cjs");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Unit tests for unquoteCPath
@@ -184,6 +185,7 @@ function makeRealExec(cwd) {
           ...process.env,
           GIT_CONFIG_NOSYSTEM: "1",
           HOME: os.tmpdir(),
+          ...(opts.env || {}),
         },
       });
       if (result.error) throw result.error;
@@ -1989,6 +1991,7 @@ describe("push_signed_commits integration tests", () => {
       // partial clone), and the SECOND rebase runs for real and succeeds.
       const realExec = makeRealExec(workDir);
       let rebaseAttempts = 0;
+      /** @type {any} */
       let backfillTargets = null;
       global.exec = {
         getExecOutput: async (program, args, opts = {}) => {
@@ -2091,6 +2094,207 @@ describe("push_signed_commits integration tests", () => {
       expect(githubClient.graphql).not.toHaveBeenCalled();
     });
 
+    it("should merge state.json conflicts when a custom resolver is provided", async () => {
+      const concurrentDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-signed-concurrent-"));
+      try {
+        execGit(["checkout", "-b", "experiment-state-merge-branch"], { cwd: workDir });
+        const baseState = {
+          counts: { prompt_style: { concise: 1, detailed: 1 } },
+          runs: [{ run_id: "100", timestamp: "2026-07-31T12:00:00.000Z", assignments: { prompt_style: "concise" } }],
+        };
+        fs.writeFileSync(path.join(workDir, "state.json"), JSON.stringify(baseState, null, 2) + "\n");
+        fs.writeFileSync(path.join(workDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.json", "assignments.json"], { cwd: workDir });
+        execGit(["commit", "-m", "Seed experiment state"], { cwd: workDir });
+        execGit(["push", "-u", "origin", "experiment-state-merge-branch"], { cwd: workDir });
+
+        const baseRef = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+
+        execGit(["clone", bareDir, "."], { cwd: concurrentDir });
+        execGit(["config", "user.name", "Test User"], { cwd: concurrentDir });
+        execGit(["config", "user.email", "test@example.com"], { cwd: concurrentDir });
+
+        const localState = {
+          counts: { prompt_style: { concise: 2, detailed: 1 } },
+          runs: [...baseState.runs, { run_id: "200", timestamp: "2026-07-31T12:01:00.000Z", assignments: { prompt_style: "concise" } }],
+        };
+        fs.writeFileSync(path.join(workDir, "state.json"), JSON.stringify(localState, null, 2) + "\n");
+        fs.writeFileSync(path.join(workDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.json", "assignments.json"], { cwd: workDir });
+        execGit(["commit", "-m", "Local experiment update"], { cwd: workDir });
+
+        execGit(["checkout", "experiment-state-merge-branch"], { cwd: concurrentDir });
+        const remoteState = {
+          counts: { prompt_style: { concise: 2, detailed: 1 } },
+          runs: [...baseState.runs, { run_id: "300", timestamp: "2026-07-31T12:02:00.000Z", assignments: { prompt_style: "concise" } }],
+        };
+        fs.writeFileSync(path.join(concurrentDir, "state.json"), JSON.stringify(remoteState, null, 2) + "\n");
+        fs.writeFileSync(path.join(concurrentDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.json", "assignments.json"], { cwd: concurrentDir });
+        execGit(["commit", "-m", "Remote experiment update"], { cwd: concurrentDir });
+        execGit(["push", "origin", "experiment-state-merge-branch"], { cwd: concurrentDir });
+        execGit(["fetch", "origin", "refs/heads/experiment-state-merge-branch"], { cwd: workDir });
+
+        global.exec = makeRealExec(workDir);
+        const githubClient = makeMockGithubClient();
+
+        await pushSignedCommits({
+          githubClient,
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "experiment-state-merge-branch",
+          baseRef,
+          cwd: workDir,
+          resolveRebaseConflict: resolveExperimentStateRebaseConflict,
+        });
+
+        expect(githubClient.graphql).toHaveBeenCalledTimes(1);
+        const additions = githubClient.graphql.mock.calls[0][1].input.fileChanges.additions;
+        const stateAddition = additions.find(entry => entry.path === "state.json");
+        expect(stateAddition).toBeDefined();
+        const mergedState = JSON.parse(Buffer.from(stateAddition.contents, "base64").toString("utf8"));
+        expect(mergedState.counts.prompt_style.concise).toBe(3);
+        expect(mergedState.counts.prompt_style.detailed).toBe(1);
+        expect(mergedState.runs).toHaveLength(3);
+        expect(mergedState.runs.map(run => run.run_id).sort()).toEqual(["100", "200", "300"]);
+      } finally {
+        cleanupDir(concurrentDir);
+      }
+    });
+
+    it("should merge state.jsonl conflicts when a custom resolver is provided", async () => {
+      const concurrentDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-signed-concurrent-jsonl-"));
+      try {
+        execGit(["checkout", "-b", "experiment-state-jsonl-merge-branch"], { cwd: workDir });
+        const seedRuns = [
+          { run_id: "100", timestamp: "2026-07-31T12:00:00.000Z", assignments: { prompt_style: "concise" } },
+          { run_id: "101", timestamp: "2026-07-31T12:00:30.000Z", assignments: { prompt_style: "detailed" } },
+        ];
+        fs.writeFileSync(path.join(workDir, "state.jsonl"), `${seedRuns.map(run => JSON.stringify(run)).join("\n")}\n`);
+        fs.writeFileSync(path.join(workDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.jsonl", "assignments.json"], { cwd: workDir });
+        execGit(["commit", "-m", "Seed experiment state jsonl"], { cwd: workDir });
+        execGit(["push", "-u", "origin", "experiment-state-jsonl-merge-branch"], { cwd: workDir });
+
+        const baseRef = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+
+        execGit(["clone", bareDir, "."], { cwd: concurrentDir });
+        execGit(["config", "user.name", "Test User"], { cwd: concurrentDir });
+        execGit(["config", "user.email", "test@example.com"], { cwd: concurrentDir });
+
+        fs.writeFileSync(path.join(workDir, "state.jsonl"), `${seedRuns.map(run => JSON.stringify(run)).join("\n")}\n${JSON.stringify({ run_id: "200", timestamp: "2026-07-31T12:01:00.000Z", assignments: { prompt_style: "concise" } })}\n`);
+        fs.writeFileSync(path.join(workDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.jsonl", "assignments.json"], { cwd: workDir });
+        execGit(["commit", "-m", "Local experiment update jsonl"], { cwd: workDir });
+
+        execGit(["checkout", "experiment-state-jsonl-merge-branch"], { cwd: concurrentDir });
+        fs.writeFileSync(
+          path.join(concurrentDir, "state.jsonl"),
+          `${seedRuns.map(run => JSON.stringify(run)).join("\n")}\n${JSON.stringify({ run_id: "300", timestamp: "2026-07-31T12:02:00.000Z", assignments: { prompt_style: "concise" } })}\n`
+        );
+        fs.writeFileSync(path.join(concurrentDir, "assignments.json"), JSON.stringify({ prompt_style: "concise" }, null, 2) + "\n");
+        execGit(["add", "state.jsonl", "assignments.json"], { cwd: concurrentDir });
+        execGit(["commit", "-m", "Remote experiment update jsonl"], { cwd: concurrentDir });
+        execGit(["push", "origin", "experiment-state-jsonl-merge-branch"], { cwd: concurrentDir });
+        execGit(["fetch", "origin", "refs/heads/experiment-state-jsonl-merge-branch"], { cwd: workDir });
+
+        global.exec = makeRealExec(workDir);
+        const githubClient = makeMockGithubClient();
+
+        await pushSignedCommits({
+          githubClient,
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "experiment-state-jsonl-merge-branch",
+          baseRef,
+          cwd: workDir,
+          resolveRebaseConflict: resolveExperimentStateRebaseConflict,
+        });
+
+        expect(githubClient.graphql).toHaveBeenCalledTimes(1);
+        const additions = githubClient.graphql.mock.calls[0][1].input.fileChanges.additions;
+        const stateAddition = additions.find(entry => entry.path === "state.jsonl");
+        expect(stateAddition).toBeDefined();
+        const mergedLines = Buffer.from(stateAddition.contents, "base64")
+          .toString("utf8")
+          .trim()
+          .split("\n")
+          .map(line => JSON.parse(line));
+        const runIds = mergedLines
+          .filter(entry => entry.run_id)
+          .map(entry => entry.run_id)
+          .sort();
+        expect(runIds).toEqual(["100", "101", "200", "300"]);
+      } finally {
+        cleanupDir(concurrentDir);
+      }
+    });
+
+    it("should merge evals.jsonl conflicts when configured as append-only state file", async () => {
+      const concurrentDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-signed-concurrent-evals-"));
+      const originalStateFiles = process.env.GH_AW_STATE_FILES;
+      process.env.GH_AW_STATE_FILES = "evals.jsonl";
+      try {
+        execGit(["checkout", "-b", "evals-state-merge-branch"], { cwd: workDir });
+        const seed = { id: "seed", timestamp: "2026-07-31T12:00:00.000Z", runid: "100" };
+        fs.writeFileSync(path.join(workDir, "evals.jsonl"), `${JSON.stringify(seed)}\n`);
+        execGit(["add", "evals.jsonl"], { cwd: workDir });
+        execGit(["commit", "-m", "Seed eval state"], { cwd: workDir });
+        execGit(["push", "-u", "origin", "evals-state-merge-branch"], { cwd: workDir });
+
+        const baseRef = execGit(["rev-parse", "HEAD"], { cwd: workDir }).stdout.trim();
+
+        execGit(["clone", bareDir, "."], { cwd: concurrentDir });
+        execGit(["config", "user.name", "Test User"], { cwd: concurrentDir });
+        execGit(["config", "user.email", "test@example.com"], { cwd: concurrentDir });
+
+        const shared = { id: "shared", timestamp: "2026-07-31T12:01:00.000Z", runid: "101" };
+        const local = { id: "local", timestamp: "2026-07-31T12:02:00.000Z", runid: "102" };
+        fs.writeFileSync(path.join(workDir, "evals.jsonl"), `${JSON.stringify(seed)}\n${JSON.stringify(shared)}\n${JSON.stringify(local)}\n`);
+        execGit(["add", "evals.jsonl"], { cwd: workDir });
+        execGit(["commit", "-m", "Local eval update"], { cwd: workDir });
+
+        execGit(["checkout", "evals-state-merge-branch"], { cwd: concurrentDir });
+        const remote = { id: "remote", timestamp: "2026-07-31T12:03:00.000Z", runid: "103" };
+        fs.writeFileSync(path.join(concurrentDir, "evals.jsonl"), `${JSON.stringify(seed)}\n${JSON.stringify(shared)}\n${JSON.stringify(remote)}\n`);
+        execGit(["add", "evals.jsonl"], { cwd: concurrentDir });
+        execGit(["commit", "-m", "Remote eval update"], { cwd: concurrentDir });
+        execGit(["push", "origin", "evals-state-merge-branch"], { cwd: concurrentDir });
+        execGit(["fetch", "origin", "refs/heads/evals-state-merge-branch"], { cwd: workDir });
+
+        global.exec = makeRealExec(workDir);
+        const githubClient = makeMockGithubClient();
+
+        await pushSignedCommits({
+          githubClient,
+          owner: "test-owner",
+          repo: "test-repo",
+          branch: "evals-state-merge-branch",
+          baseRef,
+          cwd: workDir,
+          resolveRebaseConflict: resolveExperimentStateRebaseConflict,
+        });
+
+        expect(githubClient.graphql).toHaveBeenCalledTimes(1);
+        const additions = githubClient.graphql.mock.calls[0][1].input.fileChanges.additions;
+        const stateAddition = additions.find(entry => entry.path === "evals.jsonl");
+        expect(stateAddition).toBeDefined();
+        const mergedLines = Buffer.from(stateAddition.contents, "base64")
+          .toString("utf8")
+          .trim()
+          .split("\n")
+          .map(line => JSON.parse(line));
+        expect(mergedLines.map(entry => entry.id)).toEqual(["seed", "shared", "remote", "local"]);
+      } finally {
+        cleanupDir(concurrentDir);
+        if (originalStateFiles === undefined) {
+          delete process.env.GH_AW_STATE_FILES;
+        } else {
+          process.env.GH_AW_STATE_FILES = originalStateFiles;
+        }
+      }
+    });
+
     it("should enforce protected-files policy against synthesized GraphQL payload", async () => {
       execGit(["checkout", "-b", "protected-payload-branch"], { cwd: workDir });
       fs.writeFileSync(path.join(workDir, "CODEOWNERS"), "* @octocat\n");
@@ -2143,6 +2347,175 @@ describe("push_signed_commits integration tests", () => {
       ).rejects.toThrow("exceeds max-patch-files");
 
       expect(githubClient.graphql).not.toHaveBeenCalled();
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
+  // Fork-backed push (pushRemoteUrl + pushToken)
+  // ──────────────────────────────────────────────────────
+
+  describe("fork-backed push via pushRemoteUrl", () => {
+    let forkBareDir;
+
+    beforeEach(() => {
+      forkBareDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-signed-fork-"));
+      execGit(["init", "--bare"], { cwd: forkBareDir });
+      execGit(["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: forkBareDir });
+      // Seed the fork with the same initial commit as origin so pushes have a common base
+      execGit(["push", forkBareDir, "main"], { cwd: workDir });
+    });
+
+    afterEach(() => {
+      cleanupDir(forkBareDir);
+    });
+
+    it("routes direct git push to the fork remote, not origin, when signedCommits=false", async () => {
+      const branchName = "fork/direct-push-branch";
+      execGit(["checkout", "-b", branchName], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "fork-file.txt"), "fork content\n");
+      execGit(["add", "fork-file.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Add fork-file.txt"], { cwd: workDir });
+
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient();
+
+      const headSha = await pushSignedCommits({
+        githubClient,
+        owner: "test-owner",
+        repo: "test-repo",
+        branch: branchName,
+        baseRef: "origin/main",
+        cwd: workDir,
+        pushRemoteUrl: forkBareDir,
+        pushToken: "fake-token",
+        signedCommits: false,
+      });
+
+      // The returned SHA must be a valid 40-char OID
+      expect(headSha).toMatch(/^[0-9a-f]{40}$/i);
+
+      // The branch must exist on the fork bare repo
+      const forkRefs = execGit(["ls-remote", "--heads", forkBareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(forkRefs.stdout).toContain(branchName);
+
+      // The branch must NOT exist on origin (upstream)
+      const originRefs = execGit(["ls-remote", "--heads", bareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(originRefs.stdout).toBe("");
+
+      // GraphQL must not have been called (signedCommits=false)
+      expect(githubClient.graphql).not.toHaveBeenCalled();
+    });
+
+    it("routes git push fallback to the fork remote when GraphQL mutation fails", async () => {
+      const branchName = "fork/graphql-fallback-branch";
+      execGit(["checkout", "-b", branchName], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "fallback.txt"), "fallback content\n");
+      execGit(["add", "fallback.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Add fallback.txt"], { cwd: workDir });
+
+      // Push the branch to the fork so ls-remote can probe its current tip
+      execGit(["push", forkBareDir, branchName], { cwd: workDir });
+
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient({ failWithError: new Error("GraphQL unavailable") });
+
+      const headSha = await pushSignedCommits({
+        githubClient,
+        owner: "test-owner",
+        repo: "test-repo",
+        branch: branchName,
+        baseRef: "origin/main",
+        cwd: workDir,
+        pushRemoteUrl: forkBareDir,
+        pushToken: "fake-token",
+      });
+
+      expect(headSha).toMatch(/^[0-9a-f]{40}$/i);
+
+      // Branch must exist on the fork
+      const forkRefs = execGit(["ls-remote", "--heads", forkBareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(forkRefs.stdout).toContain(branchName);
+
+      // Branch must NOT exist on origin
+      const originRefs = execGit(["ls-remote", "--heads", bareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(originRefs.stdout).toBe("");
+    });
+
+    it("routes ls-remote probe to the fork so a new fork branch is detected as absent", async () => {
+      const branchName = "fork/ls-remote-probe-branch";
+      execGit(["checkout", "-b", branchName], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "probe.txt"), "probe content\n");
+      execGit(["add", "probe.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Add probe.txt"], { cwd: workDir });
+
+      // The branch exists on origin but NOT on the fork bare repo.
+      // This means lsRemoteHeadOid should see no existing tip on the fork,
+      // which forces the GraphQL createRef path.
+      execGit(["push", "origin", branchName], { cwd: workDir });
+
+      const lsRemoteTargets = [];
+      const realExec = makeRealExec(workDir);
+      global.exec = {
+        getExecOutput: async (program, args, opts = {}) => {
+          if (program === "git" && args[0] === "ls-remote") {
+            lsRemoteTargets.push(args[1]);
+          }
+          return realExec.getExecOutput(program, args, opts);
+        },
+        exec: realExec.exec,
+      };
+
+      const githubClient = makeMockGithubClient();
+
+      await pushSignedCommits({
+        githubClient,
+        owner: "test-owner",
+        repo: "test-repo",
+        branch: branchName,
+        baseRef: "origin/main",
+        cwd: workDir,
+        pushRemoteUrl: forkBareDir,
+        pushToken: "fake-token",
+      });
+
+      // Every ls-remote call must target the fork bare directory, not "origin"
+      expect(lsRemoteTargets.length).toBeGreaterThan(0);
+      for (const target of lsRemoteTargets) {
+        expect(target).toBe(forkBareDir);
+        expect(target).not.toBe("origin");
+      }
+    });
+
+    it("pushes a new orphan branch to the fork when baseRef is empty", async () => {
+      const branchName = "fork/orphan-branch";
+      execGit(["checkout", "--orphan", branchName], { cwd: workDir });
+      execGit(["reset", "--hard"], { cwd: workDir });
+      fs.writeFileSync(path.join(workDir, "orphan.txt"), "first commit\n");
+      execGit(["add", "orphan.txt"], { cwd: workDir });
+      execGit(["commit", "-m", "Orphan first commit"], { cwd: workDir });
+
+      global.exec = makeRealExec(workDir);
+      const githubClient = makeMockGithubClient();
+
+      const headSha = await pushSignedCommits({
+        githubClient,
+        owner: "test-owner",
+        repo: "test-repo",
+        branch: branchName,
+        baseRef: "",
+        cwd: workDir,
+        pushRemoteUrl: forkBareDir,
+        pushToken: "fake-token",
+      });
+
+      expect(headSha).toMatch(/^[0-9a-f]{40}$/i);
+
+      const forkRefs = execGit(["ls-remote", "--heads", forkBareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(forkRefs.stdout).toContain(branchName);
+
+      // Upstream must not receive the orphan branch
+      const originRefs = execGit(["ls-remote", "--heads", bareDir, `refs/heads/${branchName}`], { cwd: workDir });
+      expect(originRefs.stdout).toBe("");
     });
   });
 });

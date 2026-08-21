@@ -9,42 +9,35 @@ import (
 	"go/constant"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
 // Analyzer is the string-replace-minus-one analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "stringreplaceminusone",
-	Doc:      "reports strings.Replace calls with n=-1 that should use strings.ReplaceAll",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/stringreplaceminusone",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("stringreplaceminusone", "reports strings.Replace calls with n=-1 that should use strings.ReplaceAll", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "stringreplaceminusone")
 
 	nodeFilter := []ast.Node{(*ast.CallExpr)(nil)}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return
 		}
 
 		pos := pass.Fset.PositionFor(call.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
+		if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
 			return
 		}
-		if nolint.HasDirective(pos, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(pos, noLintIndex, "stringreplaceminusone") {
 			return
 		}
 
@@ -68,8 +61,6 @@ func run(pass *analysis.Pass) (any, error) {
 			SuggestedFixes: buildReplaceAllFix(pass, call),
 		})
 	})
-
-	return nil, nil
 }
 
 // isStringsReplaceCall reports whether call is an invocation of strings.Replace.

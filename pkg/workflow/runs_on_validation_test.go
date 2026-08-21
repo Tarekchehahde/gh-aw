@@ -153,6 +153,62 @@ func TestValidateRunsOn(t *testing.T) {
 			errorInMsg:  "safe-outputs.threat-detection.runs-on",
 			description: "threat-detection runs-on labels containing macos runner should be rejected",
 		},
+		{
+			name: "macos string in safe-outputs.threat-detection.runs-on",
+			frontmatter: map[string]any{
+				"safe-outputs": map[string]any{
+					"threat-detection": map[string]any{
+						"runs-on": "macos-latest",
+					},
+				},
+			},
+			wantErr:     true,
+			errorInMsg:  "safe-outputs.threat-detection.runs-on",
+			description: "threat-detection runs-on string macos runner should be rejected",
+		},
+		{
+			name: "macos in safe-outputs.threat-detection.runs-on array",
+			frontmatter: map[string]any{
+				"safe-outputs": map[string]any{
+					"threat-detection": map[string]any{
+						"runs-on": []any{"self-hosted", "macOS", "arm64"},
+					},
+				},
+			},
+			wantErr:     true,
+			errorInMsg:  "safe-outputs.threat-detection.runs-on",
+			description: "threat-detection runs-on array containing macos runner should be rejected",
+		},
+		{
+			name: "linux runner in safe-outputs.threat-detection.runs-on",
+			frontmatter: map[string]any{
+				"safe-outputs": map[string]any{
+					"threat-detection": map[string]any{
+						"runs-on": "ubuntu-latest",
+					},
+				},
+			},
+			wantErr:     false,
+			description: "threat-detection runs-on with a Linux runner should be accepted",
+		},
+		{
+			name: "macos in custom safe-job runs-on labels",
+			frontmatter: map[string]any{
+				"safe-outputs": map[string]any{
+					"jobs": map[string]any{
+						"notify": map[string]any{
+							"runs-on": map[string]any{
+								"group":  "runner-group",
+								"labels": []any{"linux", "macos-latest"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errorInMsg:  "safe-outputs.jobs.notify.runs-on",
+			description: "custom safe-job runs-on labels containing macos should be rejected",
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,7 +218,7 @@ func TestValidateRunsOn(t *testing.T) {
 			if tt.wantErr {
 				require.Error(t, err, "Test: %s - Expected error but got nil", tt.description)
 				if tt.errorInMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorInMsg,
+					require.ErrorContains(t, err, tt.errorInMsg,
 						"Error should contain '%s' for: %s", tt.errorInMsg, tt.description)
 				}
 			} else {
@@ -251,7 +307,7 @@ func TestValidateRunsOnValue(t *testing.T) {
 			name:       "array with non-string entry is invalid",
 			value:      []any{"linux", 42},
 			wantErr:    true,
-			errContain: "array entry type int",
+			errContain: "array entry has type int",
 		},
 		{
 			name: "object with invalid key is invalid",
@@ -259,13 +315,19 @@ func TestValidateRunsOnValue(t *testing.T) {
 				"runner": "ubuntu-latest",
 			},
 			wantErr:    true,
-			errContain: `invalid runs-on object key "runner"`,
+			errContain: "runs-on object key 'runner' is not supported",
+		},
+		{
+			name:       "empty object is invalid",
+			value:      map[string]any{},
+			wantErr:    true,
+			errContain: "runs-on object is empty",
 		},
 		{
 			name:       "unsupported type is invalid",
 			value:      123,
 			wantErr:    true,
-			errContain: "invalid runs-on type int",
+			errContain: "runs-on has type int",
 		},
 	}
 
@@ -274,7 +336,7 @@ func TestValidateRunsOnValue(t *testing.T) {
 			err := validateRunsOnValue(tt.value)
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errContain)
+				require.ErrorContains(t, err, tt.errContain)
 				return
 			}
 			assert.NoError(t, err)

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,8 @@ import (
 )
 
 var outcomeEvalPRLog = logger.New("cli:outcome_eval_pr")
+var outcomeEvalPRGHAPIGet = ghAPIGet
+var outcomeEvalPRGHAPIGetArray = ghAPIGetArray
 
 // findPRByTimestamp searches for a PR created by github-actions[bot] around the given timestamp.
 // This is a fallback for when the manifest doesn't record the PR number.
@@ -46,7 +49,7 @@ func findPRByTimestamp(repo string, timestamp string) int {
 }
 
 // evalCreatePullRequest checks whether a PR was merged, closed, or is still open.
-func evalCreatePullRequest(item CreatedItemReport, repoOverride string) OutcomeReport {
+func evalCreatePullRequest(ctx context.Context, item CreatedItemReport, repoOverride string) OutcomeReport {
 	repo := resolveItemRepo(item, repoOverride)
 	num := resolveItemNumber(item)
 	outcomeEvalPRLog.Printf("Evaluating create_pull_request: repo=%s, num=%d, url=%s", repo, num, item.URL)
@@ -73,7 +76,7 @@ func evalCreatePullRequest(item CreatedItemReport, repoOverride string) OutcomeR
 		return report
 	}
 
-	data, err := ghAPIGet(fmt.Sprintf("pulls/%d", num), repo)
+	data, err := outcomeEvalPRGHAPIGet(ctx, fmt.Sprintf("pulls/%d", num), repo)
 	if err != nil {
 		report.Result = OutcomeError
 		report.EvalError = err.Error()
@@ -103,20 +106,13 @@ func evalCreatePullRequest(item CreatedItemReport, repoOverride string) OutcomeR
 		report.Detail = "open"
 	}
 
-	// Count human comments (non-bot)
-	comments, err := ghAPIGetArray(fmt.Sprintf("issues/%d/comments", num), repo)
+	comments, err := outcomeEvalPRGHAPIGetArray(ctx, fmt.Sprintf("issues/%d/comments", num), repo)
 	if err == nil {
-		for _, c := range comments {
-			user, _ := c["user"].(map[string]any)
-			login, _ := user["login"].(string)
-			if !isBotUser(login) {
-				report.HumanComments++
-			}
-		}
+		report.HumanComments = countHumanComments(comments)
 	}
 
 	// Count reviews (used for ZeroTouch, stored separately from edits to avoid conflation)
-	reviews, err := ghAPIGetArray(fmt.Sprintf("pulls/%d/reviews", num), repo)
+	reviews, err := outcomeEvalPRGHAPIGetArray(ctx, fmt.Sprintf("pulls/%d/reviews", num), repo)
 	if err == nil {
 		report.HumanReviews = len(reviews)
 	}

@@ -171,10 +171,10 @@ func TestEnsureTrialRepositoryDryRun(t *testing.T) {
 			if tt.expectError {
 				require.Error(t, err, "Expected error for %s", tt.description)
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected text")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected text")
 				}
 			} else {
-				assert.NoError(t, err, "Should not error for %s", tt.description)
+				require.NoError(t, err, "Should not error for %s", tt.description)
 
 				// In dry-run mode with verbose, output should contain dry-run indicators
 				if tt.dryRun && tt.verbose {
@@ -373,9 +373,9 @@ func TestDryRunValidationStillOccurs(t *testing.T) {
 
 			if tt.expectError {
 				require.Error(t, err, "Expected validation error in dry-run mode")
-				assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected text")
+				require.ErrorContains(t, err, tt.errorContains, "Error should contain expected text")
 			} else {
-				assert.NoError(t, err, "Valid input should not error in dry-run mode")
+				require.NoError(t, err, "Valid input should not error in dry-run mode")
 			}
 		})
 	}

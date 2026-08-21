@@ -1,0 +1,40 @@
+{
+  "engines": [
+    {
+      "id": "aider",
+      "import": "github/gh-aw/.github/workflows/shared/aider.md"
+    },
+    {
+      "id": "crush",
+      "import": "github/gh-aw/.github/workflows/shared/crush.md"
+    },
+    {
+      "id": "cursor",
+      "import": "github/gh-aw/.github/workflows/shared/cursor.md"
+    },
+    {
+      "id": "deepseek-harness",
+      "import": "github/gh-aw/.github/workflows/shared/deepseek-harness.md"
+    },
+    {
+      "id": "custom",
+      "import": "github/gh-aw/.github/workflows/shared/genaiscript.md"
+    },
+    {
+      "id": "goose",
+      "import": "github/gh-aw/.github/workflows/shared/goose.md"
+    },
+    {
+      "id": "kiro",
+      "import": "github/gh-aw/.github/workflows/shared/kiro.md"
+    },
+    {
+      "id": "pydantic-ai",
+      "import": "github/gh-aw/.github/workflows/shared/pydantic.md"
+    },
+    {
+      "id": "opencode",
+      "import": "github/gh-aw/.github/workflows/shared/opencode.md"
+    }
+  ]
+}

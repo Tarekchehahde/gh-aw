@@ -70,13 +70,19 @@ func hasLocalModifications(sourceContent, localContent, sourceSpec, localWorkflo
 		sourceResolved = sourceWithSource
 	}
 
-	// Normalize again after processing
+	// Normalize again after processing.
+	// Remove the source field from both before comparing: it is managed by the update
+	// tool (not user-editable content), and its position in the local file may differ
+	// from where the tool would place it (at the end of frontmatter).  Retaining it
+	// causes false-positive "local modifications" detections when the only difference
+	// is source field position, which in turn triggers merge mode and can produce
+	// spurious merge conflict markers.
 	sourceResolvedNormalized := stringutil.NormalizeWhitespace(sourceResolved)
-	if normalized, normalizeErr := UpdateFieldInFrontmatter(sourceResolvedNormalized, "source", "__gh_aw_source__"); normalizeErr == nil {
-		sourceResolvedNormalized = normalized
+	if withoutSource, removeErr := RemoveTopLevelFieldFromFrontmatter(sourceResolvedNormalized, "source"); removeErr == nil {
+		sourceResolvedNormalized = withoutSource
 	}
-	if normalized, normalizeErr := UpdateFieldInFrontmatter(localNormalized, "source", "__gh_aw_source__"); normalizeErr == nil {
-		localNormalized = normalized
+	if withoutSource, removeErr := RemoveTopLevelFieldFromFrontmatter(localNormalized, "source"); removeErr == nil {
+		localNormalized = withoutSource
 	}
 
 	// Compare the normalized contents
@@ -109,8 +115,6 @@ func MergeWorkflowContent(base, current, new, oldSourceSpec, newRefOrSourceSpec,
 		updateMergeLog.Printf("Failed to parse source spec: %v", err)
 		return "", false, fmt.Errorf("failed to parse source spec: %w", err)
 	}
-	currentSourceSpec := fmt.Sprintf("%s/%s@%s", sourceSpec.Repo, sourceSpec.Path, sourceSpec.Ref)
-
 	// Support both legacy ref-only and full source spec for the merge target.
 	newSourceSpec := fmt.Sprintf("%s/%s@%s", sourceSpec.Repo, sourceSpec.Path, newRefOrSourceSpec)
 	if tentativeSourceSpec, parseErr := parseSourceSpec(newRefOrSourceSpec); parseErr == nil {
@@ -122,35 +126,35 @@ func MergeWorkflowContent(base, current, new, oldSourceSpec, newRefOrSourceSpec,
 	}
 	newRef := parsedNewSourceSpec.Ref
 
-	// Fix the base version by adding the source field to match what both current and new have
-	// This prevents unnecessary conflicts over the source field
-	baseWithSource, err := UpdateFieldInFrontmatter(base, "source", currentSourceSpec)
+	// The source field is managed by the updater, not user content. Exclude it from the
+	// textual merge so changing only its ref cannot overlap local frontmatter additions.
+	baseWithoutSource, err := RemoveTopLevelFieldFromFrontmatter(base, "source")
 	if err != nil {
-		if verbose {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to add source to base content: %v", err)))
-		}
-		// Continue with original base content
-		baseWithSource = base
+		return "", false, fmt.Errorf("failed to remove source from base content: %w", err)
+	}
+	currentWithoutSource, err := RemoveTopLevelFieldFromFrontmatter(current, "source")
+	if err != nil {
+		return "", false, fmt.Errorf("failed to remove source from current content: %w", err)
+	}
+	newWithoutSource, err := RemoveTopLevelFieldFromFrontmatter(new, "source")
+	if err != nil {
+		return "", false, fmt.Errorf("failed to remove source from new content: %w", err)
 	}
 
-	// Update the source field in the new content with the new ref
-	newWithUpdatedSource, err := UpdateFieldInFrontmatter(new, "source", newSourceSpec)
-	if err != nil {
-		if verbose {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to update source in new content: %v", err)))
-		}
-		// Continue with original new content
-		newWithUpdatedSource = new
-	}
+	// Normalize whitespace in all three versions to reduce spurious conflicts.
+	baseNormalized := stringutil.NormalizeWhitespace(baseWithoutSource)
+	currentNormalized := stringutil.NormalizeWhitespace(currentWithoutSource)
+	newNormalized := stringutil.NormalizeWhitespace(newWithoutSource)
 
-	// Normalize whitespace in all three versions to reduce spurious conflicts
-	baseNormalized := stringutil.NormalizeWhitespace(baseWithSource)
-	currentNormalized := stringutil.NormalizeWhitespace(current)
-	newNormalized := stringutil.NormalizeWhitespace(newWithUpdatedSource)
-	if normalizedCurrent, normalizeErr := UpdateFieldInFrontmatter(currentNormalized, "source", currentSourceSpec); normalizeErr == nil {
-		currentNormalized = normalizedCurrent
-	} else if verbose {
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to normalize source in current content: %v", normalizeErr)))
+	// If upstream content did not change, only advance the managed source ref.
+	// Avoid invoking git merge-file or include processing, which would rewrite
+	// locally customized frontmatter even though there is nothing to merge.
+	if baseNormalized == newNormalized {
+		updatedCurrent, updateErr := UpdateFieldInFrontmatter(current, "source", newSourceSpec)
+		if updateErr != nil {
+			return "", false, fmt.Errorf("failed to update source in current content: %w", updateErr)
+		}
+		return updatedCurrent, false, nil
 	}
 
 	// Create temporary directory for merge files
@@ -247,6 +251,16 @@ func MergeWorkflowContent(base, current, new, oldSourceSpec, newRefOrSourceSpec,
 		} else {
 			mergedStr = processedContent
 		}
+
+	}
+
+	if hasConflicts {
+		mergedStr, err = updateTopLevelFieldInFrontmatterRaw(mergedStr, "source", newSourceSpec)
+	} else {
+		mergedStr, err = UpdateFieldInFrontmatter(mergedStr, "source", newSourceSpec)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to restore source in merged content: %w", err)
 	}
 
 	return mergedStr, hasConflicts, nil

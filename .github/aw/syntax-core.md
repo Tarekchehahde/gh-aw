@@ -15,10 +15,10 @@ The YAML frontmatter supports these fields:
   - **`forks:`** - Fork allowlist for `pull_request` triggers (array or string). By default, workflows block all forks and only allow same-repo PRs. Use `["*"]` to allow all forks, or specify patterns like `["org/*", "user/repo"]`
   - **`stop-after:`** - Can be included in the `on:` object to set a deadline for workflow execution. Supports absolute timestamps ("YYYY-MM-DD HH:MM:SS") or relative time deltas (+25h, +3d, +1d12h). The minimum unit for relative deltas is hours (h). Uses precise date calculations that account for varying month lengths.
   - **`reaction:`** - Add emoji reactions to triggering items
-  - **`status-comment:`** - Post status comments when workflow starts/completes (boolean). Defaults to `true` for `slash_command` and `label_command` triggers; defaults to `false` for all other triggers. Must be explicitly enabled for non-command triggers with `status-comment: true`.
+  - **`status-comment:`** - Post status comments when workflow starts/completes on the triggering issue, pull request, or discussion (boolean, or object with `issues`/`pull-requests`/`discussions` booleans to control trigger groups independently). Defaults to `true` for `slash_command` and `label_command` triggers; defaults to `false` for all other triggers. Must be explicitly enabled for non-command triggers with `status-comment: true`.
   - **`manual-approval:`** - Require manual approval using environment protection rules
   - **`skip-roles:`** - Skip workflow execution for users with specific repository roles (array)
-    - Available roles: `admin`, `maintainer`, `write`, `read`
+    - Available roles: `admin`, `maintainer`/`maintain`, `write`, `triage`, `read`
     - Example: `skip-roles: [read]` - Skip execution for users with read-only access
   - **`skip-bots:`** - Skip workflow execution when triggered by specific GitHub actors (array)
     - Bot name matching is flexible (handles with/without `[bot]` suffix)
@@ -162,3 +162,5 @@ The YAML frontmatter supports these fields:
 
   - Never commit plaintext secrets
   - For reusable workflows, use `jobs.<job_id>.secrets` instead
+- **`excluded-env:`** - Optional list of environment variable names to unconditionally exclude from the AWF agent container via `--exclude-env` (array of strings). Use when an env var carries a credential the compiler cannot auto-detect (for example a `workflow_dispatch` input holding a token). Names are deduplicated and merged with those auto-detected from `secrets.*` and `needs.*.outputs.*` references.
+  - Example: `excluded-env: [MY_DISPATCH_TOKEN, GH_TOKEN]`

@@ -23,11 +23,11 @@ MCP server configurations in your agentic workflows.
 
 Available subcommands:
   - list       - List MCP servers defined in agentic workflows
-  - list-tools - List tools for a specific MCP server, or find workflows using it
+  - list-tools - List available tools for a specific MCP server, or find workflows using it
   - inspect    - Inspect MCP servers and list available tools, resources, and roots
   - add        - Add an MCP server to an agentic workflow`,
 		Example: `  gh aw mcp list                              # List all workflows with MCP servers
-  gh aw mcp inspect weekly-research           # Inspect MCP servers in workflow
+  gh aw mcp inspect weekly-research           # Inspect MCP servers in a workflow
   gh aw mcp add my-workflow tavily            # Add Tavily MCP server to workflow
   gh aw mcp inspect weekly-research --server github --tool create_issue  # Inspect specific tool`,
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -42,6 +42,7 @@ Available subcommands:
 	}
 
 	// Add subcommands
+	cmd.AddCommand(newLegacyGHGuardSubcommand())
 	cmd.AddCommand(NewMCPAddSubcommand())
 	cmd.AddCommand(NewMCPListSubcommand())
 	cmd.AddCommand(NewMCPListToolsSubcommand())

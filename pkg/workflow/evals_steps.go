@@ -41,7 +41,12 @@ func (c *Compiler) buildEvalsJobSteps(data *WorkflowData) []string {
 	steps = append(steps, c.buildCleanFirewallDirsStep()...)
 
 	// Step 2: Pre-pull AWF container images for faster engine execution.
-	steps = append(steps, c.buildPullAWFContainersStep(data)...)
+	// For codex, buildEvalsEngineSteps calls generateMCPSetup which already emits
+	// the Docker download step via generateDownloadDockerImagesStep, so skip here
+	// to avoid a duplicate "Download container images" step name.
+	if c.getEvalsEngineID(data) != string(constants.CodexEngine) {
+		steps = append(steps, c.buildPullAWFContainersStep(data)...)
+	}
 
 	// Step 3: Copy agent output files into the evals working directory.
 	steps = append(steps, buildPrepareEvalsFilesStep()...)
@@ -55,16 +60,38 @@ func (c *Compiler) buildEvalsJobSteps(data *WorkflowData) []string {
 	// Steps 6 & 7: Install engine and execute via AWF (network-restricted sandbox).
 	steps = append(steps, c.buildEvalsEngineSteps(data)...)
 
-	// Step 8: Parse engine output and write evals.jsonl.
+	// Step 8: Parse MCP gateway logs to capture evals job AIC output.
+	steps = append(steps, c.buildParseMCPGatewayLogStep(data)...)
+
+	// Step 9: Parse engine output and write evals.jsonl.
 	steps = append(steps, c.buildParseEvalsResultsStep(data)...)
 
-	// Step 9: Redact secrets from evals results before upload.
+	// Step 10: Redact secrets from evals results before upload.
 	steps = append(steps, c.buildRedactEvalsSecretsStep(data)...)
 
-	// Step 10: Upload evals.jsonl as the evals artifact.
+	// Step 11: Render evals results as a progressive disclosure step summary section.
+	// Runs after redaction so the published summary is always free of secrets.
+	steps = append(steps, c.buildRenderEvalsSummaryStep(data)...)
+
+	// Step 12: Upload evals.jsonl as the evals artifact.
 	steps = append(steps, c.buildUploadEvalsArtifactStep(data)...)
 
 	return steps
+}
+
+func (c *Compiler) buildParseMCPGatewayLogStep(data *WorkflowData) []string {
+	return []string{
+		"      - name: Parse MCP Gateway logs for step summary\n",
+		"        if: always()\n",
+		fmt.Sprintf("        id: %s\n", constants.ParseMCPGatewayStepID),
+		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)),
+		"        with:\n",
+		"          script: |\n",
+		"            const { setupGlobals } = require('" + SetupActionDestination + "/setup_globals.cjs');\n",
+		"            setupGlobals(core, github, context, exec, io, getOctokit);\n",
+		"            const { main } = require('${{ runner.temp }}/gh-aw/actions/parse_mcp_gateway_log.cjs');\n",
+		"            await main();\n",
+	}
 }
 
 // buildPrepareEvalsFilesStep creates a step that copies agent output files into the
@@ -99,10 +126,7 @@ func (c *Compiler) buildSetupEvalsStep(data *WorkflowData) []string {
 	}
 
 	questionsJSON := marshalEvalsQuestions(data.Evals.Questions)
-	model := data.Evals.Model
-	if model == "" {
-		model = "small"
-	}
+	model := c.resolveEvalsExecutionModel(data)
 
 	script := `const { setupGlobals } = require('` + SetupActionDestination + `/setup_globals.cjs');
 setupGlobals(core, github, context, exec, io, getOctokit);
@@ -115,11 +139,13 @@ await main();`
 		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)),
 		"        env:\n",
 		fmt.Sprintf("          GH_AW_EVALS_QUESTIONS: '%s'\n", escapeYAMLSingleQuoted(questionsJSON)),
-		fmt.Sprintf("          GH_AW_EVALS_MODEL: %q\n", model),
+	}
+	steps = appendEvalsModelEnvLines(steps, c.getEvalsEngineID(data), model)
+	steps = append(steps,
 		"          GH_AW_EVALS_PHASE: setup\n",
 		"        with:\n",
 		"          script: |\n",
-	}
+	)
 	steps = append(steps, FormatJavaScriptForYAML(script)...)
 	return steps
 }
@@ -147,24 +173,11 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string {
 		}
 	}
 
-	// Override model from evals frontmatter if specified.
-	if data.Evals != nil && data.Evals.Model != "" {
-		evalsEngineConfig.Model = data.Evals.Model
-	}
-
-	// Apply engine and enterprise default detection model (cost-effective for Q&A tasks).
+	// Apply eval-specific engine/default model configuration.
 	engine, err := c.getAgenticEngine(engineID)
 	if err != nil {
 		return []string{
 			"      # Evals engine not available, skipping engine installation and execution\n",
-		}
-	}
-
-	if evalsEngineConfig.Model == "" {
-		if defaultModel := compilerenv.ResolveDefaultDetectionModel(""); defaultModel != "" {
-			evalsEngineConfig.Model = defaultModel
-		} else if defaultModel := engine.GetDefaultDetectionModel(); defaultModel != "" {
-			evalsEngineConfig.Model = defaultModel
 		}
 	}
 
@@ -173,33 +186,35 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string {
 		evalsEngineConfig.APITarget = data.EngineConfig.APITarget
 	}
 
-	// Normalize Pi engine model to bare model ID for Copilot CLI.
-	originalEngineID := data.AI
-	if data.EngineConfig != nil && data.EngineConfig.ID != "" {
-		originalEngineID = data.EngineConfig.ID
-	}
-	if engineID == "copilot" && originalEngineID == "pi" {
-		evalsEngineConfig.Model = extractPiModelID(evalsEngineConfig.Model)
-	}
-
 	// Build a minimal WorkflowData for evals engine execution.
-	// IsDetectionRun reuses detection-style network restrictions and MaxAI credits,
-	// which are appropriate for binary (YES/NO) evaluation tasks.
+	// Keep IsDetectionRun=false so eval runs do not opt into detection-only
+	// structured output/log paths (detection_schema.json / detection_result.json),
+	// which can pollute eval logs with detection JSON and yield UNKNOWN answers.
 	// RunnerConfig is propagated from the main workflow data so that arc-dind topology
 	// handling (daemon-visible Copilot staging step + daemon-visible spawn path) applies
 	// to the evals job the same way it applies to the agent job.
+	// ModelMappings is propagated so the evals awf-config.json includes the alias map
+	// (apiProxy.models). Without it, copilot_harness.cjs cannot resolve alias model names
+	// (e.g. "small") to concrete ids before spawning the engine in the evals job.
+	// ModelCosts is propagated so evals awf-config.json includes provider pricing overlays
+	// (apiProxy.providers), allowing max-ai-credits pricing lookup for custom/BYOK models.
 	evalsData := &WorkflowData{
 		Tools: map[string]any{
 			"bash": []any{"*"},
 		},
 		SafeOutputs:       nil,
+		Model:             c.resolveEvalsExecutionModel(data),
 		EngineConfig:      evalsEngineConfig,
 		AI:                engineID,
 		Features:          data.Features,
 		Permissions:       data.Permissions,
 		CachedPermissions: data.CachedPermissions,
-		IsDetectionRun:    true,
-		RunnerConfig:      data.RunnerConfig, // propagate runner.topology (e.g. arc-dind) to the evals job
+		IsDetectionRun:    false,
+		IsEvalsRun:        true,
+		RunnerConfig:      data.RunnerConfig,    // propagate runner.topology (e.g. arc-dind) to the evals job
+		ModelMappings:     data.ModelMappings,   // propagate alias map so evals awf-config.json can resolve model aliases
+		ModelCosts:        data.ModelCosts,      // propagate pricing providers so evals awf-config.json can resolve AI-credit costs
+		CompiledVersion:   data.CompiledVersion, // propagate compiler version so install steps can inject GH_AW_COMPILED_VERSION
 		NetworkPermissions: &NetworkPermissions{
 			Allowed: getThreatDetectionAdditionalAllowedDomains(data),
 		},
@@ -208,6 +223,17 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string {
 				Type: SandboxTypeAWF,
 			},
 		},
+	}
+	if firewallConfig := getFirewallConfig(data); firewallConfig != nil {
+		firewallCopy := *firewallConfig
+		evalsData.NetworkPermissions.Firewall = &firewallCopy
+		if evalsData.SandboxConfig == nil {
+			evalsData.SandboxConfig = &SandboxConfig{}
+		}
+		if evalsData.SandboxConfig.Agent == nil {
+			evalsData.SandboxConfig.Agent = &AgentSandboxConfig{Type: SandboxTypeAWF}
+		}
+		evalsData.SandboxConfig.Agent.Version = firewallCopy.Version
 	}
 
 	var steps []string
@@ -245,9 +271,22 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string {
 	// Execute the engine through AWF; output is written to evalsLogPath.
 	executionSteps := engine.GetExecutionSteps(evalsData, evalsLogPath)
 	for _, step := range executionSteps {
-		// Track whether we've injected the if/continue-on-error fields yet
+		// injected and skipNextIf are intentionally scoped per-step (declared inside the
+		// outer loop) so they reset to false for each new step, preventing carry-over.
+		// skipNextIf is set after injection so that a step's own "if: always()" field
+		// (e.g. behavior-defined log-parser write steps) is dropped in favour of the
+		// injected condition, avoiding YAML duplicate mapping keys.
 		injected := false
+		skipNextIf := false
 		for _, line := range step {
+			// If the previous line was the name line and we just injected an if: condition,
+			// drop the step's original if: field to avoid a YAML duplicate mapping key.
+			if skipNextIf {
+				skipNextIf = false
+				if strings.HasPrefix(strings.TrimSpace(line), "if:") {
+					continue
+				}
+			}
 			// Prefix the agentic_execution step ID to avoid collisions with the agent job step
 			// IDs — job managers validate for duplicate step IDs across the compiled YAML.
 			// This mirrors the same pattern used in buildDetectionEngineExecutionStep (see
@@ -263,6 +302,7 @@ func (c *Compiler) buildEvalsEngineSteps(data *WorkflowData) []string {
 				steps = append(steps, "        if: always()\n")
 				steps = append(steps, "        continue-on-error: true\n")
 				injected = true
+				skipNextIf = true
 			}
 		}
 	}
@@ -278,10 +318,7 @@ func (c *Compiler) buildParseEvalsResultsStep(data *WorkflowData) []string {
 	}
 
 	questionsJSON := marshalEvalsQuestions(data.Evals.Questions)
-	model := data.Evals.Model
-	if model == "" {
-		model = "small"
-	}
+	model := c.resolveEvalsExecutionModel(data)
 
 	script := `const { setupGlobals } = require('` + SetupActionDestination + `/setup_globals.cjs');
 setupGlobals(core, github, context, exec, io, getOctokit);
@@ -295,11 +332,14 @@ await main();`
 		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)),
 		"        env:\n",
 		fmt.Sprintf("          GH_AW_EVALS_QUESTIONS: '%s'\n", escapeYAMLSingleQuoted(questionsJSON)),
-		fmt.Sprintf("          GH_AW_EVALS_MODEL: %q\n", model),
+	}
+	steps = appendEvalsModelEnvLines(steps, c.getEvalsEngineID(data), model)
+	steps = append(steps,
 		"          GH_AW_EVALS_PHASE: parse\n",
+		"          GITHUB_RUN_ID: ${{ github.run_id }}\n",
 		"        with:\n",
 		"          script: |\n",
-	}
+	)
 	steps = append(steps, FormatJavaScriptForYAML(script)...)
 	return steps
 }
@@ -309,12 +349,50 @@ await main();`
 func (c *Compiler) buildRedactEvalsSecretsStep(data *WorkflowData) []string {
 	script := `const { setupGlobals } = require('` + SetupActionDestination + `/setup_globals.cjs');
 setupGlobals(core, github, context, exec, io, getOctokit);
-const { main } = require('` + SetupActionDestination + `/redact_secrets.cjs');
+const { main } = require('` + SetupActionDestination + `/redact_evals_results.cjs');
 await main();`
+
+	secretReferences := c.collectEvalsSecretReferences(data)
 
 	steps := []string{
 		"      - name: Redact secrets in evals results\n",
+		"        id: redact_evals_results\n",
 		"        if: always()\n",
+		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)),
+	}
+	if len(secretReferences) > 0 {
+		steps = append(steps, "        env:\n")
+		escapedRefs := make([]string, len(secretReferences))
+		for i, ref := range secretReferences {
+			escapedRefs[i] = escapeSingleQuoteBackslash(ref)
+		}
+		steps = append(steps, fmt.Sprintf("          GH_AW_SECRET_NAMES: '%s'\n", strings.Join(escapedRefs, ",")))
+		for _, secretName := range secretReferences {
+			escapedSecretName := escapeSingleQuoteBackslash(secretName)
+			steps = append(steps, fmt.Sprintf("          SECRET_%s: ${{ secrets.%s }}\n", escapedSecretName, secretName))
+		}
+	}
+	steps = append(steps,
+		"        with:\n",
+		"          script: |\n",
+	)
+	steps = append(steps, FormatJavaScriptForYAML(script)...)
+	return steps
+}
+
+// buildRenderEvalsSummaryStep creates a step that reads the redacted evals.jsonl
+// and renders the results as a collapsible progressive disclosure section in the
+// GitHub Actions step summary. Running after secret redaction ensures no credentials
+// appear in the published summary.
+func (c *Compiler) buildRenderEvalsSummaryStep(data *WorkflowData) []string {
+	script := `const { setupGlobals } = require('` + SetupActionDestination + `/setup_globals.cjs');
+setupGlobals(core, github, context, exec, io, getOctokit);
+const { main } = require('` + SetupActionDestination + `/render_evals_summary.cjs');
+await main();`
+
+	steps := []string{
+		"      - name: Render evals results to step summary\n",
+		"        if: steps.redact_evals_results.outcome == 'success'\n",
 		"        continue-on-error: true\n",
 		fmt.Sprintf("        uses: %s\n", getCachedActionPin("actions/github-script", data)),
 		"        with:\n",
@@ -330,7 +408,7 @@ func (c *Compiler) buildUploadEvalsArtifactStep(data *WorkflowData) []string {
 	evalsArtifactName := artifactPrefixExprForDownstreamJob(data) + constants.EvalsArtifactName
 	return []string{
 		"      - name: Upload evals results\n",
-		"        if: always()\n",
+		"        if: steps.redact_evals_results.outcome == 'success'\n",
 		fmt.Sprintf("        uses: %s\n", c.getActionPin("actions/upload-artifact")),
 		"        with:\n",
 		"          name: " + evalsArtifactName + "\n",
@@ -353,6 +431,72 @@ func (c *Compiler) getEvalsEngineID(data *WorkflowData) string {
 		return data.AI
 	}
 	return "copilot"
+}
+
+func (c *Compiler) resolveEvalsExecutionModel(data *WorkflowData) string {
+	model := ""
+	if data.Model != "" {
+		model = data.Model
+	}
+	if data.Evals != nil && data.Evals.Model != "" {
+		model = data.Evals.Model
+	}
+
+	engineID := c.getEvalsEngineID(data)
+	if model == "" {
+		if defaultModel := compilerenv.ResolveDefaultEvalsModel(""); defaultModel != "" {
+			model = defaultModel
+		}
+	}
+	if model == "" {
+		model = "evals"
+	}
+
+	originalEngineID := data.AI
+	if data.EngineConfig != nil && data.EngineConfig.ID != "" {
+		originalEngineID = data.EngineConfig.ID
+	}
+	if engineID == "copilot" && originalEngineID == "pi" {
+		model = extractPiModelID(model)
+	}
+
+	return model
+}
+
+func appendEvalsModelEnvLines(steps []string, engineID, model string) []string {
+	hasExpression := containsExpression(model)
+	modelValue := fmt.Sprintf("%q", model)
+	if hasExpression {
+		modelValue = model
+	}
+	steps = append(steps, fmt.Sprintf("          GH_AW_EVALS_MODEL: %s\n", modelValue))
+	if !hasExpression {
+		return steps
+	}
+	if fallback := buildEvalsModelFallbackExpression(engineID); fallback != "" {
+		steps = append(steps, fmt.Sprintf("          %s: %s\n", constants.EnvVarModelFallback, fallback))
+	}
+	return steps
+}
+
+func buildEvalsModelFallbackExpression(engineID string) string {
+	switch engineID {
+	case string(constants.CopilotEngine):
+		return compilerenv.BuildModelOverrideExpression(constants.EnvVarModelEvalsCopilot, compilerenv.DefaultModelCopilot, constants.CopilotBYOKDefaultModel)
+	case string(constants.ClaudeEngine):
+		return compilerenv.BuildModelOverrideExpression(constants.EnvVarModelEvalsClaude, compilerenv.DefaultModelClaude, constants.SonnetDefaultModel)
+	case string(constants.CodexEngine):
+		return compilerenv.BuildModelOverrideExpression(constants.EnvVarModelEvalsCodex, compilerenv.DefaultModelCodex, constants.CodexDefaultModel)
+	default:
+		return ""
+	}
+}
+
+func (c *Compiler) collectEvalsSecretReferences(data *WorkflowData) []string {
+	if data.Evals == nil {
+		return nil
+	}
+	return CollectSecretReferences(marshalEvalsQuestions(data.Evals.Questions) + "\n" + c.resolveEvalsExecutionModel(data))
 }
 
 // ---------------------------------------------------------------------------

@@ -12,8 +12,7 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    id: awf
 engine: claude
 strict: true
 tools:
@@ -59,6 +58,17 @@ checkout:
   fetch: ["*"]
   fetch-depth: 0
 timeout-minutes: 45
+models:
+  default-ai-credits-pricing:
+    input: 5.0
+    output: 25.0
+evals:
+  - id: git_scenarios_simulated
+    question: Did the agent simulate git configurations for create-pull-request and push-to-pull-request-branch safe outputs?
+  - id: simulator_findings_reported
+    question: Did the agent report the simulator results and any systematic safe-output issues it found?
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Safe Outputs Git Simulator
@@ -306,6 +316,12 @@ If any failures were found, the `create_issue` calls from Phase 4 are sufficient
 - **stuff.md and history.md are content files** — they appear in the PR branch as documentation of the simulated scenario, not as real manifests
 - **Do NOT provide mitigations** in issue bodies — this workflow is purely diagnostic
 - **Engine is Claude** — use bash freely to build local git repos and generate patches
+
+## Reporting Guidelines
+
+- Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body.
+- Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks for progressive disclosure.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
 
 ---
 

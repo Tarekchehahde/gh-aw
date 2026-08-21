@@ -33,8 +33,8 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("")).toBe("");
   });
 
-  it("trims leading whitespace before matching", () => {
-    expect(parseSlashCommand("  /smoke-copilot-sdk")).toBe("smoke-copilot-sdk");
+  it("returns empty string when a command does not start at character zero", () => {
+    expect(parseSlashCommand("  /smoke-copilot-sdk")).toBe("");
   });
 
   it("does not match when command is followed by punctuation", () => {
@@ -208,7 +208,7 @@ describe("route_slash_command", () => {
   it("creates an immediate status comment once and forwards it in aw_context", async () => {
     process.env.GH_AW_SLASH_ROUTING = JSON.stringify({
       archie: [
-        { workflow: "archie", events: ["issue_comment"], ai_reaction: "eyes", status_comment: true },
+        { workflow: "archie", events: ["issue_comment"], ai_reaction: "eyes", emoji: "🤖", status_comment: true },
         { workflow: "archie-secondary", events: ["issue_comment"], ai_reaction: "eyes", status_comment: true },
       ],
     });
@@ -245,14 +245,14 @@ describe("route_slash_command", () => {
     expect(awContext.status_comment_repo).toBe("github/gh-aw");
     expect(JSON.parse(dispatchCalls[1].inputs.aw_context).status_comment_id).toBe("999");
     expect(globals.github.request.mock.calls.filter(([route]) => String(route).includes("/reactions"))).toHaveLength(1);
-    expect(globals.github.request.mock.calls.filter(([route]) => /\/issues\/77\/comments$/.test(String(route)))).toHaveLength(1);
+    expect(globals.github.request.mock.calls.filter(([route]) => route === "POST /repos/{owner}/{repo}/issues/{issue_number}/comments")).toHaveLength(1);
     const statusUpdateCalls = globals.github.request.mock.calls.filter(([route]) => String(route).startsWith("PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}"));
     expect(statusUpdateCalls.length).toBeGreaterThan(0);
-    expect(statusUpdateCalls[0][1].body).toContain("[archie](https://github.com/github/gh-aw/actions/runs/444)");
+    expect(statusUpdateCalls[0][1].body).toMatch(/^🤖 \[archie\]\(https:\/\/github\.com\/github\/gh-aw\/actions\/runs\/444\) has started processing this issue comment/s);
     expect(globals.github.request).toHaveBeenCalledWith(
-      expect.stringContaining("/issues/77/comments"),
+      "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
       expect.objectContaining({
-        body: expect.stringContaining("has started processing this issue comment"),
+        body: expect.stringMatching(/^🤖 .*has started processing this issue comment/s),
       })
     );
   });
@@ -518,7 +518,7 @@ describe("route_slash_command", () => {
     await main();
     expect(dispatchCalls).toHaveLength(1);
     expect(reactionCalls).toHaveLength(1);
-    expect(reactionCalls[0][0]).toBe("POST /repos/github/gh-aw/issues/42/reactions");
+    expect(reactionCalls[0][0]).toBe("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions");
   });
 
   it("adds immediate reaction for pull_request events using PR number", async () => {
@@ -530,7 +530,7 @@ describe("route_slash_command", () => {
     await main();
     expect(dispatchCalls).toHaveLength(1);
     expect(reactionCalls).toHaveLength(1);
-    expect(reactionCalls[0][0]).toBe("POST /repos/github/gh-aw/issues/7/reactions");
+    expect(reactionCalls[0][0]).toBe("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions");
   });
 
   it("adds immediate reaction for pull_request_review_comment events using comment id", async () => {
@@ -542,7 +542,7 @@ describe("route_slash_command", () => {
     await main();
     expect(dispatchCalls).toHaveLength(1);
     expect(reactionCalls).toHaveLength(1);
-    expect(reactionCalls[0][0]).toBe("POST /repos/github/gh-aw/pulls/comments/99/reactions");
+    expect(reactionCalls[0][0]).toBe("POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions");
   });
 
   it("adds immediate reaction for discussion_comment events using node_id", async () => {
@@ -578,18 +578,20 @@ describe("route_slash_command", () => {
       pull_request: { number: 23 },
     };
     process.env.GH_AW_LABEL_ROUTING = JSON.stringify({
-      "ci-doctor": [{ workflow: "ci-doctor", events: ["pull_request"], ai_reaction: "eyes" }],
+      "ci-doctor": [{ workflow: "ci-doctor", events: ["pull_request"], ai_reaction: "eyes", emoji: "🏷️", status_comment: true }],
     });
 
     await main();
 
     expect(dispatchCalls).toHaveLength(1);
     expect(dispatchCalls[0].workflow_id).toBe("ci-doctor.lock.yml");
-    expect(reactionCalls).toHaveLength(1);
+    expect(reactionCalls.filter(([route]) => String(route).includes("/reactions"))).toHaveLength(1);
     const awContext = JSON.parse(dispatchCalls[0].inputs.aw_context);
     expect(awContext.command_name).toBe("");
     expect(awContext.trigger_label).toBe("ci-doctor");
     expect(awContext.desired_ai_reaction).toBe("eyes");
+    expect(awContext.status_comment_id).toBe("1");
+    expect(globals.github.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringMatching(/^🏷️ .*has started processing this pull request/s) }));
   });
 
   it("dispatches decentralized label routes on issue-backed PR labels to the PR head branch", async () => {
@@ -777,6 +779,19 @@ describe("route_slash_command", () => {
     expect(dispatchCalls[0].workflow_id).toBe("skillet.lock.yml");
     const awContext = JSON.parse(dispatchCalls[0].inputs.aw_context);
     expect(awContext.command_name).toBe("developer");
+  });
+
+  it("does not dispatch catch-all skillet when a specific route matches", async () => {
+    process.env.GH_AW_SLASH_ROUTING = JSON.stringify({
+      "*": [{ workflow: "skillet", events: ["issue_comment"] }],
+      "smoke-opencode": [{ workflow: "smoke-opencode", events: ["issue_comment"] }],
+    });
+    globals.context.payload.comment.body = "/smoke-opencode";
+
+    await main();
+
+    expect(dispatchCalls).toHaveLength(1);
+    expect(dispatchCalls[0].workflow_id).toBe("smoke-opencode.lock.yml");
   });
 
   it("does not dispatch smoke-copilot-sdk when command is smoke-copilot", async () => {

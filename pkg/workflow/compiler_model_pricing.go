@@ -1,11 +1,11 @@
 package workflow
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/ctxutil"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
@@ -20,17 +20,17 @@ var compilerModelPricingLog = logger.New("workflow:compiler_model_pricing")
 // Frontmatter-provided pricing always takes precedence; models already present in the
 // embedded actions/setup/js/models.json are skipped by the resolver (the runtime will
 // supply their pricing without an override).
-func (c *Compiler) resolveModelPricingIfMissing(modelCosts map[string]any, engineConfig *EngineConfig) map[string]any {
+func (c *Compiler) resolveModelPricingIfMissing(modelCosts map[string]any, workflowData *WorkflowData) map[string]any {
 	if c.modelPricingResolver == nil {
 		return modelCosts
 	}
-	if engineConfig == nil || engineConfig.Model == "" {
+	if workflowData == nil || workflowData.Model == "" {
 		return modelCosts
 	}
 
-	provider, model, ok := resolveProviderAndModelForPricing(engineConfig)
+	provider, model, ok := resolveProviderAndModelForPricing(workflowData)
 	if !ok {
-		compilerModelPricingLog.Printf("Skipping external pricing lookup: unable to normalize provider/model for %q", engineConfig.Model)
+		compilerModelPricingLog.Printf("Skipping external pricing lookup: unable to normalize provider/model for %q", workflowData.Model)
 		return modelCosts
 	}
 
@@ -40,10 +40,7 @@ func (c *Compiler) resolveModelPricingIfMissing(modelCosts map[string]any, engin
 		return modelCosts
 	}
 
-	ctx := c.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx := ctxutil.OrBackground(c.ctx)
 
 	pricing, ok := c.modelPricingResolver(ctx, provider, model)
 	if !ok || len(pricing) == 0 {
@@ -59,8 +56,11 @@ func (c *Compiler) resolveModelPricingIfMissing(modelCosts map[string]any, engin
 // lookup. It checks the EngineConfig fields in priority order and falls back to a
 // well-known mapping from engine ID.
 func resolveEngineProviderForPricing(engineConfig *EngineConfig) string {
+	if engineConfig == nil {
+		return "github-copilot" // default provider when no engine is specified
+	}
 	if engineConfig.LLMProvider != "" {
-		return normalizeProviderForPricing(engineConfig.LLMProvider)
+		return normalizeProviderForPricing(string(engineConfig.LLMProvider))
 	}
 	if engineConfig.InlineProviderID != "" {
 		return normalizeProviderForPricing(engineConfig.InlineProviderID)
@@ -87,9 +87,9 @@ func normalizeProviderForPricing(provider string) string {
 	}
 }
 
-func resolveProviderAndModelForPricing(engineConfig *EngineConfig) (string, string, bool) {
-	provider := resolveEngineProviderForPricing(engineConfig)
-	model := strings.ToLower(strings.TrimSpace(engineConfig.Model))
+func resolveProviderAndModelForPricing(workflowData *WorkflowData) (string, string, bool) {
+	provider := resolveEngineProviderForPricing(workflowData.EngineConfig)
+	model := strings.ToLower(strings.TrimSpace(workflowData.Model))
 	if model == "" {
 		return "", "", false
 	}
@@ -108,7 +108,15 @@ func resolveProviderAndModelForPricing(engineConfig *EngineConfig) (string, stri
 	if provider == "" || model == "" {
 		return "", "", false
 	}
+	if isDynamicModelAliasForPricing(model) {
+		compilerModelPricingLog.Printf("Skipping external pricing lookup for dynamic model alias %q", model)
+		return "", "", false
+	}
 	return provider, model, true
+}
+
+func isDynamicModelAliasForPricing(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), "auto")
 }
 
 // modelCostsHasPricingFor reports whether the ModelCosts overlay already contains a models

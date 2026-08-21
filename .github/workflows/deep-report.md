@@ -3,9 +3,7 @@ private: true
 emoji: "🔬"
 description: Intelligence gathering agent that continuously reviews and aggregates information from agent-generated reports in discussions
 on:
-  schedule:
-    # ~3 PM UTC, weekdays only (scattered to avoid thundering herd)
-    - cron: "daily around 15:00 on weekdays"
+  schedule: every 6 hours
   workflow_dispatch:
 
 permissions:
@@ -15,10 +13,8 @@ permissions:
   pull-requests: read
   discussions: read
   security-events: read
+  copilot-requests: write
 
-sandbox:
-  agent:
-    sudo: false
 
 tracker-id: deep-report-intel-agent
 timeout-minutes: 45
@@ -27,18 +23,18 @@ strict: true
 
 experiments:
   output_format:
-    variants: [full_briefing, executive_brief, annotated_brief]
-    description: "Tests whether report verbosity and structure affect token cost and discussion engagement"
-    hypothesis: "H0: no change in discussion engagement or token cost. H1: executive_brief reduces token usage by ≥20% without reducing engagement; annotated_brief improves actionability."
+    variants: [full_briefing, executive_brief, annotated_brief, ste]
+    description: "Tests whether report verbosity, structure, or Simplified Technical English (STE) phrasing affect token cost and discussion engagement"
+    hypothesis: "H0: no change in discussion engagement or token cost. H1: executive_brief reduces token usage by ≥20% without reducing engagement; annotated_brief improves actionability; ste improves clarity while reducing token usage."
     metric: token_count
-    secondary_metrics: [discussion_reactions, discussion_replies, output_char_length, run_duration_ms]
+    secondary_metrics: [discussion_reactions, discussion_replies, output_char_length, run_duration_ms, "eval:output_format_goal_met"]
     guardrail_metrics:
       - name: empty_output_rate
         threshold: "==0"
       - name: issue_creation_success_rate
         threshold: ">=0.8"
     min_samples: 15
-    weight: [34, 33, 33]
+    weight: [25, 25, 25, 25]
     start_date: "2026-05-06"
     analysis_type: mann_whitney
     tags: [output-format, token-cost, engagement, daily]
@@ -49,9 +45,13 @@ network:
     - python
     - node
 
+features:
+  gh-aw-detection: true
 safe-outputs:
   upload-artifact:
     retention-days: 30
+  add-comment:
+    max: 3
   create-discussion:
     category: "audits"
     max: 1
@@ -59,7 +59,8 @@ safe-outputs:
   create-issue:
     expires: 2d
     title-prefix: "[deep-report] "
-    labels: [automation, improvement, quick-win, cookie]
+    deduplicate-by-title: 28
+    labels: [automation, improvement, quick-win, cookie, code-quality, task-mining]
     max: 7
     group: true
 
@@ -67,11 +68,13 @@ tools:
   repo-memory:
     branch-name: memory/deep-report
     description: "Long-term insights, patterns, and trend data"
-    file-glob: ["*.md"]
+    file-glob: ["*.md", "*.json"]
     max-file-size: 1048576  # 1MB
+    max-patch-size: 51200  # 50KB - default (10KB) is too small for a full analysis cycle's diff
   bash:
     - "*"
   edit:
+  cli-proxy: true
 
 imports:
   - uses: shared/meta-analysis-base.md
@@ -82,9 +85,19 @@ imports:
   - shared/mcp/agentdb.md
   - shared/weekly-issues-data-fetch.md
   - shared/reporting.md
+  - shared/github-mcp-pagination-wrappers.md
 
 
   - shared/otlp.md
+  - shared/default-ai-credits-pricing.md
+evals:
+  - id: output_format_goal_met
+    question: Does the report's writing style match the assigned output_format variant (e.g., short active-voice sentences with one fact per sentence when the variant is "ste")?
+  - id: tasks-extracted
+    question: Does the agent output show that actionable tasks were identified from the analyzed discussions?
+  - id: labels-applied
+    question: Does the agent output confirm that the created issues include the expected labels (code-quality, automation, task-mining)?
+
 ---
 
 ### DeepReport - Intelligence Gathering Agent
@@ -145,8 +158,8 @@ Schema is available at `/tmp/gh-aw/agent/weekly-issues-data/issues-schema.json`.
 
 **EFFICIENCY FIRST**: Before starting full analysis:
 
-1. Check `/tmp/gh-aw/repo-memory/default/memory/deep-report/` for previous insights
-2. Load any existing markdown files (only markdown files are allowed in repo-memory):
+1. Check `/tmp/gh-aw/repo-memory/default/deep-report/` for previous insights
+2. Load any existing memory files (markdown and JSON are allowed in repo-memory):
    - `last_analysis_timestamp.md` - When the last full analysis was run
    - `known_patterns.md` - Previously identified patterns
    - `trend_data.md` - Historical trend data
@@ -179,10 +192,38 @@ Use the gh-aw `logs` tool to:
    - Token usage patterns
    - Execution time trends
    - Firewall activity (if enabled)
+3. For any run flagged as risky due to an actuation posture change (for example `write_capable` → `read_only`), run `audit` and inspect failed job logs before drawing conclusions.
+   - If checkout/setup fails first (for example git fetch/checkout 5xx, missing setup modules, or workspace prep errors), classify it as an infrastructure/preflight failure.
+   - Classify `Failed to resolve action download info` with `Service Unavailable` or `Internal Server Error` as a GitHub Actions infrastructure/preflight failure, even when it occurs in a post-agent job such as safe outputs or cache persistence.
+   - Only describe a "silent partial-write" degradation when there is evidence the agent reached actuation and attempted write-capable behavior.
+
+**Success Rate Rollups — Exclude Intentional-Failure Workflows**: When computing fleet-wide or prod-main success rates, **exclude** runs where `intentional_failure` is `true`. These are credit-guardrail stress tests designed to fail; including them depresses the real-regression baseline. The `logs` tool marks them via `runs[].intentional_failure` and `summary.intentional_failure_runs`. Always report the adjusted rate alongside the raw rate, e.g. `"92.7% raw (94.2% excl. intentional failures)"`.
+
+Intentional-failure workflows (always exclude from success-rate rollups):
+- `Daily Credit Limit Test` — `max-daily-ai-credits` guardrail test, expected to fail
+- `Daily Max AI Credits Test` — `max-ai-credits` per-run firewall test, expected to fail
 
 ### Step 2.5: Analyze Repository Issues
 
 Use the `issues-analyst` sub-agent to analyze `/tmp/gh-aw/agent/weekly-issues-data/issues.json` and produce a structured issues summary.
+
+### Step 2.7: Mine Discussions for Code Quality Tasks
+
+In addition to the broad intelligence gathering above, perform targeted **code quality task mining** on the same discussions data:
+
+1. Load `/tmp/gh-aw/repo-memory/default/deep-report/processed-discussions.json` (repo-memory) to find which discussions were previously mined — skip re-processing those.
+2. For each unprocessed discussion from the last 7 days, extract tasks that meet **all** of the following criteria:
+   - **Specific**: clear scope and acceptance criteria
+   - **Actionable**: can be completed by an AI agent or developer
+   - **Valuable**: improves code quality, maintainability, or performance
+   - **Scoped**: completable in 1–3 days
+   - **Independent**: no blocking dependencies
+3. Focus on these code quality areas: refactoring, testing gaps, documentation, performance, security, technical debt, tooling improvements.
+4. Exclude: vague suggestions, feature requests, bug reports, architectural decisions.
+5. Dedup against existing open issues before creating any new ones (same check as the dedup gate above).
+6. Save updated `/tmp/gh-aw/repo-memory/default/deep-report/processed-discussions.json` and `/tmp/gh-aw/repo-memory/default/deep-report/extracted-tasks.json` to repo-memory after this step.
+
+Include the code quality tasks surfaced here in the 7 actionable issues created in the task creation step.
 
 ### Step 3: Cross-Reference and Analyze
 
@@ -200,13 +241,13 @@ Connect the dots between different data sources:
 
 ### Step 4: Store Insights in Repo Memory
 
-Save your findings to `/tmp/gh-aw/repo-memory/default/memory/deep-report/` as markdown files:
+Save your findings to `/tmp/gh-aw/repo-memory/default/deep-report/` as markdown files:
 - Update `known_patterns.md` with any new patterns discovered
 - Update `trend_data.md` with current metrics
 - Update `flagged_items.md` with items needing attention
 - Save `last_analysis_timestamp.md` with current timestamp
 
-**Note:** Only markdown (.md) files are allowed in the repo-memory folder. Use markdown tables, lists, and formatting to structure your data.
+**Note:** Markdown (`.md`) and JSON (`.json`) files are allowed in the repo-memory folder. Use markdown tables, lists, and formatting to structure your data.
 
 #### Actionable Task Creation
 
@@ -238,6 +279,14 @@ For each task, **CREATE A GITHUB ISSUE** using the safe-outputs create-issue cap
 
 **Maximum: 7 issues.** Choose the most impactful tasks.
 
+**Dedup gate (required before every create-issue call):**
+1. Search open issues for similar work using title keywords, component/file names, and key terms from the candidate task.
+2. Treat a candidate as duplicate when both are true:
+   - Title is exact/near match (wording differences allowed), or same component + same fix intent.
+   - Scope overlaps materially (same root cause or same target files/components).
+3. If duplicate is found, do **not** create a new issue. Prefer the existing canonical issue and cite it in the report task list.
+4. Keep creating unique tasks until you either produce 7 non-duplicate issues or run out of high-value tasks.
+
 #### Report Structure
 
 {{#if experiments.output_format == 'executive_brief'}}
@@ -250,6 +299,17 @@ Generate a **condensed intelligence brief with inline citations** with these sec
 1. **🔍 Executive Summary** — 3 sentences with at least one cited source link per sentence.
 2. **🚨 Top 5 Findings** — Flat bullet list, one line each, each ending with `([source](url))`.
 3. **✅ Actionable Agentic Tasks** — Exactly 7 items as before, each linking its evidence.
+{{#elseif experiments.output_format == 'ste'}}
+Generate a **Simplified Technical English (STE) brief** with these sections only. Follow STE rules throughout:
+- Use short sentences. Limit each sentence to 20 words or fewer.
+- Write one fact or instruction per sentence.
+- Use active voice and present tense.
+- Use simple, familiar words. Do not use jargon.
+- Spell out each acronym on first use.
+
+1. **🔍 Executive Summary** — 3 short sentences: overall health, top finding, urgent action.
+2. **🚨 Top 5 Findings** — Flat bullet list. Each bullet is one short sentence, most impactful first.
+3. **✅ Actionable Agentic Tasks** — Exactly 7 items as before, each written as one short, direct instruction.
 {{else}}
 Generate an intelligence briefing with the following sections:
 

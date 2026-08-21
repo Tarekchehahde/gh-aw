@@ -37,10 +37,10 @@ engine:
   id: gemini
 strict: true
 imports:
-  - shared/gh.md
   - shared/reporting-otlp.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
 network:
   allowed:
     - defaults
@@ -71,14 +71,17 @@ safe-outputs:
       run-success: "🚀 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Gemini has spoken. ✨"
       run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Gemini encountered unexpected challenges..."
 timeout-minutes: 10
+evals:
+  - id: sub_agent_strategy_goal_met
+    question: Does the agent output show that the objective for experiment sub_agent_strategy was successfully completed?
+
+sandbox:
+  agent:
+    id: awf
+    runtime: cloud-hypervisor
 ---
 
 # Smoke Test: Gemini Engine Validation
-
-**CRITICAL EFFICIENCY REQUIREMENTS:**
-- Keep ALL outputs extremely short and concise. Use single-line responses.
-- NO verbose explanations or unnecessary context.
-- Minimize file reading - only read what is absolutely necessary for the task.
 
 {{#if experiments.sub_agent_strategy == 'single_agent'}}
 ## Test Requirements (Single Agent — Baseline)

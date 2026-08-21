@@ -15,6 +15,7 @@ tracker-id: malicious-code-scan
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 safe-outputs:
   create-code-scanning-alert:
     driver: "Malicious Code Scanner"
@@ -35,7 +36,13 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: cloud-hypervisor
+evals:
+  - id: scan_completed
+    question: Did the agent complete a scan of recent code changes and report on whether malicious patterns were found?
+  - id: alert_or_noop
+    question: Was a code scanning alert created when threats were found, or does the agent output confirm the scan found no suspicious patterns?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -256,6 +263,12 @@ A successful malicious code scan:
 
 Your output MUST:
 
+**Report Structure Guidelines**
+
+- Use `###` (or lower) headers only.
+- Keep summary and critical actions visible; move long detail into `<details>` blocks.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+
 1. **If suspicious patterns are found**:
    - **CALL** the `create_code_scanning_alert` tool for each finding
    - Each alert must include: rule_id, message, severity, file_path, start_line, description
@@ -279,6 +292,21 @@ Your output MUST:
    - Number of commits reviewed
    - Types of patterns searched for
    - Confidence level of findings
+
+### Example Summary Format
+
+```markdown
+### Summary
+
+**X items found** — [brief description]
+
+<details>
+<summary><b>View Full Details</b></summary>
+
+... detailed content here ...
+
+</details>
+```
 
 ## Example Alert Output
 

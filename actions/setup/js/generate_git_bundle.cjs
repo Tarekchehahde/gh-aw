@@ -7,10 +7,14 @@
 // allowlist check is required in this handler.
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
+const { generateGitPatch } = require("./generate_git_patch.cjs");
 const { ensureOriginRemoteTrackingRef, execGitSync } = require("./git_helpers.cjs");
+const { isAncestorCommit, describeGitFailure } = require("./git_patch_utils.cjs");
+const { normalizeCommitSHA } = require("./commit_sha_helpers.cjs");
 const { ERR_SYSTEM } = require("./error_codes.cjs");
 
 /**
@@ -99,6 +103,9 @@ function getBundlePathForBranchInRepo(branchName, repoSlug) {
  *   Required for multi-repo scenarios to prevent bundle file collisions.
  * @param {string} [options.token] - GitHub token for git authentication. Falls back to GITHUB_TOKEN env var.
  *   Use this for cross-repo scenarios where a custom PAT with access to the target repo is needed.
+ * @param {string[]} [options.excludedFiles] - Glob patterns for files to exclude from the pushed commit set.
+ *   When set, the bundle is synthesized from the same filtered patch used for validation so the pushed files
+ *   match the validated patch file set.
  * @returns {Promise<Object>} Object with bundle info or error
  */
 async function generateGitBundle(branchName, baseBranch, options = {}) {
@@ -128,11 +135,17 @@ async function generateGitBundle(branchName, baseBranch, options = {}) {
   // Ensure /tmp/gh-aw directory exists
   const bundleDir = path.dirname(bundlePath);
   if (!fs.existsSync(bundleDir)) {
-    fs.mkdirSync(bundleDir, { recursive: true });
+    try {
+      fs.mkdirSync(bundleDir, { recursive: true });
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to create directory ${bundleDir}: ${getErrorMessage(err)}`, { cause: err });
+    }
   }
 
   let bundleGenerated = false;
+  /** @type {any} */
   let errorMessage = null;
+  /** @type {any} */
   let baseCommitSha = null;
 
   try {
@@ -198,7 +211,18 @@ async function generateGitBundle(branchName, baseBranch, options = {}) {
               );
             }
 
-            if (hasLocalDefaultBranch) {
+            // When the workflow runs from a ref that is not contained in the default
+            // branch (e.g. a workflow_dispatch on a feature branch), the merge-base with
+            // the default branch is far behind the checked-out commit: the bundle would
+            // then carry the dispatched branch's own commits instead of only the agent's,
+            // and on a partial clone it needs base-side objects that were never fetched.
+            // GITHUB_SHA is the commit the agent started from and is fully local.
+            const dispatchedSha = normalizeCommitSHA(githubSha);
+            const branchTipSha = execGitSync(["rev-parse", branchName], { cwd }).trim();
+            if (hasLocalDefaultBranch && dispatchedSha && dispatchedSha !== branchTipSha && isAncestorCommit(dispatchedSha, branchName, cwd) && !isAncestorCommit(dispatchedSha, `origin/${defaultBranch}`, cwd)) {
+              baseRef = dispatchedSha;
+              debugLog(`Strategy 1 (full): GITHUB_SHA ${dispatchedSha} is not contained in origin/${defaultBranch} (non-default-branch run); using it as the bundle base instead of the merge-base`);
+            } else if (hasLocalDefaultBranch) {
               baseRef = execGitSync(["merge-base", "--", `origin/${defaultBranch}`, branchName], { cwd }).trim();
               debugLog(`Strategy 1 (full): Computed merge-base: ${baseRef}`);
             } else {
@@ -222,23 +246,55 @@ async function generateGitBundle(branchName, baseBranch, options = {}) {
           // In incremental mode, also exclude origin/<defaultBranch> when present so
           // a "merge base branch into PR branch" workflow does not re-embed upstream
           // commits that the remote already has.
-          const bundleCreateArgs = ["bundle", "create", bundlePath, `${baseRef}..${branchName}`];
-          if (mode === "incremental") {
-            const defaultBranchRefResult = ensureOriginRemoteTrackingRef(defaultBranch, {
-              cwd,
-              token: options.token,
-              suppressLogs: true,
-            });
-            if (defaultBranchRefResult.exists) {
-              bundleCreateArgs.push(`^origin/${defaultBranch}`);
-              debugLog(`Strategy 1 (incremental): excluding origin/${defaultBranch} from bundle prerequisites`);
-            } else {
-              const warningMessage = `Strategy 1 (incremental): origin/${defaultBranch} not present locally and remote fetch failed (likely private repo without credentials in MCP server); bundle will include base-branch history. Add ${JSON.stringify(defaultBranch)} to checkout.fetch to enable this optimisation.`;
-              debugLog(warningMessage);
-              core.warning(warningMessage);
+          if (Array.isArray(options.excludedFiles) && options.excludedFiles.length > 0) {
+            const patchResult = await generateGitPatch(branchName, baseBranch, options);
+            if (!patchResult.success) {
+              return {
+                success: false,
+                error: patchResult.error || "Failed to generate filtered patch for bundle synthesis",
+                bundlePath,
+              };
             }
+
+            const tempWorktree = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-filtered-bundle-"));
+            // Repository hooks (post-checkout, pre-applypatch, ...) must not run for these
+            // internal synthesis operations: a repository configured for Git LFS (or any other
+            // hook requiring tooling absent from the safe-outputs environment) would otherwise
+            // fail `git worktree add` / `git am` and make a valid branch look unusable.
+            const tempHooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-filtered-bundle-hooks-"));
+            const noHooksArgs = ["-c", `core.hooksPath=${tempHooksDir}`];
+            try {
+              execGitSync([...noHooksArgs, "worktree", "add", "--detach", tempWorktree, baseCommitSha], { cwd });
+              execGitSync([...noHooksArgs, "am", "--3way", patchResult.patchPath], { cwd: tempWorktree });
+              execGitSync(["bundle", "create", bundlePath, `${baseCommitSha}..HEAD`], { cwd: tempWorktree });
+            } finally {
+              try {
+                execGitSync([...noHooksArgs, "worktree", "remove", "--force", tempWorktree], { cwd });
+              } catch (removeError) {
+                debugLog(`Failed to remove temporary filtered-bundle worktree ${tempWorktree}: ${getErrorMessage(removeError)}`);
+              }
+              fs.rmSync(tempWorktree, { recursive: true, force: true });
+              fs.rmSync(tempHooksDir, { recursive: true, force: true });
+            }
+          } else {
+            const bundleCreateArgs = ["bundle", "create", bundlePath, `${baseRef}..${branchName}`];
+            if (mode === "incremental") {
+              const defaultBranchRefResult = ensureOriginRemoteTrackingRef(defaultBranch, {
+                cwd,
+                token: options.token,
+                suppressLogs: true,
+              });
+              if (defaultBranchRefResult.exists) {
+                bundleCreateArgs.push(`^origin/${defaultBranch}`);
+                debugLog(`Strategy 1 (incremental): excluding origin/${defaultBranch} from bundle prerequisites`);
+              } else {
+                const warningMessage = `Strategy 1 (incremental): origin/${defaultBranch} not present locally and remote fetch failed (likely private repo without credentials in MCP server); bundle will include base-branch history. Add ${JSON.stringify(defaultBranch)} to checkout.fetch to enable this optimisation.`;
+                debugLog(warningMessage);
+                core.warning(warningMessage);
+              }
+            }
+            execGitSync(bundleCreateArgs, { cwd });
           }
-          execGitSync(bundleCreateArgs, { cwd });
 
           if (fs.existsSync(bundlePath)) {
             const stat = fs.statSync(bundlePath);
@@ -257,9 +313,30 @@ async function generateGitBundle(branchName, baseBranch, options = {}) {
           };
         }
       } catch (branchError) {
-        // Branch does not exist locally
-        debugLog(`Strategy 1: Branch '${branchName}' does not exist locally - ${getErrorMessage(branchError)}`);
+        // Strategy 1 failed. Determine branch existence from local refs only so a
+        // network/auth failure (e.g. a lazy blob fetch on a partial clone) is never
+        // reported as a missing local branch.
+        let branchExistsLocally = false;
+        try {
+          execGitSync(["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd, suppressLogs: true });
+          branchExistsLocally = true;
+        } catch {
+          // Branch really is absent from the local refs
+        }
+        const branchErrorMessage = describeGitFailure(getErrorMessage(branchError), cwd);
+        if (branchExistsLocally) {
+          debugLog(`Strategy 1: Failed to generate bundle for branch '${branchName}' (branch exists locally) - ${branchErrorMessage}`);
+        } else {
+          debugLog(`Strategy 1: Branch '${branchName}' does not exist locally - ${branchErrorMessage}`);
+        }
         if (mode === "incremental") {
+          if (branchExistsLocally) {
+            return {
+              success: false,
+              error: `Cannot generate incremental bundle for branch ${branchName} in checkout '${cwd}': ${branchErrorMessage}`,
+              bundlePath,
+            };
+          }
           return {
             success: false,
             error:
@@ -417,7 +494,16 @@ async function generateGitBundle(branchName, baseBranch, options = {}) {
 
   // Check if bundle was generated and has content
   if (bundleGenerated && fs.existsSync(bundlePath)) {
-    const stat = fs.statSync(bundlePath);
+    let stat;
+    try {
+      stat = fs.statSync(bundlePath);
+    } catch (err) {
+      return {
+        success: false,
+        error: `Failed to inspect generated bundle ${bundlePath}: ${getErrorMessage(err)}`,
+        bundlePath,
+      };
+    }
     const bundleSize = stat.size;
 
     if (bundleSize === 0) {

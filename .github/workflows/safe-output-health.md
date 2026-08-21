@@ -11,12 +11,13 @@ permissions:
    pull-requests: read
    actions: read
 
-sandbox:
-  agent:
-    sudo: false
 
-engine: claude
+engine:
+  id: claude
+  mcp:
+    tool-timeout: 10m
 max-ai-credits: 1500
+max-turns: 200
 tools:
   cli-proxy: true
 timeout-minutes: 30
@@ -30,7 +31,11 @@ imports:
   - ../skills/jqschema/SKILL.md
 
   - shared/otlp.md
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
+
 # Safe Output Health Monitor
 
 You are the Safe Output Health Monitor - an expert system that monitors and analyzes the health of safe output jobs in agentic workflows.

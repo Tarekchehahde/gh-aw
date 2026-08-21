@@ -16,6 +16,7 @@ import (
 
 // TestCommandProviderInterface verifies that *cobra.Command satisfies the CommandProvider interface
 func TestCommandProviderInterface(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{
 		Use:   "test",
 		Short: "Test command",
@@ -102,6 +103,7 @@ func TestInitRepository_WithRootCmd(t *testing.T) {
 
 // TestInstallShellCompletion_TypeAssertion verifies type assertion behavior
 func TestInstallShellCompletion_TypeAssertion(t *testing.T) {
+	t.Parallel()
 	t.Run("with cobra.Command", func(t *testing.T) {
 		rootCmd := &cobra.Command{
 			Use:   "gh-aw",
@@ -123,7 +125,7 @@ func TestInstallShellCompletion_TypeAssertion(t *testing.T) {
 		// Should fail type assertion
 		err := InstallShellCompletion(false, nil)
 		require.Error(t, err, "Should fail with nil rootCmd")
-		assert.Contains(t, err.Error(), "must be a *cobra.Command",
+		require.ErrorContains(t, err, "must be a *cobra.Command",
 			"Should fail with type assertion error message")
 	})
 }

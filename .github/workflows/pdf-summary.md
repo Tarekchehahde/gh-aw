@@ -28,16 +28,14 @@ permissions:
   pull-requests: read
   discussions: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 imports:
-  - shared/mcp/markitdown.md
+  # Note: markitdown.md excluded — docker.io/mcp/markitdown has Critical/High CVEs (see #49515)
   - shared/reporting.md
 
   - shared/otlp.md
@@ -61,6 +59,9 @@ safe-outputs:
 timeout-minutes: 15
 strict: true
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Resource Summarizer Agent

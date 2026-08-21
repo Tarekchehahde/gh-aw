@@ -13,6 +13,8 @@ const { sanitizeContent } = require("./sanitize_content.cjs");
 const { isTemporaryId, normalizeTemporaryId } = require("./temporary_id.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { unfenceMarkdown } = require("./markdown_unfencing.cjs");
+const { validateValueAgainstSchema } = require("./mcp_scripts_validation.cjs");
+const { resolveDataSchema } = require("./data_schema_normalizer.cjs");
 
 /**
  * Default max body length for GitHub content
@@ -27,7 +29,13 @@ const MAX_GITHUB_USERNAME_LENGTH = 39;
 const ISSUE_INTENT_RATIONALE_MAX_LENGTH = 280;
 
 /**
- * @typedef {{ allowedAliases?: string[], maxBotMentions?: number, normalizeIssueClosingKeywords?: boolean }} ValidateOptions
+ * @typedef {{
+ *   allowedAliases?: string[],
+ *   maxBotMentions?: number,
+ *   normalizeIssueClosingKeywords?: boolean,
+ *   dataEnabled?: boolean,
+ *   dataSchema?: any
+ * }} ValidateOptions
  */
 
 // GitHub issue-closing keywords:
@@ -40,6 +48,7 @@ const ISSUE_CLOSING_KEYWORD_BACKTICK_PATTERN = new RegExp(`\`(\\b(?:${ISSUE_CLOS
 const ISSUE_CLOSING_REFERENCE_BACKTICK_PATTERN = new RegExp(`(\\b(?:${ISSUE_CLOSING_KEYWORDS})\\b)(\\s+)\`(${ISSUE_REFERENCE_PATTERN})\``, "gi");
 const NORMALIZE_CLOSER_BODY_TYPES = new Set(["create_issue", "add_comment", "create_pull_request"]);
 const ISSUE_INTENT_LABEL_TYPES = new Set(["add_labels", "remove_labels", "update_issue"]);
+const STRUCTURED_DATA_LABEL = "Structured data:";
 
 /**
  * Remove markdown backticks around recognized issue-closing keyword references.
@@ -206,6 +215,8 @@ function validateIssueIntentLabels(value, lineNum, itemType, fieldName, options)
  * @property {number} defaultMax - Default max count for this type
  * @property {Object.<string, FieldValidation>} fields - Field validation rules
  * @property {string} [customValidation] - Custom validation rule identifier
+ * @property {boolean} [dataEnabled] - Whether structured data is enabled for this type
+ * @property {any} [dataSchema] - Optional schema used to validate structured data
  */
 
 /** @type {Object.<string, TypeValidationConfig>|null} */
@@ -342,7 +353,7 @@ function validateOptionalPositiveInteger(value, fieldName, lineNum) {
  * @param {any} value - Value to validate
  * @param {string} fieldName - Field name for error messages
  * @param {number} lineNum - Line number for error messages
- * @returns {{isValid: boolean, error?: string}}
+ * @returns {{isValid: boolean, normalizedValue?: number|string, error?: string}}
  */
 function validateIssueOrPRNumber(value, fieldName, lineNum) {
   if (value === undefined) {
@@ -354,7 +365,7 @@ function validateIssueOrPRNumber(value, fieldName, lineNum) {
       error: `Line ${lineNum}: ${fieldName} must be a number or string`,
     };
   }
-  return { isValid: true };
+  return { isValid: true, normalizedValue: value };
 }
 
 /**
@@ -440,6 +451,17 @@ function validateField(value, fieldName, validation, itemType, lineNum, options)
   // Handle issueOrPRNumber validation
   if (validation.issueOrPRNumber) {
     return validateIssueOrPRNumber(value, `${itemType} '${fieldName}'`, lineNum);
+  }
+
+  if (Array.isArray(validation.type)) {
+    const actualType = Array.isArray(value) ? "array" : typeof value;
+    if (!validation.type.includes(actualType)) {
+      return {
+        isValid: false,
+        error: `Line ${lineNum}: ${itemType} '${fieldName}' must be one of: ${validation.type.join(", ")}`,
+      };
+    }
+    return { isValid: true, normalizedValue: value };
   }
 
   // Handle type validation
@@ -529,13 +551,28 @@ function validateField(value, fieldName, validation, itemType, lineNum, options)
   }
 
   if (validation.type === "array") {
-    // Backward compatibility: create_issue agents sometimes provide comma-separated labels as a string.
-    // Normalize this into a string array before strict array validation.
+    // Backward compatibility: create_issue agents sometimes provide labels as a JSON array
+    // or comma-separated string. Normalize either form before strict array validation.
     if (itemType === "create_issue" && fieldName === "labels" && typeof value === "string") {
-      value = value
-        .split(",")
-        .map(item => item.trim())
-        .filter(Boolean);
+      const trimmedValue = value.trim();
+      if (trimmedValue.startsWith("[")) {
+        try {
+          const parsedValue = JSON.parse(trimmedValue);
+          if (Array.isArray(parsedValue)) {
+            // Filter out non-string entries from the JSON-parsed array.
+            value = parsedValue.filter(item => typeof item === "string");
+          }
+          // Non-array JSON values (objects, primitives) fall through to comma-separated parsing.
+        } catch {
+          // Fall back to comma-separated parsing below.
+        }
+      }
+      if (typeof value === "string") {
+        value = value
+          .split(",")
+          .map(item => item.trim())
+          .filter(Boolean);
+      }
     }
 
     if (!Array.isArray(value)) {
@@ -677,7 +714,10 @@ function validateItem(item, itemType, lineNum, options) {
     return { isValid: true, normalizedItem: item };
   }
 
-  const normalizedItem = { ...item };
+  // Build the downstream payload from the declared contract. The raw item is
+  // agent-controlled, so forwarding undeclared fields would let consumers act
+  // on values that were never validated.
+  const normalizedItem = { type: item.type };
   const errors = [];
 
   // Run custom validation first if defined
@@ -703,11 +743,85 @@ function validateItem(item, itemType, lineNum, options) {
       }
     } else if (result.normalizedValue !== undefined) {
       normalizedItem[fieldName] = result.normalizedValue;
+    } else if (fieldValue !== undefined) {
+      let validationKind = Object.keys(validation).sort().join(",") || "unspecified";
+      if (validation.type) {
+        const validationType = Array.isArray(validation.type) ? validation.type.join("|") : validation.type;
+        validationKind = `type=${validationType}`;
+      }
+      const fieldValueType = Array.isArray(fieldValue) ? "array" : typeof fieldValue;
+      errors.push(`Line ${lineNum}: ${itemType} '${fieldName}' validation (${validationKind}) accepted ${fieldValueType} but did not produce a normalized value`);
     }
   }
 
   if (errors.length > 0) {
     return { isValid: false, error: errors[0] }; // Return first error
+  }
+
+  if (item.data !== undefined) {
+    const runtimeDataSchema = options?.dataSchema;
+    const runtimeDataEnabled = options?.dataEnabled === true || runtimeDataSchema !== undefined;
+    const configDataEnabled = typeConfig.dataEnabled === true || typeConfig.dataSchema !== undefined;
+    const dataEnabled = runtimeDataEnabled || configDataEnabled;
+    if (!dataEnabled) {
+      return {
+        isValid: false,
+        error: `Line ${lineNum}: ${itemType} 'data' is not enabled (set safe-outputs.data in workflow frontmatter)`,
+      };
+    }
+    if (!item.data || typeof item.data !== "object" || Array.isArray(item.data)) {
+      return {
+        isValid: false,
+        error: `Line ${lineNum}: ${itemType} 'data' must be an object`,
+      };
+    }
+
+    let dataJSON;
+    let normalizedData;
+    try {
+      dataJSON = JSON.stringify(item.data, null, 2);
+      normalizedData = JSON.parse(dataJSON);
+    } catch {
+      return {
+        isValid: false,
+        error: `Line ${lineNum}: ${itemType} 'data' must be JSON-serializable`,
+      };
+    }
+
+    // Preserve normalized data on the item for downstream automation.
+    normalizedItem.data = normalizedData;
+
+    const schemaSource = runtimeDataSchema !== undefined ? runtimeDataSchema : typeConfig.dataSchema;
+    if (schemaSource !== undefined) {
+      let dataSchema;
+      try {
+        dataSchema = resolveDataSchema(schemaSource, `safe-outputs.${itemType}.data`);
+      } catch (error) {
+        return {
+          isValid: false,
+          error: `Line ${lineNum}: ${itemType} 'data' schema is invalid: ${getErrorMessage(error)}`,
+        };
+      }
+      const dataSchemaError = validateValueAgainstSchema(normalizedData, dataSchema);
+      if (dataSchemaError) {
+        const errorPath = dataSchemaError.path ? `.${dataSchemaError.path}` : "";
+        return {
+          isValid: false,
+          error: `Line ${lineNum}: ${itemType} 'data'${errorPath} ${dataSchemaError.message}`,
+        };
+      }
+    }
+
+    // If this safe-output type supports a body field, append structured data
+    // as fenced JSON so it survives body sanitization.
+    if (Object.prototype.hasOwnProperty.call(typeConfig.fields, "body")) {
+      const dataBlock = `${STRUCTURED_DATA_LABEL}\n\`\`\`json\n${dataJSON}\n\`\`\``;
+      if (typeof normalizedItem.body === "string" && normalizedItem.body.length > 0) {
+        normalizedItem.body = `${normalizedItem.body}\n\n${dataBlock}`;
+      } else {
+        normalizedItem.body = dataBlock;
+      }
+    }
   }
 
   return { isValid: true, normalizedItem };

@@ -1,16 +1,16 @@
 # GitHub Actions Workflow Layout Specification
 
 > Auto-generated specification documenting patterns used in compiled `.lock.yml` files.
-> Last updated: 2026-05-25
+> Last updated: 2026-08-10
 
 ## Overview
 
 This document catalogs all file paths, folder names, artifact names, and other patterns used across our compiled GitHub Actions workflows (`.lock.yml` files). It serves as a reference for developers working with the gh-aw codebase.
 
 **Statistics:**
-- **Lock files analyzed**: 235
+- **Lock files analyzed**: 284 (first 50 sampled this run per batch limit; remaining 234 not re-scanned)
 - **Unique GitHub Actions**: 27
-- **Artifact patterns**: 56
+- **Artifact patterns**: 60
 - **Job name patterns**: 40
 - **File path references**: 83
 
@@ -112,6 +112,14 @@ Artifacts uploaded/downloaded between workflow jobs:
 | `smokepi-experiment` | Smoke test job | Download step | Smoke test PI experiment artifact |
 | `smoketemporaryid-experiment` | Smoke test job | Download step | Smoke test temporary ID experiment artifact |
 | `typist-experiment` | Agent job | Download step | Typist experiment artifact |
+| `aic-usage-cache` | Usage analysis job | Download step | Aggregated agent usage cache data |
+| `copilot-centralization-analysis` | Copilot analysis job | Download step | Copilot centralization analysis experiment artifact |
+| `dailyagentrxtraceoptimizer-experiment` | Daily workflow job | Download step | Daily agent RX trace optimizer experiment artifact |
+| `awfailureinvestigator-experiment` | Agent job | Download step | Agentic workflow failure investigator experiment artifact |
+| `auditworkflows-experiment` | Agent job | Download step | Workflow audit experiment artifact |
+| `breakingchangechecker-experiment` | Agent job | Download step | Breaking change checker experiment artifact |
+| `usage` | Usage tracking job | Conclusion job | Aggregated token/cost usage data |
+| `evals` | Evals job | push_evals_state job | Evaluation run results |
 
 ## Common Job Names
 
@@ -186,7 +194,6 @@ Common file paths referenced in workflow files:
 | `/tmp/gh-aw/aw_info.json` | File | Workflow info JSON | Workflow metadata and configuration |
 | `/tmp/gh-aw/awf-config.json` | File | AWF config JSON | Agentic Workflow Firewall (AWF) configuration file |
 | `/tmp/gh-aw/base` | Directory | Base checkout | Base repository checkout for git diff operations |
-| `/tmp/gh-aw/copilot-otel.jsonl` | File | Copilot OTEL log | OpenTelemetry spans from Copilot engine requests |
 | `/tmp/gh-aw/cache-memory` | Directory | Cache memory storage | Persistent cache data across runs |
 | `/tmp/gh-aw/cache-memory-chroma` | Directory | Chroma cache storage | Chroma vector database cache |
 | `/tmp/gh-aw/cache-memory-focus-areas` | Directory | Focus areas cache | Cached focus area data |
@@ -231,7 +238,6 @@ Common file paths referenced in workflow files:
 | `/tmp/gh-aw/mcp-logs/gateway.md` | File | MCP gateway markdown log | Markdown-formatted MCP gateway summary |
 | `/tmp/gh-aw/mcp-logs/rpc-messages.jsonl` | File | MCP RPC messages | Raw JSONRPC message log from MCP servers |
 | `/tmp/gh-aw/mcp-logs/safeoutputs/server.log` | File | Safe outputs MCP server log | Logs from the safeoutputs MCP server |
-| `/tmp/gh-aw/mcp-logs/stderr.log` | File | MCP stderr log | Standard error output from MCP processes |
 | `/tmp/gh-aw/safeoutputs/output.jsonl` | File | Safe outputs JSONL | Processed safe output items in JSONL format |
 | `/tmp/gh-aw/safeoutputs/validation.json` | File | Safe outputs validation | Validation results for safe output items |
 | `/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl` | File | Token usage log | Per-call token usage recorded by AWF proxy |
@@ -642,7 +648,6 @@ GitHub Actions runner images used across compiled workflows:
 ├── cache-memory-repo-audits/   # Audit cache
 ├── comment-memory/             # Comment memory
 │   └── default.md
-├── copilot-otel.jsonl          # Copilot OpenTelemetry spans
 ├── experiments/                # A/B experiments
 │   ├── assignments.json
 │   └── state.json
@@ -657,7 +662,6 @@ GitHub Actions runner images used across compiled workflows:
 │   ├── rpc-messages.jsonl      # Raw RPC messages
 │   ├── safeoutputs/
 │   │   └── server.log          # Safe outputs MCP server log
-│   └── stderr.log              # MCP stderr log
 ├── mcp-payloads/               # MCP gateway payloads
 ├── mcp-scripts/logs/           # MCP scripts logs
 ├── model-inventory/            # AI model inventories

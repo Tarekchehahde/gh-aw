@@ -141,15 +141,15 @@ describe("write_daily_aic_usage_cache", () => {
     expect(typeof entry.timestamp).toBe("string");
   });
 
-  it("preserves unparseable lines in the existing cache file", async () => {
+  it("drops non-object lines from the existing cache file", async () => {
     const recentTs = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     fs.writeFileSync(cacheFile, "not-valid-json\n" + JSON.stringify({ run_id: 5001, aic: 2.5, timestamp: recentTs }) + "\n", "utf8");
     writeUsageFile(1.0);
     await runMain();
 
     const lines = fs.readFileSync(cacheFile, "utf8").trim().split("\n");
-    expect(lines[0]).toBe("not-valid-json");
-    const runIds = lines.slice(1).map(line => JSON.parse(line).run_id);
+    expect(lines).not.toContain("not-valid-json");
+    const runIds = lines.map(line => JSON.parse(line).run_id);
     expect(runIds).toContain(5001);
     expect(runIds).toContain(12345);
   });
@@ -163,6 +163,14 @@ describe("write_daily_aic_usage_cache", () => {
     const entry = JSON.parse(fs.readFileSync(deepCacheFile, "utf8").trim());
     expect(entry.run_id).toBe(12345);
     expect(entry.aic).toBe(3.0);
+  });
+
+  it("writes a large AIC value correctly", async () => {
+    writeUsageFile(999.99);
+    await runMain();
+    const entry = JSON.parse(fs.readFileSync(cacheFile, "utf8").trim());
+    expect(entry.aic).toBe(999.99);
+    expect(global.core.warning).not.toHaveBeenCalled();
   });
 
   it("emits a warning and does not crash when the existing cache file cannot be read", async () => {

@@ -243,7 +243,6 @@ MCP_SCRIPTS_FILES=(
   "mcp_handler_javascript.cjs"
   "mcp_handler_process.cjs"
   "read_buffer.cjs"
-  "generate_mcp_scripts_config.cjs"
   "setup_globals.cjs"
   "runtime_features.cjs"
   "github_rate_limit_logger.cjs"
@@ -310,6 +309,7 @@ SAFE_OUTPUTS_FILES=(
   "mcp_handler_process.cjs"
   "read_buffer.cjs"
   "mcp_scripts_validation.cjs"
+  "memory_custom_validation.cjs"
   "messages.cjs"
   "messages_core.cjs"
   "messages_footer.cjs"
@@ -325,8 +325,10 @@ SAFE_OUTPUTS_FILES=(
   "generate_git_patch.cjs"
   "generate_git_bundle.cjs"
   "git_patch_utils.cjs"
+  "commit_sha_helpers.cjs"
   "get_base_branch.cjs"
   "get_current_branch.cjs"
+  "child_process_timeouts.cjs"
   "normalize_branch_name.cjs"
   "write_large_content_to_file.cjs"
   "generate_compact_schema.cjs"
@@ -337,6 +339,8 @@ SAFE_OUTPUTS_FILES=(
   "error_codes.cjs"
   "constants.cjs"
   "git_helpers.cjs"
+  "git_auth_env.cjs"
+  "error_recovery.cjs"
   "checkout_manifest.cjs"
   "github_api_helpers.cjs"
   "find_repo_checkout.cjs"
@@ -364,6 +368,7 @@ SAFE_OUTPUTS_FILES=(
   "markdown_code_region_balancer.cjs"
   "temporary_id.cjs"
   "invocation_context_helpers.cjs"
+  "data_schema_normalizer.cjs"
 )
 
 SAFE_OUTPUTS_COUNT=0

@@ -15,9 +15,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
+model: gpt-5.4-mini
 engine:
   id: codex
-  model: gpt-5.4-mini
 strict: true
 network:
   allowed:
@@ -35,6 +35,10 @@ tools:
   cli-proxy: true
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Smoke Test: Call Workflow Orchestrator

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+
+	"github.com/github/gh-aw/pkg/ctxutil"
 )
 
 // Note: os/exec compiles fine for GOOS=js GOARCH=wasm (it just fails at runtime).
@@ -50,10 +52,12 @@ func RunGHInputContext(ctx context.Context, spinnerMessage string, input io.Read
 	return nil, errors.New("gh CLI not available in Wasm")
 }
 
+// enrichGHError is a pass-through stub in Wasm builds; gh CLI subprocesses are
+// never executed, so there is no stderr to append.
+func enrichGHError(err error) error { return err }
+
 func ghUnavailableCommand(ctx context.Context) *exec.Cmd {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = ctxutil.OrBackground(ctx)
 	return exec.CommandContext(ctx, "echo", "gh CLI not available in Wasm")
 }
 

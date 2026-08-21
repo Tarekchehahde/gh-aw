@@ -1,0 +1,152 @@
+package linters
+
+import (
+	"golang.org/x/tools/go/analysis"
+
+	"github.com/github/gh-aw/pkg/linters/appendbytestring"
+	"github.com/github/gh-aw/pkg/linters/appendoneelement"
+	"github.com/github/gh-aw/pkg/linters/bytesbufferstring"
+	"github.com/github/gh-aw/pkg/linters/bytescomparestring"
+	"github.com/github/gh-aw/pkg/linters/contextcancelnotdeferred"
+	"github.com/github/gh-aw/pkg/linters/ctxbackground"
+	"github.com/github/gh-aw/pkg/linters/deferinloop"
+	"github.com/github/gh-aw/pkg/linters/errorfwrapv"
+	"github.com/github/gh-aw/pkg/linters/errormessage"
+	"github.com/github/gh-aw/pkg/linters/errortypeassertion"
+	"github.com/github/gh-aw/pkg/linters/errstringmatch"
+	"github.com/github/gh-aw/pkg/linters/excessivefuncparams"
+	"github.com/github/gh-aw/pkg/linters/execcommandwithoutcontext"
+	"github.com/github/gh-aw/pkg/linters/fileclosenotdeferred"
+	"github.com/github/gh-aw/pkg/linters/fmterrorfnoverbs"
+	"github.com/github/gh-aw/pkg/linters/fprintlnsprintf"
+	"github.com/github/gh-aw/pkg/linters/generatedyamlheredoc"
+	"github.com/github/gh-aw/pkg/linters/globwalkignorederror"
+	"github.com/github/gh-aw/pkg/linters/goroutinemissingrecover"
+	"github.com/github/gh-aw/pkg/linters/hardcodedfilepath"
+	"github.com/github/gh-aw/pkg/linters/httpnoctx"
+	"github.com/github/gh-aw/pkg/linters/httprespbodyclose"
+	"github.com/github/gh-aw/pkg/linters/httpstatuscode"
+	"github.com/github/gh-aw/pkg/linters/ioutildeprecated"
+	"github.com/github/gh-aw/pkg/linters/jsonmarshalignoredeerror"
+	"github.com/github/gh-aw/pkg/linters/largefunc"
+	"github.com/github/gh-aw/pkg/linters/lenstringsplit"
+	"github.com/github/gh-aw/pkg/linters/lenstringzero"
+	"github.com/github/gh-aw/pkg/linters/logfatallibrary"
+	"github.com/github/gh-aw/pkg/linters/manualmutexunlock"
+	"github.com/github/gh-aw/pkg/linters/manualpathconcat"
+	"github.com/github/gh-aw/pkg/linters/mapclearloop"
+	"github.com/github/gh-aw/pkg/linters/mapdeletecheck"
+	"github.com/github/gh-aw/pkg/linters/nilctxpassed"
+	"github.com/github/gh-aw/pkg/linters/osexitinlibrary"
+	"github.com/github/gh-aw/pkg/linters/osgetenvlibrary"
+	"github.com/github/gh-aw/pkg/linters/ossetenvlibrary"
+	"github.com/github/gh-aw/pkg/linters/packagelevelmutableslicemap"
+	panicinlibrarycode "github.com/github/gh-aw/pkg/linters/panic-in-library-code"
+	"github.com/github/gh-aw/pkg/linters/rawloginlib"
+	"github.com/github/gh-aw/pkg/linters/regexpcompileinfunction"
+	"github.com/github/gh-aw/pkg/linters/regexpdynamicpattern"
+	"github.com/github/gh-aw/pkg/linters/seenmapbool"
+	"github.com/github/gh-aw/pkg/linters/sortslice"
+	"github.com/github/gh-aw/pkg/linters/sprintfbool"
+	"github.com/github/gh-aw/pkg/linters/sprintferrdot"
+	"github.com/github/gh-aw/pkg/linters/sprintferrorsnew"
+	"github.com/github/gh-aw/pkg/linters/sprintfint"
+	"github.com/github/gh-aw/pkg/linters/ssljson"
+	"github.com/github/gh-aw/pkg/linters/strconvparseignorederror"
+	"github.com/github/gh-aw/pkg/linters/stringbytesroundtrip"
+	"github.com/github/gh-aw/pkg/linters/stringreplaceminusone"
+	"github.com/github/gh-aw/pkg/linters/stringsconcatloop"
+	"github.com/github/gh-aw/pkg/linters/stringscountcontains"
+	"github.com/github/gh-aw/pkg/linters/stringsindexcontains"
+	"github.com/github/gh-aw/pkg/linters/stringsindexhasprefix"
+	"github.com/github/gh-aw/pkg/linters/stringsjoinone"
+	"github.com/github/gh-aw/pkg/linters/timeafterleak"
+	"github.com/github/gh-aw/pkg/linters/timenowsub"
+	"github.com/github/gh-aw/pkg/linters/timesleepnocontext"
+	"github.com/github/gh-aw/pkg/linters/tolowerequalfold"
+	"github.com/github/gh-aw/pkg/linters/trimleftright"
+	"github.com/github/gh-aw/pkg/linters/uncheckedflushreturn"
+	"github.com/github/gh-aw/pkg/linters/uncheckedtypeassertion"
+	"github.com/github/gh-aw/pkg/linters/walkfuncerrshadow"
+	"github.com/github/gh-aw/pkg/linters/wgdonenotdeferred"
+	"github.com/github/gh-aw/pkg/linters/writebytestring"
+)
+
+// All returns all registered custom analysis linters.
+//
+// This is the canonical, importable source of truth for the full set of active
+// analyzers. Use it to drive multichecker.Main, test assertions, and
+// doc-completeness checks so that every consumer stays in sync automatically.
+func All() []*analysis.Analyzer {
+	return append([]*analysis.Analyzer(nil), allAnalyzers...)
+}
+
+var allAnalyzers = []*analysis.Analyzer{
+	appendbytestring.Analyzer,
+	appendoneelement.Analyzer,
+	bytesbufferstring.Analyzer,
+	bytescomparestring.Analyzer,
+	contextcancelnotdeferred.Analyzer,
+	ctxbackground.Analyzer,
+	deferinloop.Analyzer,
+	errormessage.Analyzer,
+	errortypeassertion.Analyzer,
+	fprintlnsprintf.Analyzer,
+	errstringmatch.Analyzer,
+	errorfwrapv.Analyzer,
+	execcommandwithoutcontext.Analyzer,
+	excessivefuncparams.Analyzer,
+	fileclosenotdeferred.Analyzer,
+	fmterrorfnoverbs.Analyzer,
+	generatedyamlheredoc.Analyzer,
+	globwalkignorederror.Analyzer,
+	goroutinemissingrecover.Analyzer,
+	hardcodedfilepath.Analyzer,
+	httpnoctx.Analyzer,
+	httprespbodyclose.Analyzer,
+	ioutildeprecated.Analyzer,
+	httpstatuscode.Analyzer,
+	largefunc.Analyzer,
+	logfatallibrary.Analyzer,
+	manualmutexunlock.Analyzer,
+	manualpathconcat.Analyzer,
+	mapclearloop.Analyzer,
+	mapdeletecheck.Analyzer,
+	nilctxpassed.Analyzer,
+	osexitinlibrary.Analyzer,
+	osgetenvlibrary.Analyzer,
+	ossetenvlibrary.Analyzer,
+	packagelevelmutableslicemap.Analyzer,
+	panicinlibrarycode.Analyzer,
+	rawloginlib.Analyzer,
+	regexpcompileinfunction.Analyzer,
+	regexpdynamicpattern.Analyzer,
+	ssljson.Analyzer,
+	seenmapbool.Analyzer,
+	sortslice.Analyzer,
+	sprintferrdot.Analyzer,
+	sprintferrorsnew.Analyzer,
+	sprintfbool.Analyzer,
+	sprintfint.Analyzer,
+	strconvparseignorederror.Analyzer,
+	stringbytesroundtrip.Analyzer,
+	stringreplaceminusone.Analyzer,
+	stringsconcatloop.Analyzer,
+	stringsindexcontains.Analyzer,
+	stringsindexhasprefix.Analyzer,
+	stringsjoinone.Analyzer,
+	stringscountcontains.Analyzer,
+	jsonmarshalignoredeerror.Analyzer,
+	lenstringzero.Analyzer,
+	lenstringsplit.Analyzer,
+	timeafterleak.Analyzer,
+	timesleepnocontext.Analyzer,
+	timenowsub.Analyzer,
+	tolowerequalfold.Analyzer,
+	trimleftright.Analyzer,
+	uncheckedtypeassertion.Analyzer,
+	uncheckedflushreturn.Analyzer,
+	walkfuncerrshadow.Analyzer,
+	wgdonenotdeferred.Analyzer,
+	writebytestring.Analyzer,
+}

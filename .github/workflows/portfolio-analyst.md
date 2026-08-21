@@ -13,7 +13,7 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 
 tracker-id: portfolio-analyst
 engine: claude
@@ -42,6 +42,7 @@ imports:
   - shared/mcp/sentry.md
   - shared/mcp/grafana.md
   - shared/trends.md
+  - shared/reporting.md
 ---
 
 # Workflow Portfolio Analyst
@@ -94,6 +95,8 @@ Use these fields when present, with this precedence:
 | `error_count` / `warning_count` from local fallback | reliability signal |
 
 Treat missing numeric fields as zero **only after** trying all precedence sources above. When Grafana lacks numeric AIC, report it as an observability gap instead of assuming zero.
+
+Do not use Sentry `sum()`, `avg()`, percentile, or other numeric aggregations on any field whose Sentry schema type is not confirmed numeric. If Sentry reports a field-type or query-syntax 400 for one of these fields, treat that query shape as invalid, fetch raw event rows or `count()` instead, aggregate numeric-looking values locally in Python, and fall back to local artifacts when backend rows are not usable.
 
 ## Phase 1: Build The Portfolio Dataset
 

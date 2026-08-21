@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -66,19 +67,21 @@ func TestAgentFriendlyOutputExample(t *testing.T) {
 	}
 
 	firewallAnalysis := &FirewallAnalysis{
-		DomainBuckets: DomainBuckets{
-			AllowedDomains: []string{
-				"api.github.com:443",
-				"search.brave.com:443",
-				"npmjs.org:443",
+		AnalysisBase: AnalysisBase{
+			DomainBuckets: DomainBuckets{
+				AllowedDomains: []string{
+					"api.github.com:443",
+					"search.brave.com:443",
+					"npmjs.org:443",
+				},
+				BlockedDomains: []string{
+					"tracking.example.com:443",
+				},
 			},
-			BlockedDomains: []string{
-				"tracking.example.com:443",
-			},
+			TotalRequests:   42,
+			AllowedRequests: 40,
+			BlockedRequests: 2,
 		},
-		TotalRequests:   42,
-		AllowedRequests: 40,
-		BlockedRequests: 2,
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":       {Allowed: 25, Blocked: 0},
 			"search.brave.com:443":     {Allowed: 10, Blocked: 0},
@@ -114,7 +117,7 @@ func TestAgentFriendlyOutputExample(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 
 	// Test JSON output
 	t.Run("JSON Output", func(t *testing.T) {
@@ -255,6 +258,7 @@ func TestAgentFriendlyOutputExample(t *testing.T) {
 
 // TestAgentFriendlyOutputFailureScenario tests output for a failed workflow
 func TestAgentFriendlyOutputFailureScenario(t *testing.T) {
+	t.Parallel()
 	// Create a failed workflow scenario
 	run := WorkflowRun{
 		DatabaseID:   111222,
@@ -299,7 +303,7 @@ func TestAgentFriendlyOutputFailureScenario(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 
 	// Test key findings for failure
 	t.Run("Failure Findings", func(t *testing.T) {

@@ -8,8 +8,8 @@ const { sanitizeContent } = require("./sanitize_content.cjs");
 const { ERR_NOT_FOUND, ERR_VALIDATION } = require("./error_codes.cjs");
 const { getMessages } = require("./messages_core.cjs");
 const { parseBoolTemplatable } = require("./templatable.cjs");
-const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
-const { resolveTopLevelDiscussionCommentId } = require("./github_api_helpers.cjs");
+const { buildWorkflowRunUrl, EVENT_TYPE_DESCRIPTIONS } = require("./workflow_metadata_helpers.cjs");
+const { isRestEndpoint, resolveTopLevelDiscussionCommentId } = require("./github_api_helpers.cjs");
 const { resolveInvocationContext } = require("./invocation_context_helpers.cjs");
 
 /**
@@ -17,20 +17,6 @@ const { resolveInvocationContext } = require("./invocation_context_helpers.cjs")
  * @typedef {{ id: string, url: string, repo: RepoRef }} CommentMetadata
  * @typedef {{ id: string, url: string, repo: RepoRef | null }} ReusableStatusComment
  */
-
-/**
- * Event type descriptions for comment messages
- */
-const EVENT_TYPE_DESCRIPTIONS = {
-  issues: "issue",
-  pull_request: "pull request",
-  pull_request_comment: "pull request comment",
-  pull_request_review: "pull request review",
-  issue_comment: "issue comment",
-  pull_request_review_comment: "pull request review comment",
-  discussion: "discussion",
-  discussion_comment: "discussion comment",
-};
 
 /**
  * Helper function to get discussion node ID via GraphQL
@@ -194,7 +180,7 @@ async function updateReusableStatusComment(reusableComment, invocationContext, r
   const dispatchedRunUrl = readAwContextString(awContext, "dispatched_run_url");
   const dispatchedWorkflowName = readAwContextString(awContext, "dispatched_workflow_name");
   const runUrl = dispatchedRunUrl || buildWorkflowRunUrl(rawContext, invocationContext.workflowRepo);
-  const commentBody = buildCommentBody(invocationContext.eventName, runUrl, dispatchedWorkflowName || undefined);
+  const commentBody = buildCommentBody(invocationContext.eventName, runUrl, dispatchedWorkflowName || undefined, rawContext?.workflowEmoji);
 
   // Discussion comments use GraphQL node IDs and a dedicated update mutation.
   if (reusableComment.id.startsWith("DC_")) {
@@ -285,7 +271,7 @@ async function createOrReuseStatusComment(rawContext = context) {
         reportCommentError(rawContext, `${ERR_NOT_FOUND}: Issue number not found in event payload`);
         return null;
       }
-      commentEndpoint = `/repos/${owner}/${repo}/issues/${number}/comments`;
+      commentEndpoint = { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner, repo, issue_number: number } };
       break;
     }
 
@@ -298,7 +284,7 @@ async function createOrReuseStatusComment(rawContext = context) {
         reportCommentError(rawContext, `${ERR_NOT_FOUND}: Pull request number not found in event payload`);
         return null;
       }
-      commentEndpoint = `/repos/${owner}/${repo}/issues/${number}/comments`;
+      commentEndpoint = { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner, repo, issue_number: number } };
       break;
     }
 
@@ -328,8 +314,8 @@ async function createOrReuseStatusComment(rawContext = context) {
       return null;
   }
 
-  core.info(`Creating comment on: ${commentEndpoint}`);
-  return addCommentWithWorkflowLink(commentEndpoint, runUrl, eventName, invocationContext);
+  core.info(`Creating comment on: ${typeof commentEndpoint === "object" ? commentEndpoint.route : commentEndpoint}`);
+  return addCommentWithWorkflowLink(commentEndpoint, runUrl, eventName, { ...invocationContext, workflowEmoji: rawContext?.workflowEmoji });
 }
 
 async function main() {
@@ -348,16 +334,18 @@ async function main() {
  * @param {string} eventName - The event type
  * @param {string} runUrl - The URL of the workflow run
  * @param {string} [workflowNameOverride] - Optional dispatched workflow name override
+ * @param {string} [workflowEmojiOverride] - Optional workflow emoji override
  * @returns {string} The assembled comment body
  */
-function buildCommentBody(eventName, runUrl, workflowNameOverride) {
+function buildCommentBody(eventName, runUrl, workflowNameOverride, workflowEmojiOverride) {
   // Whitespace-only overrides are treated as absent and fall back to env defaults.
   const normalizedWorkflowNameOverride = workflowNameOverride?.trim();
   const workflowName = normalizedWorkflowNameOverride || process.env.GH_AW_WORKFLOW_NAME || process.env.GITHUB_WORKFLOW || "Workflow";
+  const workflowEmoji = workflowEmojiOverride || process.env.GH_AW_WORKFLOW_EMOJI;
   const eventTypeDescription = EVENT_TYPE_DESCRIPTIONS[eventName] ?? "event";
 
   // Sanitize before adding markers (defense in depth for custom message templates)
-  let body = sanitizeContent(getRunStartedMessage({ workflowName, runUrl, eventType: eventTypeDescription }));
+  let body = sanitizeContent(getRunStartedMessage({ workflowName, runUrl, eventType: eventTypeDescription, emoji: workflowEmoji }));
 
   // Add lock notice if lock-for-agent is enabled for issues or issue_comment
   if (process.env.GH_AW_LOCK_FOR_AGENT === "true" && (eventName === "issues" || eventName === "issue_comment")) {
@@ -409,7 +397,7 @@ async function postDiscussionComment(discussionNumber, commentBody, replyToNodeI
 
 /**
  * Add a comment with a workflow run link
- * @param {string} endpoint - The GitHub API endpoint to create the comment (or special format for discussions)
+ * @param {{ route: string, params: Record<string, unknown> } | string} endpoint - Typed route info for REST events, or special format string for discussions ("discussion:NUMBER" or "discussion_comment:NUMBER:COMMENT_ID")
  * @param {string} runUrl - The URL of the workflow run
  * @param {string} eventName - The event type (to determine the comment text)
  * @param {{
@@ -418,20 +406,27 @@ async function postDiscussionComment(discussionNumber, commentBody, replyToNodeI
  *   eventPayload: any;
  *   workflowRepo: { owner: string, repo: string };
  *   eventRepo: { owner: string, repo: string };
- * }|null} [invocationContext=null] - Invocation context overrides for event payload and repo
+ *   workflowEmoji?: string;
+ * }|null} [invocationContext=null] - Invocation context overrides for event payload, repo, and emoji
  */
 async function addCommentWithWorkflowLink(endpoint, runUrl, eventName, invocationContext = null) {
   const eventPayload = invocationContext?.eventPayload || context.payload;
   const eventRepo = invocationContext?.eventRepo || context.repo;
-  const commentBody = buildCommentBody(eventName, runUrl);
+  const commentBody = buildCommentBody(eventName, runUrl, undefined, invocationContext?.workflowEmoji);
 
   if (eventName === "discussion") {
+    if (typeof endpoint !== "string") {
+      throw new Error(`${ERR_VALIDATION}: Unexpected comment endpoint shape for event: ${eventName}`);
+    }
     // Parse discussion number from special format: "discussion:NUMBER"
     const discussionNumber = parseInt(endpoint.split(":")[1], 10);
     return postDiscussionComment(discussionNumber, commentBody, null, eventRepo);
   }
 
   if (eventName === "discussion_comment") {
+    if (typeof endpoint !== "string") {
+      throw new Error(`${ERR_VALIDATION}: Unexpected comment endpoint shape for event: ${eventName}`);
+    }
     // Parse discussion number from special format: "discussion_comment:NUMBER:COMMENT_ID"
     const discussionNumber = parseInt(endpoint.split(":")[1], 10);
 
@@ -440,8 +435,13 @@ async function addCommentWithWorkflowLink(endpoint, runUrl, eventName, invocatio
     return postDiscussionComment(discussionNumber, commentBody, commentNodeId, eventRepo);
   }
 
-  // Create a new comment for non-discussion events
-  const createResponse = await github.request("POST " + endpoint, {
+  // Create a new comment for non-discussion events using typed route
+  if (!isRestEndpoint(endpoint)) {
+    throw new Error(`${ERR_VALIDATION}: Unexpected comment endpoint shape for event: ${eventName}`);
+  }
+  const { route, params } = endpoint;
+  const createResponse = await github.request(route, {
+    ...params,
     body: commentBody,
     headers: { Accept: "application/vnd.github+json" },
   });

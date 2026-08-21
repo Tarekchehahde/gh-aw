@@ -70,6 +70,30 @@ This complements toolset selection: `toolsets` decides which API groups are load
 
 Sets the minimum integrity level required for content the agent can access. For public repositories, `min-integrity: approved` is applied automatically. See [Integrity Filtering](/gh-aw/reference/integrity/) for levels, examples, user blocking, and approval labels.
 
+## Guard Policy Frontmatter Examples
+
+The GitHub tool supports guard-policy fields directly under `tools.github`:
+
+```yaml wrap
+tools:
+  github:
+    allowed-repos:
+      - "github/gh-aw"
+      - "github/*"
+    min-integrity: approved
+    blocked-users:
+      - "malicious-user"
+    trusted-users:
+      - "trusted-contributor"
+    approval-labels:
+      - "safe-for-agent"
+      - "human-reviewed"
+```
+
+:::note
+`tools.github.repos` is a deprecated alias of `tools.github.allowed-repos`. Use `allowed-repos` for new workflows.
+:::
+
 ## GitHub Cross-Repository Reading
 
 By default, the GitHub Tools can read from the current repository and all public repositories (if permitted by the network firewall). To read from other private repositories, you must configure additional authentication. You can also configure the GitHub Tools to be restricted in which repositories can be accessed via the GitHub tools during AI engine execution by using the `tools.github.allowed-repos` setting. See [Cross-Repository Operations](/gh-aw/reference/cross-repository/) for details and examples.
@@ -174,6 +198,53 @@ permissions:
 ```
 
 Alternatively, you can authenticate with a PAT or GitHub App. If using a GitHub App, add `vulnerability-alerts: read` to your workflow's `permissions:` field and ensure the GitHub App is configured with this permission.
+
+## Cross-Visibility Opt-Out (`private-to-public-flows`)
+
+By default, the MCP Gateway enforces _cross-visibility protections_ that prevent private repository data from flowing into public-repository sinks. These protections are active whenever the workflow runs in a public repository:
+
+- **`forcePublicRepos`** — restricts the GitHub MCP server to public repositories only at runtime, preventing private-data secrecy tags from accumulating in the agent's context.
+- **`sink-visibility` enforcement** — blocks any output to a sink whose visibility is `public` when the agent carries non-empty secrecy tags from private-repo reads.
+
+When you intentionally need private-to-public data flows, declare `private-to-public-flows` under `tools.github`.
+
+### Blanket opt-out (`allow`)
+
+```yaml
+tools:
+  github:
+    private-to-public-flows: allow
+```
+
+This disables both `forcePublicRepos` and the default `sink-visibility` enforcement for **all** MCP servers. The MCP Gateway emits `"forcePublicRepos": false` in its startup config.
+
+:::caution
+`private-to-public-flows: allow` is **not compatible with strict mode**. Strict mode workflows that require this opt-out must use the list form instead.
+:::
+
+### Selective exemption (list of server IDs)
+
+```yaml
+tools:
+  github:
+    private-to-public-flows:
+      - github
+      - my-custom-server
+mcp-servers:
+  my-custom-server:
+    type: http
+    url: "http://localhost:9000/mcp"
+```
+
+This exempts only the listed MCP server IDs from the default `sink-visibility` enforcement. `forcePublicRepos` is **not** disabled; private repo access still requires the allow-only policy to permit it. This form is compatible with strict mode.
+
+The compiler emits `"sinkVisibilityExemptServers": ["github", "my-custom-server"]` in the gateway config. The built-in GitHub MCP server ID is `github`. Custom server IDs match the key used in `mcp-servers`.
+
+### Security implications
+
+Opting out of cross-visibility protections means the agent may read from private repositories and write that data to public sinks (e.g., a public GitHub issue, a Slack channel). Only use this when your workflow explicitly requires it and you understand the data-flow implications.
+
+See [MCP Gateway Specification Section 10.9](/gh-aw/reference/mcp-gateway/#109-cross-visibility-opt-out-private-to-public-flows) for full protocol details.
 
 ## Related Documentation
 

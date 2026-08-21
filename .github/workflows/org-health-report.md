@@ -11,13 +11,11 @@ permissions:
   pull-requests: read
   discussions: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tools:
   cli-proxy: true
   github:
@@ -48,6 +46,7 @@ network:
     - defaults
     - python
 imports:
+  - shared/mcp-pagination.md
   - shared/github-guard-policy.md
   - shared/python-dataviz.md
   - ../skills/jqschema/SKILL.md
@@ -513,4 +512,21 @@ Begin the organization health report analysis now. Follow the phases in order, a
 
 ### Output Format
 
-Structure reports as: overview → key metrics/issues → collapsible details → next actions.
+**Report Structure Guidelines**
+
+- Use `###` (or lower) headers only.
+- Keep summary and critical actions visible; move long detail into `<details>` blocks.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+
+```markdown
+### Summary
+
+**X items found** — [brief description]
+
+<details>
+<summary><b>View Full Details</b></summary>
+
+... detailed content here ...
+
+</details>
+```

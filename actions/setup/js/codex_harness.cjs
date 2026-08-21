@@ -35,23 +35,27 @@
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 const fs = require("fs");
-const { runProcess, formatDuration, sleep } = require("./process_runner.cjs");
+const { runProcess, formatDuration, sleep, MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS, DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS, MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS, resolvePostResultWatchdogIdleTimeoutMs } = require("./process_runner.cjs");
+const { runHarnessRetryLoop, shouldSkipForNoopSafeOutputs, shouldStopForNoopSafeOutputs } = require("./harness_retry_runner.cjs");
 const {
   AWF_API_PROXY_REFLECT_URL,
   AWF_REFLECT_OUTPUT_PATH,
-  AWF_REFLECT_TIMEOUT_MS,
   AWF_MODELS_URL_TIMEOUT_MS,
   GEMINI_MODEL_NAME_PREFIX,
   enrichReflectModels,
   extractModelIds,
   fetchAWFReflect,
   fetchModelsFromUrl,
+  normalizeReflectProviderName,
+  resolveProviderEndpointFromReflect,
 } = require("./awf_reflect.cjs");
 const { emitMissingToolPermissionIssue, hasExpectedSafeOutputs, hasNoopInSafeOutputs } = require("./safeoutputs_cli.cjs");
 const { countPermissionDeniedIssues, hasNumerousPermissionDeniedIssues, extractDeniedCommands, buildMissingToolPermissionIssuePayload } = require("./permission_denied_helpers.cjs");
-const { detectNonRetryableHarnessGuard, buildSoftTimeoutGuard, emitSoftTimeoutSignal } = require("./harness_retry_guard.cjs");
+const { detectNonRetryableHarnessGuard, buildSoftTimeoutGuard, emitSoftTimeoutSignal, isAuthenticationFailedError } = require("./harness_retry_guard.cjs");
 const { MODEL_NOT_SUPPORTED_PATTERN: INVALID_MODEL_ERROR_PATTERN } = require("./detect_agent_errors.cjs");
 const { resolveRetryConfig } = require("./harness_retry_config.cjs");
+const { applyModelFallback, injectModelFlagAfterExec } = require("./model_fallback.cjs");
+const { parseMaxAICreditsExceededFromAuditLog } = require("./ai_credits_context.cjs");
 
 // Pattern to detect OpenAI rate-limit errors.
 // Matches the JSON error type field ("rate_limit_exceeded"), the HTTP status code
@@ -71,7 +75,6 @@ const TOKEN_PER_MIN_RATE_LIMIT_PATTERN = /Rate limit reached for [^\s]+(?: in or
 // The backreference \1 requires the two numeric parts of "N/N" to be identical —
 // "5/5" matches (exhausted) but "1/5", "3/5", "4/5" do not (still retrying).
 const RECONNECT_EXHAUSTED_PATTERN = /Reconnecting\.\.\.\s+(\d+)\/\1\b/;
-const AUTHENTICATION_FAILED_PATTERN = /Authentication failed(?:\s*\(Request ID:[^)]+\))?/i;
 
 // Pattern to detect a missing API key at startup — Codex emits this before making any API
 // calls when neither CODEX_API_KEY nor OPENAI_API_KEY is available in the environment.
@@ -81,6 +84,92 @@ const MISSING_API_KEY_PATTERN = /Missing environment variable:\s*`?(?:CODEX_API_
 // Pattern to detect OpenAI server-side errors (HTTP 500, 503).
 // These are transient infrastructure failures that may resolve on retry.
 const SERVER_ERROR_PATTERN = /InternalServerError|ServiceUnavailableError|500 Internal Server Error|503 Service Unavailable/i;
+
+// Pattern to detect deterministic request-validation failures (HTTP 400 `invalid_request_error`)
+// within Codex's outer `turn.failed` event. The provider rejects the serialized request itself
+// (e.g. `"code": "empty_array"` on `messages[N].content`), so an identical fresh run produces
+// an identical rejection: retrying only re-bills the turns that succeeded before the failure point.
+const INVALID_REQUEST_ERROR_PATTERN = /invalid_request_error/i;
+
+// Post-result watchdog: once the agent writes a terminal safe-output the harness
+// arms a watchdog timer and kills the Codex process if it is still running after
+// POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS of inactivity.  This prevents the step from
+// hitting its hard timeout when Codex hangs on exit after completing its work.
+// Constants and resolvePostResultWatchdogIdleTimeoutMs are imported from process_runner.cjs.
+const POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS = resolvePostResultWatchdogIdleTimeoutMs();
+
+// Types that are NOT terminal safe-outputs (infrastructure/diagnostic signals).
+// A terminal safe-output is any entry whose type is NOT in this set, plus "noop".
+const SAFE_OUTPUT_NON_TERMINAL_TYPES = new Set(["missing_tool", "report_incomplete"]);
+
+/**
+ * Return the current byte size of the safe-outputs file, or 0 if the file does not
+ * yet exist.  Used as a per-attempt baseline so the watchdog only arms on output
+ * appended by the current attempt, not a record left by an earlier retry.
+ * @param {string} safeOutputsPath
+ * @returns {number}
+ */
+function getSafeOutputsByteOffset(safeOutputsPath) {
+  try {
+    return fs.statSync(safeOutputsPath).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read only the content of the safe-outputs JSONL file appended after byteOffset and
+ * return true if at least one terminal safe-output entry is present in that new content.
+ * A terminal safe-output is either a "noop" (nothing to do) or a non-diagnostic task
+ * result (e.g. add-labels, hide-comment).
+ *
+ * Using a per-attempt byte offset prevents the watchdog from arming on output produced
+ * by an earlier retry: if attempt N wrote a terminal record and exited non-zero before
+ * the watchdog polled, attempt N+1 would otherwise arm immediately and be killed even
+ * though it produced nothing useful.
+ *
+ * @param {string} safeOutputsPath
+ * @param {number} byteOffset - byte position in the file at the start of the current attempt
+ * @param {{ logger?: (msg: string) => void }=} options
+ * @returns {boolean}
+ */
+function hasTerminalSafeOutput(safeOutputsPath, byteOffset, options) {
+  const logger = options && options.logger ? options.logger : () => {};
+  if (!safeOutputsPath) return false;
+  let content = "";
+  try {
+    const fd = fs.openSync(safeOutputsPath, "r");
+    try {
+      const stats = fs.fstatSync(fd);
+      const fileSize = stats.size;
+      if (fileSize <= byteOffset) return false;
+      const length = fileSize - byteOffset;
+      const buf = Buffer.allocUnsafe(length);
+      fs.readSync(fd, buf, 0, length, byteOffset);
+      content = buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed.type !== "string") continue;
+      const type = parsed.type;
+      if (type === "noop" || !SAFE_OUTPUT_NON_TERMINAL_TYPES.has(type)) {
+        logger(`hasTerminalSafeOutput: terminal entry found in ${safeOutputsPath}: type=${type}`);
+        return true;
+      }
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+  return false;
+}
 
 /**
  * Emit a timestamped diagnostic log line to stderr.
@@ -114,15 +203,6 @@ function isTokenPerMinuteRateLimitError(output) {
 }
 
 /**
- * Determines if the collected output contains an authentication failed error.
- * @param {string} output - Collected stdout+stderr from the process
- * @returns {boolean}
- */
-function isAuthenticationFailedError(output) {
-  return AUTHENTICATION_FAILED_PATTERN.test(output);
-}
-
-/**
  * Determines if the collected output indicates a missing API key at startup.
  * Codex exits before producing any agent output in this case, so retrying is futile.
  * @param {string} output - Collected stdout+stderr from the process
@@ -148,6 +228,25 @@ function isServerError(output) {
  */
 function isInvalidModelError(output) {
   return INVALID_MODEL_ERROR_PATTERN.test(output);
+}
+
+/**
+ * Determines if Codex emitted a `turn.failed` provider event containing a deterministic
+ * request-validation failure (HTTP 400 `invalid_request_error`). Such schema-level rejections
+ * can never succeed on a fresh run with the same input, so they are treated as terminal.
+ * Tokens in agent transcripts and tool responses are intentionally ignored.
+ * @param {string} output - Collected stdout+stderr from the process
+ * @returns {boolean}
+ */
+function isInvalidRequestError(output) {
+  return output.split(/\r?\n/).some(line => {
+    try {
+      const event = JSON.parse(line);
+      return event?.type === "turn.failed" && event.error && INVALID_REQUEST_ERROR_PATTERN.test(JSON.stringify(event.error));
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -200,7 +299,7 @@ function resolveCodexPromptFileArgs(args) {
       // An unreadable prompt file means no task instructions can be delivered to Codex.
       // Propagate as a fatal error rather than forwarding the harness-only flag to the
       // codex subprocess (which would fail with an "unknown option" error).
-      throw new Error(`--prompt-file '${promptFile}' is not readable: ${err.message}`);
+      throw new Error(`--prompt-file '${promptFile}' is not readable: ${err.message}`, { cause: err });
     }
     i++; // Skip the prompt-file path argument
   }
@@ -227,6 +326,19 @@ function injectJsonFlag(args) {
   if (args.length === 0 || args[0] !== "exec") return args;
   if (args.includes("--json")) return args;
   return ["exec", "--json", ...args.slice(1)];
+}
+
+function getCodexModelEnvVar(env = process.env) {
+  if ("GH_AW_MODEL_EVALS_CODEX" in env) {
+    return "GH_AW_MODEL_EVALS_CODEX";
+  }
+  if ("GH_AW_MODEL_DETECTION_CODEX" in env) {
+    return "GH_AW_MODEL_DETECTION_CODEX";
+  }
+  if ("GH_AW_MODEL_AGENT_CODEX" in env) {
+    return "GH_AW_MODEL_AGENT_CODEX";
+  }
+  return "";
 }
 
 /**
@@ -342,6 +454,47 @@ function validateCodexOpenAIBaseURLFromReflect(options) {
 }
 
 /**
+ * Configure Codex openai-proxy base_url from /reflect and return env overrides.
+ *
+ * @param {{ codexConfigPath?: string, reflectPath?: string, provider?: string }} options
+ * @returns {{ env: NodeJS.ProcessEnv, configured: boolean }}
+ */
+function configureCodexProviderFromReflect(options) {
+  const env = { ...process.env };
+  const codexConfigPath = options && options.codexConfigPath;
+  const reflectPath = (options && options.reflectPath) || AWF_REFLECT_OUTPUT_PATH;
+  const provider = normalizeReflectProviderName(options?.provider || process.env.GH_AW_LLM_PROVIDER, "openai");
+  if (!reflectPath) return { env, configured: false };
+  try {
+    const reflectContent = fs.readFileSync(reflectPath, "utf8");
+    const reflectData = JSON.parse(reflectContent);
+    const resolved = resolveProviderEndpointFromReflect({ provider, reflectData, logger: log });
+    if (!resolved || !resolved.baseUrl) return { env, configured: false };
+    env.OPENAI_BASE_URL = resolved.baseUrl;
+    log(`configured OPENAI_BASE_URL from /reflect for provider=${provider}: ${resolved.baseUrl}`);
+    if (codexConfigPath) {
+      const tomlContent = fs.readFileSync(codexConfigPath, "utf8");
+      const providerSectionPattern = /\[model_providers\.openai-proxy\][\s\S]*?(?:\n\[|$)/;
+      const baseLine = `base_url = "${resolved.baseUrl}"`;
+      if (providerSectionPattern.test(tomlContent)) {
+        const rewritten = tomlContent.replace(providerSectionPattern, section => {
+          if (/(?:^|\n)\s*base_url\s*=/.test(section)) {
+            return section.replace(/(?:^|\n)\s*base_url\s*=\s*(?:"[^"]*"|'[^']*'|[^\n]+)/, `\n${baseLine}`);
+          }
+          return `${section.trimEnd()}\n${baseLine}\n`;
+        });
+        fs.writeFileSync(codexConfigPath, rewritten, "utf8");
+      }
+    }
+    return { env, configured: true };
+  } catch (error) {
+    const err = /** @type {Error} */ error;
+    log(`warning: unable to configure provider endpoint from /reflect: ${err.message}`);
+    return { env, configured: false };
+  }
+}
+
+/**
  * Main entry point: run codex with retry logic for transient API failures.
  * Codex does not support --continue session resumption, so all retries are fresh runs.
  */
@@ -361,8 +514,7 @@ async function main() {
   // would be wasteful and potentially harmful.  This check runs before API key validation so
   // that a noop can be honoured even when credentials are absent.
   const safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS || "";
-  if (safeOutputsPath && hasNoopInSafeOutputs(safeOutputsPath, { logger: log })) {
-    log("pre-flight: noop message found in safe-outputs — skipping agent (work is already complete or no work needed)");
+  if (shouldSkipForNoopSafeOutputs({ safeOutputsPath, hasNoopInSafeOutputs, log })) {
     process.exit(0);
   }
 
@@ -392,6 +544,10 @@ async function main() {
     process.exit(1);
   }
 
+  const codexModelEnvVar = getCodexModelEnvVar(process.env);
+  const resolvedModel = codexModelEnvVar ? applyModelFallback(process.env, codexModelEnvVar, log) : "";
+  resolvedArgs = injectModelFlagAfterExec(resolvedArgs, resolvedModel);
+
   // Safe arg list for logging: when --prompt-file was present, the last element of
   // resolvedArgs is the resolved prompt content. Replace it with a placeholder so that
   // task instructions are never written to stderr or captured in agent logs.
@@ -404,8 +560,20 @@ async function main() {
 
   // Fetch AWF API proxy reflection data before running the agent to capture initial proxy state.
   // This is best-effort: failures are logged but do not affect the agent run.
-  await fetchAWFReflect({ logger: log });
+  // Skip when AWF_REFLECT_ENABLED is not "1" (e.g. no api-proxy running in sandbox or test mode).
+  if (process.env.AWF_REFLECT_ENABLED === "1") {
+    await fetchAWFReflect({ logger: log });
+  }
   const codexHome = process.env.CODEX_HOME || "";
+  let codexEnv = codexChildEnv;
+  const providerConfig = configureCodexProviderFromReflect({
+    codexConfigPath: codexHome ? `${codexHome}/config.toml` : "",
+    reflectPath: AWF_REFLECT_OUTPUT_PATH,
+    provider: process.env.GH_AW_LLM_PROVIDER || "openai",
+  });
+  if (providerConfig.configured) {
+    codexEnv = { ...codexEnv, ...providerConfig.env };
+  }
   if (codexHome) {
     const validation = validateCodexOpenAIBaseURLFromReflect({
       codexConfigPath: `${codexHome}/config.toml`,
@@ -417,7 +585,6 @@ async function main() {
     }
   }
 
-  let delay = INITIAL_DELAY_MS;
   let lastExitCode = 1;
   const driverStartTime = Date.now();
   // Soft-timeout guard: polled at the top of the retry loop and after each backoff sleep.
@@ -425,150 +592,166 @@ async function main() {
   // deadline the guard fires on the next iteration. Individual attempts are expected to
   // complete within the SOFT_TIMEOUT_BUFFER_MS window.
   const softTimeoutGuard = buildSoftTimeoutGuard(driverStartTime);
+  const retryRun = await runHarnessRetryLoop({
+    maxRetries: MAX_RETRIES,
+    initialDelayMs: INITIAL_DELAY_MS,
+    backoffMultiplier: BACKOFF_MULTIPLIER,
+    maxDelayMs: MAX_DELAY_MS,
+    driverStartTime,
+    harnessName: "Codex harness",
+    log,
+    softTimeoutGuard,
+    getRetryMode: () => "fresh run",
+    runAttempt: async attempt => {
+      // Track the file size before this attempt so the watchdog only arms on output
+      // written by this attempt, not by a previous retry.
+      const safeOutputsByteOffset = safeOutputsPath ? getSafeOutputsByteOffset(safeOutputsPath) : 0;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    // Codex does not support --continue: every retry is a fresh run from scratch.
-    // Context from the interrupted session is not recoverable, but transient API
-    // failures (rate limits, server errors) may resolve on the next attempt.
-
-    if (softTimeoutGuard && Date.now() >= softTimeoutGuard.softDeadlineMs) {
-      emitSoftTimeoutSignal(softTimeoutGuard, `before attempt ${attempt + 1}`, "Codex harness", log);
-      lastExitCode = 1;
-      break;
-    }
-
-    if (attempt > 0) {
-      log(`retry ${attempt}/${MAX_RETRIES}: sleeping ${delay}ms before next attempt (fresh run)`);
-      await sleep(delay);
-      delay = Math.min(delay * BACKOFF_MULTIPLIER, MAX_DELAY_MS);
-      log(`retry ${attempt}/${MAX_RETRIES}: woke up, next delay cap will be ${Math.min(delay * BACKOFF_MULTIPLIER, MAX_DELAY_MS)}ms`);
-      if (softTimeoutGuard && Date.now() >= softTimeoutGuard.softDeadlineMs) {
-        emitSoftTimeoutSignal(softTimeoutGuard, "after backoff sleep", "Codex harness", log);
-        lastExitCode = 1;
-        break;
+      const result = await runProcess({
+        command,
+        args: resolvedArgs,
+        attempt,
+        log,
+        logArgs: safeArgs,
+        env: codexEnv,
+        postResultWatchdog: safeOutputsPath
+          ? {
+              shouldArm: () => hasTerminalSafeOutput(safeOutputsPath, safeOutputsByteOffset, { logger: log }),
+              inactivityTimeoutMs: POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS,
+            }
+          : undefined,
+      });
+      return { ...result, safeOutputsByteOffset };
+    },
+    handleFailure: ({ attempt, result }) => {
+      // When the post-result watchdog fired (SIGTERM sent to a hanging Codex process) and the
+      // safe-outputs file contains a terminal result written during this attempt, treat the run
+      // as a success.  The agent completed its work and wrote its output — the hang on exit is
+      // a cosmetic failure, not a task failure.  Check this before logging "attempt failed" so
+      // the log stream does not contradict itself for what is ultimately a successful run.
+      if (result.watchdogFired && safeOutputsPath && hasTerminalSafeOutput(safeOutputsPath, result.safeOutputsByteOffset ?? 0, { logger: log })) {
+        log(`attempt ${attempt + 1}: post-result watchdog fired after terminal safe-output was emitted — treating as success (late-activity exit suppressed)`);
+        return { action: "stop", exitCode: 0 };
       }
-    }
 
-    const result = await runProcess({ command, args: resolvedArgs, attempt, log, logArgs: safeArgs, env: codexChildEnv });
-    lastExitCode = result.exitCode;
+      const isRateLimit = isRateLimitError(result.output);
+      const isTokenPerMinuteRateLimit = isTokenPerMinuteRateLimitError(result.output);
+      const isAuthenticationFailed = isAuthenticationFailedError(result.output);
+      const isMissingApiKey = isMissingApiKeyError(result.output);
+      const isServer = isServerError(result.output);
+      const isInvalidModel = isInvalidModelError(result.output);
+      const isInvalidRequest = isInvalidRequestError(result.output);
+      const permissionDeniedCount = countPermissionDeniedIssues(result.output);
+      const hasNumerousPermissionDenied = hasNumerousPermissionDeniedIssues(result.output);
+      log(
+        `attempt ${attempt + 1} failed:` +
+          ` exitCode=${result.exitCode}` +
+          ` watchdogFired=${result.watchdogFired}` +
+          ` isRateLimitError=${isRateLimit}` +
+          ` isTokenPerMinuteRateLimitError=${isTokenPerMinuteRateLimit}` +
+          ` isAuthenticationFailedError=${isAuthenticationFailed}` +
+          ` isMissingApiKeyError=${isMissingApiKey}` +
+          ` isServerError=${isServer}` +
+          ` isInvalidModelError=${isInvalidModel}` +
+          ` isInvalidRequestError=${isInvalidRequest}` +
+          ` permissionDeniedCount=${permissionDeniedCount}` +
+          ` hasNumerousPermissionDenied=${hasNumerousPermissionDenied}` +
+          ` hasOutput=${result.hasOutput}` +
+          ` retriesRemaining=${MAX_RETRIES - attempt}`
+      );
 
-    // Success — stop retrying
-    if (result.exitCode === 0) {
-      log(`success on attempt ${attempt + 1}: totalDuration=${formatDuration(Date.now() - driverStartTime)}`);
-      lastExitCode = 0;
-      break;
-    }
-
-    const isRateLimit = isRateLimitError(result.output);
-    const isTokenPerMinuteRateLimit = isTokenPerMinuteRateLimitError(result.output);
-    const isAuthenticationFailed = isAuthenticationFailedError(result.output);
-    const isMissingApiKey = isMissingApiKeyError(result.output);
-    const isServer = isServerError(result.output);
-    const isInvalidModel = isInvalidModelError(result.output);
-    const permissionDeniedCount = countPermissionDeniedIssues(result.output);
-    const hasNumerousPermissionDenied = hasNumerousPermissionDeniedIssues(result.output);
-    log(
-      `attempt ${attempt + 1} failed:` +
-        ` exitCode=${result.exitCode}` +
-        ` isRateLimitError=${isRateLimit}` +
-        ` isTokenPerMinuteRateLimitError=${isTokenPerMinuteRateLimit}` +
-        ` isAuthenticationFailedError=${isAuthenticationFailed}` +
-        ` isMissingApiKeyError=${isMissingApiKey}` +
-        ` isServerError=${isServer}` +
-        ` isInvalidModelError=${isInvalidModel}` +
-        ` permissionDeniedCount=${permissionDeniedCount}` +
-        ` hasNumerousPermissionDenied=${hasNumerousPermissionDenied}` +
-        ` hasOutput=${result.hasOutput}` +
-        ` retriesRemaining=${MAX_RETRIES - attempt}`
-    );
-
-    // If a noop was written to safe-outputs during the failed run, the agent determined
-    // there was nothing to do (or the user indicated so before the agent ran).  Retrying
-    // would not produce different results and could waste resources.
-    if (safeOutputsPath && hasNoopInSafeOutputs(safeOutputsPath, { logger: log })) {
-      log(`attempt ${attempt + 1}: noop message found in safe-outputs — not retrying (work is already complete or no work needed)`);
-      lastExitCode = 0;
-      break;
-    }
-
-    const nonRetryableGuard = detectNonRetryableHarnessGuard(result.output);
-    if (nonRetryableGuard.aiCreditsExceeded || nonRetryableGuard.awfAPIProxyBlockingRequests || nonRetryableGuard.goalAlreadyActive || nonRetryableGuard.maxRunsExceeded) {
-      const reasons = [];
-      if (nonRetryableGuard.aiCreditsExceeded) reasons.push("AI credits budget exceeded");
-      if (nonRetryableGuard.awfAPIProxyBlockingRequests) reasons.push("AWF API proxy is blocking requests");
-      if (nonRetryableGuard.goalAlreadyActive) reasons.push("goal is already active for this thread (use update_goal when the current goal is complete)");
-      if (nonRetryableGuard.maxRunsExceeded) reasons.push("maximum LLM invocations exceeded");
-      log(`attempt ${attempt + 1}: ${reasons.join(" and ")} — not retrying (non-retryable guard condition)`);
-      break;
-    }
-
-    if (attempt === 0 && isAuthenticationFailed) {
-      log(`attempt ${attempt + 1}: authentication failed — not retrying (first-attempt auth failure is non-retryable)`);
-      break;
-    }
-
-    if (isMissingApiKey) {
-      log(`attempt ${attempt + 1}: missing API key — not retrying (configure CODEX_API_KEY or OPENAI_API_KEY)`);
-      break;
-    }
-
-    if (isInvalidModel) {
-      log(`attempt ${attempt + 1}: invalid/unsupported model configuration — not retrying (specify a valid engine model name in workflow frontmatter)`);
-      break;
-    }
-
-    if (hasNumerousPermissionDenied) {
-      // If the agent already produced expected safe-outputs, the permission-denied
-      // signals are from optional/exploratory commands — not from the core task work.
-      // Suppress the terminal verdict and exit 0 to avoid a false-red run.
-      if (safeOutputsPath && hasExpectedSafeOutputs(safeOutputsPath, { logger: log })) {
-        log(`attempt ${attempt + 1}: detected numerous permission-denied issues but safe-outputs already contain expected output — suppressing terminal verdict (false-red: core work succeeded)`);
-        lastExitCode = 0;
-        break;
+      if (shouldStopForNoopSafeOutputs({ attempt, safeOutputsPath, hasNoopInSafeOutputs, log })) {
+        return { action: "stop", exitCode: 0 };
       }
-      const deniedCommands = extractDeniedCommands(result.output);
-      emitMissingToolPermissionIssue({ deniedCommands, logger: log });
-      log(`attempt ${attempt + 1}: detected numerous permission-denied issues — not retrying (classified as missing tool/permission issue)`);
-      break;
-    }
 
-    // Token-per-minute limits indicate exhausted budget for the current workload profile.
-    // Fresh-run retries immediately repeat the same prompt workload and can quickly
-    // drain available credits without making forward progress.
-    if (isTokenPerMinuteRateLimit) {
-      log(`attempt ${attempt + 1}: token-per-minute rate limit detected — not retrying (fresh runs can further drain token budget)`);
-      break;
-    }
+      const nonRetryableGuard = detectNonRetryableHarnessGuard(result.output);
+      const trustedAICreditsExceeded = nonRetryableGuard.aiCreditsExceeded && parseMaxAICreditsExceededFromAuditLog();
+      if (nonRetryableGuard.aiCreditsExceeded && !trustedAICreditsExceeded) {
+        log(`attempt ${attempt + 1}: AI credits marker found in CLI output without trusted firewall audit confirmation — preserving normal failure handling`);
+      }
+      const shouldTreatAICreditsExceededAsSuccess = trustedAICreditsExceeded && !isAuthenticationFailed && !isMissingApiKey;
+      if (shouldTreatAICreditsExceededAsSuccess || nonRetryableGuard.awfAPIProxyBlockingRequests || nonRetryableGuard.goalAlreadyActive || nonRetryableGuard.maxRunsExceeded) {
+        const reasons = [];
+        if (shouldTreatAICreditsExceededAsSuccess) reasons.push("AI credits budget exceeded");
+        if (nonRetryableGuard.awfAPIProxyBlockingRequests) reasons.push("AWF API proxy is blocking requests");
+        if (nonRetryableGuard.goalAlreadyActive) reasons.push("goal is already active for this thread (use update_goal when the current goal is complete)");
+        if (nonRetryableGuard.maxRunsExceeded) reasons.push("maximum LLM invocations exceeded");
+        log(`attempt ${attempt + 1}: ${reasons.join(" and ")} — not retrying (non-retryable guard condition)`);
+        if (shouldTreatAICreditsExceededAsSuccess) {
+          log(`attempt ${attempt + 1}: AI credits budget enforced — exiting 0 (budget control, not an error)`);
+          return { action: "stop", exitCode: 0 };
+        }
+        if (nonRetryableGuard.maxRunsExceeded && safeOutputsPath && hasExpectedSafeOutputs(safeOutputsPath, { logger: log })) {
+          log(`attempt ${attempt + 1}: invocation cap saturated but safe-outputs already contain expected output — suppressing terminal verdict (false-red: core work succeeded)`);
+          return { action: "stop", exitCode: 0 };
+        }
+        return { action: "stop" };
+      }
 
-    // Codex's internal stream-reconnect retries are exhausted and the root cause is a
-    // rate-limit error.  Each reconnect attempt immediately failed with the same limit,
-    // so a fresh harness run will encounter the same rate-limit at the same point in the
-    // session and drain the token budget further without making progress.
-    if (isRateLimit && isReconnectExhaustedError(result.output)) {
-      log(`attempt ${attempt + 1}: rate-limit with exhausted reconnects — not retrying (fresh run would hit the same rate limit)`);
-      break;
-    }
+      if (attempt === 0 && isAuthenticationFailed) {
+        log(`attempt ${attempt + 1}: authentication failed — not retrying (first-attempt auth failure is non-retryable)`);
+        return { action: "stop" };
+      }
 
-    // Retry when the session was partially executed (has output) or on well-known
-    // transient errors (rate limit, server error) even without output.
-    const isTransient = isRateLimit || isServer;
-    if (attempt < MAX_RETRIES && (result.hasOutput || isTransient)) {
-      const reason = isRateLimit ? "rate_limit_exceeded (transient)" : isServer ? "server_error (transient)" : "partial execution";
-      log(`attempt ${attempt + 1}: ${reason} — will retry as fresh run (attempt ${attempt + 2}/${MAX_RETRIES + 1})`);
-      continue;
-    }
+      if (isMissingApiKey) {
+        log(`attempt ${attempt + 1}: missing API key — not retrying (configure CODEX_API_KEY or OPENAI_API_KEY)`);
+        return { action: "stop" };
+      }
 
-    if (attempt >= MAX_RETRIES) {
-      log(`all ${MAX_RETRIES} retries exhausted — giving up (exitCode=${lastExitCode})`);
-    } else {
-      log(`attempt ${attempt + 1}: no output produced — not retrying` + ` (possible causes: binary not found, permission denied, auth failure, or silent startup crash)`);
-    }
+      if (isInvalidModel) {
+        log(`attempt ${attempt + 1}: invalid/unsupported model configuration — not retrying (specify a valid engine model name in workflow frontmatter)`);
+        return { action: "stop" };
+      }
 
-    break;
-  }
+      if (isInvalidRequest) {
+        log(`attempt ${attempt + 1}: invalid_request_error (HTTP 400) — not retrying (the provider rejected the request payload; an identical fresh run would fail the same way)`);
+        return { action: "stop" };
+      }
+
+      if (hasNumerousPermissionDenied) {
+        if (safeOutputsPath && hasExpectedSafeOutputs(safeOutputsPath, { logger: log })) {
+          log(`attempt ${attempt + 1}: detected numerous permission-denied issues but safe-outputs already contain expected output — suppressing terminal verdict (false-red: core work succeeded)`);
+          return { action: "stop", exitCode: 0 };
+        }
+        const deniedCommands = extractDeniedCommands(result.output);
+        emitMissingToolPermissionIssue({ deniedCommands, logger: log });
+        log(`attempt ${attempt + 1}: detected numerous permission-denied issues — not retrying (classified as missing tool/permission issue)`);
+        return { action: "stop" };
+      }
+
+      if (isTokenPerMinuteRateLimit) {
+        log(`attempt ${attempt + 1}: token-per-minute rate limit detected — not retrying (fresh runs can further drain token budget)`);
+        return { action: "stop" };
+      }
+
+      if (isRateLimit && isReconnectExhaustedError(result.output)) {
+        log(`attempt ${attempt + 1}: rate-limit with exhausted reconnects — not retrying (fresh run would hit the same rate limit)`);
+        return { action: "stop" };
+      }
+
+      const isTransient = isRateLimit || isServer;
+      if (attempt < MAX_RETRIES && (result.hasOutput || isTransient)) {
+        const reason = isRateLimit ? "rate_limit_exceeded (transient)" : isServer ? "server_error (transient)" : "partial execution";
+        log(`attempt ${attempt + 1}: ${reason} — will retry as fresh run (attempt ${attempt + 2}/${MAX_RETRIES + 1})`);
+        return { action: "retry" };
+      }
+
+      if (attempt >= MAX_RETRIES) {
+        log(`all ${MAX_RETRIES} retries exhausted — giving up (exitCode=${result.exitCode})`);
+      } else {
+        log(`attempt ${attempt + 1}: no output produced — not retrying` + ` (possible causes: binary not found, permission denied, auth failure, or silent startup crash)`);
+      }
+
+      return { action: "stop" };
+    },
+  });
+  lastExitCode = retryRun.exitCode;
 
   // Fetch AWF API proxy reflection data and persist to disk for post-run step summary.
-  await fetchAWFReflect({ logger: log });
+  // Skip when AWF_REFLECT_ENABLED is not "1" (e.g. no api-proxy running in sandbox or test mode).
+  if (process.env.AWF_REFLECT_ENABLED === "1") {
+    await fetchAWFReflect({ logger: log });
+  }
 
   log(`done: exitCode=${lastExitCode} totalDuration=${formatDuration(Date.now() - driverStartTime)}`);
   process.exit(lastExitCode);
@@ -584,6 +767,7 @@ if (typeof module !== "undefined" && module.exports) {
     isMissingApiKeyError,
     isServerError,
     isInvalidModelError,
+    isInvalidRequestError,
     isReconnectExhaustedError,
     countPermissionDeniedIssues,
     hasNumerousPermissionDeniedIssues,
@@ -595,9 +779,18 @@ if (typeof module !== "undefined" && module.exports) {
     extractOpenAIProxyBaseURLFromToml,
     getConfiguredOpenAIPortFromReflect,
     validateCodexOpenAIBaseURLFromReflect,
+    configureCodexProviderFromReflect,
     hasNoopInSafeOutputs,
     hasExpectedSafeOutputs,
     resolveRetryConfig,
+    applyModelFallback,
+    injectModelFlagAfterExec,
+    getCodexModelEnvVar,
+    resolvePostResultWatchdogIdleTimeoutMs,
+    POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS,
+    DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS,
+    MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS,
+    MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS,
   };
 }
 

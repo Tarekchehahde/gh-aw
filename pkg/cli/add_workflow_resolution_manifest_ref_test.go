@@ -5,12 +5,13 @@ package cli
 import "testing"
 
 func TestAppendRepositoryPackageWorkflowSpecs_PropagatesResolvedRef(t *testing.T) {
+	t.Parallel()
 	repoSpec := &RepoSpec{
 		RepoSlug: "owner/repo",
 	}
 	pkg := &resolvedRepositoryPackage{
 		ResolvedRef:        "v1.2.3",
-		InstallationSource: []string{"workflows/review.md"},
+		InstallationSource: packageInstallablesFromSourcePaths([]string{"workflows/review.md"}),
 		SkillFiles: []resolvedPackageSkillFile{
 			{SourcePath: "skills/review/SKILL.md", SkillName: "review"},
 		},
@@ -29,13 +30,14 @@ func TestAppendRepositoryPackageWorkflowSpecs_PropagatesResolvedRef(t *testing.T
 }
 
 func TestAppendRepositoryPackageWorkflowSpecs_PrefersExplicitVersion(t *testing.T) {
+	t.Parallel()
 	repoSpec := &RepoSpec{
 		RepoSlug: "owner/repo",
 		Version:  "v9.9.9",
 	}
 	pkg := &resolvedRepositoryPackage{
 		ResolvedRef:        "v1.2.3",
-		InstallationSource: []string{"workflows/review.md"},
+		InstallationSource: packageInstallablesFromSourcePaths([]string{"workflows/review.md"}),
 	}
 
 	specs := appendRepositoryPackageWorkflowSpecs(nil, repoSpec, pkg)

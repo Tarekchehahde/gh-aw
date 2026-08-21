@@ -36,6 +36,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { buildCopilotSDKPermissionHandler, getEnvPositiveIntOrDefault, parseMaxToolDenialsLimit, MAX_TOOL_DENIALS_DEFAULT } = require("./copilot_sdk_permissions.cjs");
+const { resolveModelWithFallback } = require("./model_fallback.cjs");
 const { extractShellCommandFromToolData } = require("./tool_call_details.cjs");
 
 // Default timeout for a single sendAndWait call: 10 minutes.
@@ -163,11 +164,14 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     workingDirectory: process.env.GITHUB_WORKSPACE || process.cwd(),
     logLevel,
   });
+  /** @type {any} */
   let session = null;
   /** @type {fs.WriteStream | null} */
   let eventsStream = null;
   let clientStarted = false;
   let toolDenialCount = 0;
+  let assistantTurnCount = 0;
+  /** @type {any} */
   let catastrophicToolDenialsError = null;
   let catastrophicToolDenialsTriggered = false;
   /**
@@ -198,7 +202,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
   /**
    * Best-effort write of a driver-level event to events.jsonl and stderr.
    * @param {string} type
-   * @param {object} data
+   * @param {any} data
    */
   function writeDriverEvent(type, data) {
     const entry = { type, timestamp: new Date().toISOString(), data };
@@ -252,7 +256,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     // Build session config using the multi-provider surface.
     /** @type {import("@github/copilot-sdk").SessionConfig} */
     const sessionConfig = {
-      model: model || process.env.COPILOT_MODEL || undefined,
+      model: model || resolveModelWithFallback(process.env, "COPILOT_MODEL") || undefined,
       providers,
       models: providerModels,
       onPermissionRequest,
@@ -275,7 +279,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
      * Uses the event's own ISO-8601 timestamp when available.
      *
      * @param {string} type
-     * @param {object} data
+     * @param {any} data
      * @param {string | undefined} [timestamp]
      */
     function writeEvent(type, data, timestamp) {
@@ -330,6 +334,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
           if (content) {
             hasOutput = true;
             output += content;
+            assistantTurnCount++;
           }
           writeEvent("assistant.message", { content }, event.timestamp);
           break;
@@ -433,11 +438,12 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
       if (content) {
         output = content;
         hasOutput = true;
+        assistantTurnCount++;
       }
     }
 
     const durationMs = Date.now() - startTime;
-    log(`session completed: hasOutput=${hasOutput} durationMs=${durationMs}`);
+    log(`session completed: hasOutput=${hasOutput} assistantTurns=${assistantTurnCount} durationMs=${durationMs}`);
 
     return { exitCode: 0, output, hasOutput, durationMs };
   } catch (err) {
@@ -450,7 +456,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     // the final tool result was returned.  Treat it as a successful completion.
     if (postCompletionWatchdogTriggered && !catastrophicToolDenialsError && hasOutput && pendingToolCalls.size === 0) {
       log(`warning: post-completion watchdog triggered disconnect — treating as completed`);
-      log(`session completed: hasOutput=${hasOutput} durationMs=${durationMs}`);
+      log(`session completed: hasOutput=${hasOutput} assistantTurns=${assistantTurnCount} durationMs=${durationMs}`);
       return { exitCode: 0, output, hasOutput, durationMs };
     }
 
@@ -461,7 +467,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
     const isIdleTimeout = !catastrophicToolDenialsError && SDK_IDLE_TIMEOUT_PATTERN.test(failure.message);
     if (isIdleTimeout && hasOutput && pendingToolCalls.size === 0) {
       log(`warning: SDK idle-timeout with collected output and no pending tool calls — treating as completed`);
-      log(`session completed: hasOutput=${hasOutput} durationMs=${durationMs}`);
+      log(`session completed: hasOutput=${hasOutput} assistantTurns=${assistantTurnCount} durationMs=${durationMs}`);
       return { exitCode: 0, output, hasOutput, durationMs };
     }
 
@@ -497,6 +503,7 @@ async function runWithCopilotSDK({ sdkUri, prompt, logger, attempt = 0, model, c
      * @returns {Promise<boolean>}
      */
     const withCleanupTimeout = p => {
+      /** @type {any} */
       let timeoutId = null;
       const deadline = new Promise(resolve => {
         timeoutId = setTimeout(() => {

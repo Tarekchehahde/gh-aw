@@ -9,6 +9,7 @@ const { getErrorMessage } = require("./error_helpers.cjs");
 const { resolveTarget, isStagedMode, logStagedPreviewInfo, checkRequiredFilter } = require("./safe_output_helpers.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo } = require("./repo_helpers.cjs");
 const { createAuthenticatedGitHubClient } = require("./handler_auth.cjs");
+const { SAFE_OUTPUT_E099 } = require("./error_codes.cjs");
 
 /** @type {string} Safe output type handled by this module */
 const HANDLER_TYPE = "dismiss_pull_request_review";
@@ -225,14 +226,33 @@ async function main(config = {}) {
         };
       }
 
-      const { data: review } = await githubClient.rest.pulls.getReview({
-        owner,
-        repo,
-        pull_number: pullRequestNumber,
-        review_id: reviewId,
-      });
+      let review;
+      try {
+        const { data } = await githubClient.rest.pulls.getReview({
+          owner,
+          repo,
+          pull_number: pullRequestNumber,
+          review_id: reviewId,
+        });
+        review = data;
+      } catch (getReviewError) {
+        if (getReviewError?.status === 404) {
+          return {
+            success: true,
+            skipped: true,
+            reason: "review no longer exists",
+            review_id: reviewId,
+            pull_request_number: pullRequestNumber,
+            repo: `${owner}/${repo}`,
+          };
+        }
+        throw new Error(`${SAFE_OUTPUT_E099}: Failed to fetch review ${reviewId} on ${owner}/${repo}#${pullRequestNumber}: ${getErrorMessage(getReviewError)}`, {
+          cause: getReviewError,
+        });
+      }
 
       const reviewAuthorLogin = review?.user?.login;
+      const reviewAuthorType = typeof review?.user?.type === "string" ? review.user.type.trim() : "";
       if (typeof reviewAuthorLogin !== "string" || reviewAuthorLogin.trim() === "") {
         return {
           success: false,
@@ -241,6 +261,18 @@ async function main(config = {}) {
       }
       const reviewAuthor = reviewAuthorLogin.trim();
       if (reviewAuthor !== expectedAuthor) {
+        if (reviewAuthorType === "Bot") {
+          const warningMessage =
+            `Skipping dismiss_pull_request_review for review ${reviewId}: ` +
+            `review author (${reviewAuthor}) does not match dismisser (${dismisser}). ` +
+            `Actor-bound dismissal only permits dismissing reviews authored by the current workflow actor.`;
+          core.warning(warningMessage);
+          return {
+            success: false,
+            skipped: true,
+            error: warningMessage,
+          };
+        }
         return {
           success: false,
           error: `review author (${reviewAuthor || "unknown"}) must match dismisser (${dismisser})`,

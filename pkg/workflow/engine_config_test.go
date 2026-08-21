@@ -21,6 +21,7 @@ func TestExtractEngineConfig(t *testing.T) {
 		frontmatter           map[string]any
 		expectedEngineSetting string
 		expectedConfig        *EngineConfig
+		expectedModel         string
 	}{
 		{
 			name:                  "no engine specified",
@@ -102,6 +103,19 @@ func TestExtractEngineConfig(t *testing.T) {
 			expectedConfig:        nil,
 		},
 		{
+			// ExtractEngineConfig returns &EngineConfig{} (empty struct, not nil) when
+			// only a top-level model: is present and no engine: key is specified.
+			// Callers must nil-check config before reading fields in the engine-present path,
+			// but for the model-only path they receive a non-nil empty config.
+			name: "top-level model without engine",
+			frontmatter: map[string]any{
+				"model": "gpt-4",
+			},
+			expectedEngineSetting: "",
+			expectedConfig:        &EngineConfig{},
+			expectedModel:         "gpt-4",
+		},
+		{
 			name:                  "string format - claude",
 			frontmatter:           map[string]any{"engine": "claude"},
 			expectedEngineSetting: "claude",
@@ -112,6 +126,16 @@ func TestExtractEngineConfig(t *testing.T) {
 			frontmatter:           map[string]any{"engine": "codex"},
 			expectedEngineSetting: "codex",
 			expectedConfig:        &EngineConfig{ID: "codex"},
+		},
+		{
+			name: "string format - top-level model returned",
+			frontmatter: map[string]any{
+				"engine": "copilot",
+				"model":  "claude-sonnet-4.5",
+			},
+			expectedEngineSetting: "copilot",
+			expectedConfig:        &EngineConfig{ID: "copilot"},
+			expectedModel:         "claude-sonnet-4.5",
 		},
 		{
 			name: "object format - minimal (id only)",
@@ -176,7 +200,49 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "codex",
-			expectedConfig:        &EngineConfig{ID: "codex", Model: "gpt-4o"},
+			expectedConfig:        &EngineConfig{ID: "codex"},
+			expectedModel:         "gpt-4o",
+		},
+		{
+			name: "object format - top-level model overrides engine.model",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":    "codex",
+					"model": "gpt-4o",
+				},
+				"model": "gpt-5",
+			},
+			expectedEngineSetting: "codex",
+			expectedConfig:        &EngineConfig{ID: "codex"},
+			expectedModel:         "gpt-5",
+		},
+		{
+			// Empty top-level model: "" must NOT override engine.model.
+			// The implementation guards with topLevelModel != "", so an empty
+			// string leaves the engine.model value intact.
+			name: "object format - empty top-level model does not override engine.model",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":    "codex",
+					"model": "gpt-4o",
+				},
+				"model": "",
+			},
+			expectedEngineSetting: "codex",
+			expectedConfig:        &EngineConfig{ID: "codex"},
+			expectedModel:         "gpt-4o",
+		},
+		{
+			name: "object format - top-level model alone (no engine.model)",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id": "claude",
+				},
+				"model": "claude-sonnet-4.5",
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude"},
+			expectedModel:         "claude-sonnet-4.5",
 		},
 		{
 			name: "object format - with model-provider override",
@@ -187,7 +253,30 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "claude",
-			expectedConfig:        &EngineConfig{ID: "claude", LLMProvider: "github"},
+			expectedConfig:        &EngineConfig{ID: "claude", LLMProvider: LLMProviderGitHub},
+		},
+		{
+			name: "object format - with provider override",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":       "claude",
+					"provider": "openai",
+				},
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude", LLMProvider: LLMProviderOpenAI},
+		},
+		{
+			name: "object format - provider override wins over model-provider",
+			frontmatter: map[string]any{
+				"engine": map[string]any{
+					"id":             "claude",
+					"model-provider": "github",
+					"provider":       "openai",
+				},
+			},
+			expectedEngineSetting: "claude",
+			expectedConfig:        &EngineConfig{ID: "claude", LLMProvider: LLMProviderOpenAI},
 		},
 		{
 			name: "object format - deprecated llm-provider ignored",
@@ -210,7 +299,8 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "claude",
-			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta", Model: "claude-3-5-sonnet-20241022"},
+			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta"},
+			expectedModel:         "claude-3-5-sonnet-20241022",
 		},
 		{
 			name: "object format - with max-turns",
@@ -290,7 +380,8 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "claude",
-			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta", Model: "claude-3-5-sonnet-20241022", MaxTurns: "10"},
+			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta", MaxTurns: "10"},
+			expectedModel:         "claude-3-5-sonnet-20241022",
 		},
 		{
 			// float64 is what json.Unmarshal produces for numbers when deserializing engine
@@ -351,7 +442,8 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "claude",
-			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta", Model: "claude-3-5-sonnet-20241022", MaxTurns: "5", Env: map[string]string{"AWS_REGION": "us-west-2", "API_ENDPOINT": "https://api.example.com"}},
+			expectedConfig:        &EngineConfig{ID: "claude", Version: "beta", MaxTurns: "5", Env: map[string]string{"AWS_REGION": "us-west-2", "API_ENDPOINT": "https://api.example.com"}},
+			expectedModel:         "claude-3-5-sonnet-20241022",
 		},
 		{
 			name: "object format - missing id",
@@ -362,7 +454,8 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "",
-			expectedConfig:        &EngineConfig{Version: "beta", Model: "gpt-4o"},
+			expectedConfig:        &EngineConfig{Version: "beta"},
+			expectedModel:         "gpt-4o",
 		},
 		{
 			name: "object format - with user-agent (hyphen)",
@@ -436,7 +529,8 @@ func TestExtractEngineConfig(t *testing.T) {
 				},
 			},
 			expectedEngineSetting: "codex",
-			expectedConfig:        &EngineConfig{ID: "codex", Version: "beta", Model: "gpt-4o", MaxTurns: "3", UserAgent: "complete-custom-agent", Env: map[string]string{"CUSTOM_VAR": "value1"}},
+			expectedConfig:        &EngineConfig{ID: "codex", Version: "beta", MaxTurns: "3", UserAgent: "complete-custom-agent", Env: map[string]string{"CUSTOM_VAR": "value1"}},
+			expectedModel:         "gpt-4o",
 		},
 		{
 			name: "object format - harness sub-object retry policy fields (integer literals)",
@@ -448,6 +542,7 @@ func TestExtractEngineConfig(t *testing.T) {
 						"initial-delay-ms":   10000,
 						"backoff-multiplier": 2,
 						"max-delay-ms":       180000,
+						"watchdog-timeout":   120,
 					},
 				},
 			},
@@ -458,6 +553,7 @@ func TestExtractEngineConfig(t *testing.T) {
 				HarnessInitialDelayMs:    "10000",
 				HarnessBackoffMultiplier: "2",
 				HarnessMaxDelayMs:        "180000",
+				HarnessWatchdogTimeoutMs: "120000",
 			},
 		},
 		{
@@ -470,6 +566,7 @@ func TestExtractEngineConfig(t *testing.T) {
 						"initial-delay-ms":   "${{ vars.RETRY_DELAY }}",
 						"backoff-multiplier": "${{ vars.BACKOFF }}",
 						"max-delay-ms":       "${{ vars.MAX_DELAY }}",
+						"watchdog-timeout":   "${{ vars.WATCHDOG_TIMEOUT_SEC }}",
 					},
 				},
 			},
@@ -480,6 +577,7 @@ func TestExtractEngineConfig(t *testing.T) {
 				HarnessInitialDelayMs:    "${{ vars.RETRY_DELAY }}",
 				HarnessBackoffMultiplier: "${{ vars.BACKOFF }}",
 				HarnessMaxDelayMs:        "${{ vars.MAX_DELAY }}",
+				HarnessWatchdogTimeoutMs: "${{ vars.WATCHDOG_TIMEOUT_SEC }}",
 			},
 		},
 		{
@@ -500,7 +598,7 @@ func TestExtractEngineConfig(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			engineSetting, config := compiler.ExtractEngineConfig(test.frontmatter)
+			engineSetting, config, model := compiler.ExtractEngineConfig(test.frontmatter)
 
 			if engineSetting != test.expectedEngineSetting {
 				t.Errorf("Expected engineSetting '%s', got '%s'", test.expectedEngineSetting, engineSetting)
@@ -524,8 +622,8 @@ func TestExtractEngineConfig(t *testing.T) {
 					t.Errorf("Expected config.Version '%s', got '%s'", test.expectedConfig.Version, config.Version)
 				}
 
-				if config.Model != test.expectedConfig.Model {
-					t.Errorf("Expected config.Model '%s', got '%s'", test.expectedConfig.Model, config.Model)
+				if model != test.expectedModel {
+					t.Errorf("Expected model '%s', got '%s'", test.expectedModel, model)
 				}
 
 				if config.MaxTurns != test.expectedConfig.MaxTurns {
@@ -571,6 +669,9 @@ func TestExtractEngineConfig(t *testing.T) {
 				if config.HarnessMaxDelayMs != test.expectedConfig.HarnessMaxDelayMs {
 					t.Errorf("Expected config.HarnessMaxDelayMs '%s', got '%s'", test.expectedConfig.HarnessMaxDelayMs, config.HarnessMaxDelayMs)
 				}
+				if config.HarnessWatchdogTimeoutMs != test.expectedConfig.HarnessWatchdogTimeoutMs {
+					t.Errorf("Expected config.HarnessWatchdogTimeoutMs '%s', got '%s'", test.expectedConfig.HarnessWatchdogTimeoutMs, config.HarnessWatchdogTimeoutMs)
+				}
 
 				if len(config.Env) != len(test.expectedConfig.Env) {
 					t.Errorf("Expected config.Env length %d, got %d", len(test.expectedConfig.Env), len(config.Env))
@@ -591,7 +692,7 @@ func TestExtractEngineConfig(t *testing.T) {
 
 func TestExtractEngineConfig_EngineAuthMapsToAWFEnv(t *testing.T) {
 	compiler := NewCompiler()
-	_, config := compiler.ExtractEngineConfig(map[string]any{
+	_, config, _ := compiler.ExtractEngineConfig(map[string]any{
 		"engine": map[string]any{
 			"id": "copilot",
 			"auth": map[string]any{
@@ -625,7 +726,7 @@ func TestExtractEngineConfig_EngineAuthMapsToAWFEnv(t *testing.T) {
 
 func TestExtractEngineConfig_EngineEnvTakesPrecedenceOverEngineAuth(t *testing.T) {
 	compiler := NewCompiler()
-	_, config := compiler.ExtractEngineConfig(map[string]any{
+	_, config, _ := compiler.ExtractEngineConfig(map[string]any{
 		"engine": map[string]any{
 			"id": "copilot",
 			"env": map[string]any{
@@ -646,7 +747,7 @@ func TestExtractEngineConfig_EngineEnvTakesPrecedenceOverEngineAuth(t *testing.T
 
 func TestExtractEngineConfig_AnthropicWIFMapsToAWFEnv(t *testing.T) {
 	compiler := NewCompiler()
-	_, config := compiler.ExtractEngineConfig(map[string]any{
+	_, config, _ := compiler.ExtractEngineConfig(map[string]any{
 		"engine": map[string]any{
 			"id": "claude",
 			"auth": map[string]any{
@@ -687,6 +788,7 @@ func TestCompileWorkflowWithExtendedEngine(t *testing.T) {
 		content        string
 		expectedAI     string
 		expectedConfig *EngineConfig
+		expectedModel  string
 	}{
 		{
 			name: "string engine format",
@@ -725,7 +827,8 @@ engine:
 
 This is a test workflow.`,
 			expectedAI:     "claude",
-			expectedConfig: &EngineConfig{ID: "claude", Version: "beta", Model: "claude-3-5-sonnet-20241022"},
+			expectedConfig: &EngineConfig{ID: "claude", Version: "beta"},
+			expectedModel:  "claude-3-5-sonnet-20241022",
 		},
 		{
 			name: "object engine format - codex with model",
@@ -745,7 +848,8 @@ engine:
 
 This is a test workflow.`,
 			expectedAI:     "codex",
-			expectedConfig: &EngineConfig{ID: "codex", Model: "gpt-4o"},
+			expectedConfig: &EngineConfig{ID: "codex"},
+			expectedModel:  "gpt-4o",
 		},
 	}
 
@@ -786,8 +890,8 @@ This is a test workflow.`,
 					t.Errorf("Expected EngineConfig.Version '%s', got '%s'", test.expectedConfig.Version, workflowData.EngineConfig.Version)
 				}
 
-				if workflowData.EngineConfig.Model != test.expectedConfig.Model {
-					t.Errorf("Expected EngineConfig.Model '%s', got '%s'", test.expectedConfig.Model, workflowData.EngineConfig.Model)
+				if workflowData.Model != test.expectedModel {
+					t.Errorf("Expected WorkflowData.Model '%s', got '%s'", test.expectedModel, workflowData.Model)
 				}
 			}
 		})
@@ -806,8 +910,7 @@ func TestEngineConfigurationWithModel(t *testing.T) {
 			name:   "Claude with model",
 			engine: NewClaudeEngine(),
 			engineConfig: &EngineConfig{
-				ID:    "claude",
-				Model: "claude-3-5-sonnet-20241022",
+				ID: "claude",
 			},
 			expectedModel:  "claude-3-5-sonnet-20241022",
 			expectedAPIKey: "",
@@ -816,8 +919,7 @@ func TestEngineConfigurationWithModel(t *testing.T) {
 			name:   "Codex with model",
 			engine: NewCodexEngine(),
 			engineConfig: &EngineConfig{
-				ID:    "codex",
-				Model: "gpt-4o",
+				ID: "codex",
 			},
 			expectedModel:  "gpt-4o",
 			expectedAPIKey: "",
@@ -828,6 +930,7 @@ func TestEngineConfigurationWithModel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			workflowData := &WorkflowData{
 				Name:         "test-workflow",
+				Model:        tt.expectedModel,
 				EngineConfig: tt.engineConfig,
 			}
 			steps := tt.engine.GetExecutionSteps(workflowData, "test-log")
@@ -1064,7 +1167,7 @@ func TestEngineBareFieldExtraction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, config := compiler.ExtractEngineConfig(tt.frontmatter)
+			_, config, _ := compiler.ExtractEngineConfig(tt.frontmatter)
 			if config == nil {
 				t.Fatal("Expected config to be non-nil")
 			}
@@ -1188,6 +1291,11 @@ func TestSupportsBareMode(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "pi supports bare mode",
+			engine:   NewPiEngine(),
+			expected: true,
+		},
+		{
 			name:     "codex does not support bare mode",
 			engine:   NewCodexEngine(),
 			expected: false,
@@ -1297,7 +1405,7 @@ func TestEngineMCPSessionTimeoutExtraction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, config := compiler.ExtractEngineConfig(tt.frontmatter)
+			_, config, _ := compiler.ExtractEngineConfig(tt.frontmatter)
 			if config == nil {
 				t.Fatal("Expected non-nil config")
 			}
@@ -1365,7 +1473,7 @@ func TestEngineMCPToolTimeoutExtraction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, config := compiler.ExtractEngineConfig(tt.frontmatter)
+			_, config, _ := compiler.ExtractEngineConfig(tt.frontmatter)
 			if config == nil {
 				t.Fatal("Expected non-nil config")
 			}

@@ -23,7 +23,7 @@ A PR is merge-ready when **all three** are satisfied. Work them **concurrently**
 
 | Condition | Definition | Agent's signal |
 |---|---|---|
-| **Reviews** | Every unresolved in-scope review thread is addressed on its merits, replied to, and resolved, including GitHub Actions bot threads/comments (`github-actions[bot]`). Code changes alone do not satisfy this. | `copilot-review` skill + GraphQL `reviewThreads` |
+| **Reviews** | Every unresolved in-scope review thread is addressed on its merits, replied to, and resolved, including GitHub Actions bot threads/comments (`github-actions[bot]`). Code changes alone do not satisfy this. Threads where Copilot has already replied with a substantive answer must be resolved before delegating to `copilot-review`. | `copilot-review` skill + GraphQL `reviewThreads` |
 | **Checks** | Local `make fmt` / `make lint` / `make test-unit` / `make test` pass. Last-known CI runs reviewed at log level. | `make` targets locally; `gh pr checks` / `gh run view --log-failed` for prior runs |
 | **Mergeable** | PR is OPEN, not draft, `mergeable: MERGEABLE`, not `BEHIND` if the repo requires up-to-date branches. | `gh pr view --json mergeable,mergeStateStatus,state,isDraft` |
 
@@ -33,9 +33,11 @@ Top-level PR comments and review bodies are useful feedback but **not** a merge 
 
 ## Hard rules
 
+- **Autopilot mode**: Never ask for confirmation before taking action. Never prompt with "Should I proceed?", "Do you want me to…?", or any equivalent. Always act immediately and autonomously.
 - **Do not merge.** Never run `gh pr merge`, enable auto-merge, or enqueue. This skill stops at "ready for merge."
 - **Do not post stand-alone PR comments.** Only reply on existing review threads / comments that need a response. Do not ping reviewers or CODEOWNERS.
 - **Always disable pagers** for `gh`: prefix with `GH_PAGER=""` or pipe through `cat`. Without this, commands hang in non-interactive shells.
+- **Read PR state once per pass and reuse it.** Cache the initial `gh pr view` payload in a local snapshot file and use `jq` against that file until you perform an action that can change PR state (for example: push, update branch, resolve conflicts). Do not re-run overlapping `gh pr view` calls within the same unchanged turn sequence.
 - **Never wait for CI to re-run.** No `bash sleep`, no `gh run watch`, no `gh pr checks --watch`, no re-check loop after push. The agent's pushes will not trigger workflows; waiting is futile.
 - **Local validation is non-negotiable before each push.** Because CI will not re-run, the only correctness gate the agent gets is `make ...` locally. Treat a green local run as the bar.
 - **Commit and push every iteration that produces file changes.** Unpushed changes are not visible to the user.
@@ -66,21 +68,39 @@ The agent runs this once. There is no monitoring loop.
 ### 1. Triage
 
 ```bash
-GH_PAGER="" gh pr view <number> --json state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid
+mkdir -p /tmp/gh-aw/pr-finisher
+PR_SNAPSHOT=/tmp/gh-aw/pr-finisher/pr-state.json
+GH_PAGER="" gh pr view <number> --json state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,reviews,reviewThreads,comments > "$PR_SNAPSHOT"
 GH_PAGER="" gh pr checks <number>
 ```
 
-If merged/closed, report and stop. Otherwise classify each condition as ✅ / ❌ / ⏳ / ❓. The CI snapshot here is your **only** view of CI for this run — capture which checks failed and why before changing anything, because after you push it will be stale.
+If merged/closed, report and stop. Otherwise classify each condition as ✅ / ❌ / ⏳ / ❓ using the snapshot file plus `gh pr checks`. The CI snapshot here is your **only** view of CI for this run — capture which checks failed and why before changing anything, because after you push it will be stale.
 
 ### 2. Address Reviews
 
-Delegate to the `copilot-review` skill and treat that delegation as mandatory, not optional. Insist on full handling of each unresolved in-scope thread (including `github-actions[bot]`): make change → run relevant local validation → commit → push → reply → resolve. A thread is not handled until reply + resolve both succeed.
+#### 2a. Resolve Copilot-answered threads
 
-Before editing, gather the full review surface with explicit GH queries:
+Before delegating to `copilot-review`, find review threads where Copilot has already replied with a substantive answer but the thread has not yet been marked as resolved. Resolve those threads immediately — no code changes are needed for them.
 
 ```bash
-GH_PAGER="" gh pr view <number> --json reviews,reviewThreads,comments
-GH_PAGER="" gh pr view <number> --json reviewThreads --jq '.reviewThreads[] | select(.isResolved==false)'
+# Identify unresolved threads that already have a Copilot reply
+jq '.reviewThreads[]? | select(.isResolved==false) | select(any(.comments[]?; .author.login == "app/github-copilot" or (.author.login | test("copilot"; "i"))))' "$PR_SNAPSHOT"
+```
+
+For each such thread:
+- Confirm the Copilot reply is substantive and actually addresses the concern (not merely an acknowledgment or partial response).
+- If the reply fully addresses the concern, resolve the thread.
+- If the reply is incomplete or the concern is not satisfied, treat the thread as still open and address it in step 2b below.
+
+#### 2b. Address remaining unresolved threads
+
+Delegate to the `copilot-review` skill and treat that delegation as mandatory, not optional. Insist on full handling of each remaining unresolved in-scope thread (including `github-actions[bot]`): make change → run relevant local validation → commit → push → reply → resolve. A thread is not handled until reply + resolve both succeed.
+
+Before editing, reuse the triage snapshot instead of fetching the same PR again:
+
+```bash
+jq '{reviews,reviewThreads,comments}' "$PR_SNAPSHOT"
+jq '.reviewThreads[]? | select(.isResolved==false)' "$PR_SNAPSHOT"
 ```
 
 When reviewing collected feedback, apply reviewer scoping from `copilot-review`: trusted automation and team/collaborator reviewers only. Ignore non-team-member feedback.
@@ -88,11 +108,12 @@ When reviewing collected feedback, apply reviewer scoping from `copilot-review`:
 ### 3. Address Mergeable
 
 ```bash
-GH_PAGER="" gh pr view <number> --json mergeable,mergeStateStatus
+jq '{state,isDraft,mergeable,mergeStateStatus,reviewDecision,headRefOid}' "$PR_SNAPSHOT"
 ```
 
 - `CONFLICTING` → resolve conflicts using the repo's conventions. If you cannot determine the correct resolution, `ask_user`.
 - `mergeStateStatus: BEHIND` → update branch from base. After updating, scan the new commits for tooling drift (lockfiles, toolchains, lint configs); re-run installs if manifests changed, and flag drift in the summary so any new errors read as drift, not regressions.
+- Refresh `PR_SNAPSHOT` only after you perform a state-changing action that can invalidate it. Otherwise keep reusing the original file for the rest of the pass.
 
 ### 4. Address Checks (local + prior CI)
 
@@ -162,6 +183,7 @@ The task is complete only when all are true:
 - `make fmt`, `make lint`, `make test-unit` all pass (or unrelated pre-existing failures explicitly identified).
 - `make test` was run and fixed when it was part of the failing state; wasm goldens regenerated when required.
 - The `copilot-review` skill addressed all in-scope review threads, including GitHub Actions bot review comments/threads (`github-actions[bot]`) (reply + resolve succeeded for each).
+- Review threads where Copilot had already replied with a substantive answer were resolved (step 2a) before delegating unresolved threads to `copilot-review` (step 2b).
 - Mergeable condition was checked; conflicts resolved and `BEHIND` updated when present.
 - Prior CI failures were inspected at the log level and either fixed at the root cause (with a local reproduction where possible) or explicitly flagged as not locally reproducible / escalated.
 - Every iteration that changed files was committed and pushed, and no local changes were left unpushed at stop. No post-push re-check loop.

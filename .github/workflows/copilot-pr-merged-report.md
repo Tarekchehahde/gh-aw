@@ -20,11 +20,9 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 strict: false
 
-sandbox:
-  agent:
-    sudo: false
 tools:
   cli-proxy: true
   github: false
@@ -48,6 +46,11 @@ imports:
 timeout-minutes: 10
 features:
   gh-aw-detection: true
+evals:
+  - id: merged_prs_analyzed
+    question: Did the agent analyze Copilot pull requests merged in the last 24 hours?
+  - id: report_created
+    question: Was a daily report created tracking code generation, tests, and token usage trends?
 ---
 
 # Daily Copilot PR Merged Report

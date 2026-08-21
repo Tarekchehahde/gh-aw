@@ -13,11 +13,14 @@ import (
 )
 
 func TestFindExperimentStatePath(t *testing.T) {
+	t.Parallel()
 	t.Run("returns empty when logsPath is empty", func(t *testing.T) {
+		t.Parallel()
 		assert.Empty(t, findExperimentStatePath(""), "should return empty string for empty logsPath")
 	})
 
 	t.Run("finds state.json at root", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		statePath := filepath.Join(dir, "state.json")
 		require.NoError(t, os.WriteFile(statePath, []byte("{}"), 0o600))
@@ -26,7 +29,19 @@ func TestFindExperimentStatePath(t *testing.T) {
 		assert.Equal(t, statePath, got, "should find state.json at logsPath root")
 	})
 
+	t.Run("prefers state.jsonl at root", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte("{}"), 0o600))
+		statePath := filepath.Join(dir, "state.jsonl")
+		require.NoError(t, os.WriteFile(statePath, []byte("{}"), 0o600))
+
+		got := findExperimentStatePath(dir)
+		assert.Equal(t, statePath, got, "should prefer state.jsonl at logsPath root")
+	})
+
 	t.Run("finds state.json in experiment subdirectory", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		subDir := filepath.Join(dir, "experiment")
 		require.NoError(t, os.MkdirAll(subDir, 0o755))
@@ -38,6 +53,7 @@ func TestFindExperimentStatePath(t *testing.T) {
 	})
 
 	t.Run("returns empty when no state.json exists", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		got := findExperimentStatePath(dir)
 		assert.Empty(t, got, "should return empty string when no state.json found")
@@ -45,28 +61,34 @@ func TestFindExperimentStatePath(t *testing.T) {
 }
 
 func TestExtractExperimentData(t *testing.T) {
+	t.Parallel()
 	t.Run("returns nil for empty logsPath", func(t *testing.T) {
+		t.Parallel()
 		assert.Nil(t, extractExperimentData(""), "should return nil for empty logsPath")
 	})
 
 	t.Run("returns nil when no state.json present", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		assert.Nil(t, extractExperimentData(dir), "should return nil when state.json missing")
 	})
 
 	t.Run("returns nil for invalid JSON", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte("not-json"), 0o600))
 		assert.Nil(t, extractExperimentData(dir), "should return nil for invalid JSON")
 	})
 
 	t.Run("returns nil for empty counts", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"counts":{}}`), 0o600))
 		assert.Nil(t, extractExperimentData(dir), "should return nil when counts map is empty")
 	})
 
 	t.Run("extracts single experiment with two variants", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -85,6 +107,7 @@ func TestExtractExperimentData(t *testing.T) {
 	})
 
 	t.Run("reads state.json from experiment subdirectory", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		subDir := filepath.Join(dir, "experiment")
 		require.NoError(t, os.MkdirAll(subDir, 0o755))
@@ -102,7 +125,23 @@ func TestExtractExperimentData(t *testing.T) {
 		assert.Equal(t, "detailed", got.Assignments["style"], "detailed has higher count so should be selected")
 	})
 
+	t.Run("reads state.jsonl run ledger", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		raw := []byte(`{"run_id":"0","timestamp":"2026-07-31T23:00:00Z","assignments":{"style":"concise"}}
+{"run_id":"1","timestamp":"2026-08-01T00:00:00Z","assignments":{"style":"concise"}}
+{"run_id":"2","timestamp":"2026-08-01T01:00:00Z","assignments":{"style":"detailed"}}`)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.jsonl"), raw, 0o600))
+
+		got := extractExperimentData(dir)
+		require.NotNil(t, got, "should return non-nil ExperimentData")
+		assert.Equal(t, "detailed", got.Assignments["style"], "latest run assignment should be used")
+		assert.Equal(t, 2, got.CumulativeCounts["style"]["concise"], "ledger should count both concise runs")
+		assert.Equal(t, 1, got.CumulativeCounts["style"]["detailed"], "jsonl run record should increment counts")
+	})
+
 	t.Run("extracts multiple experiments", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -123,6 +162,7 @@ func TestExtractExperimentData(t *testing.T) {
 }
 
 func TestFormatExperimentLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		exp      *ExperimentData
@@ -157,6 +197,7 @@ func TestFormatExperimentLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := formatExperimentLabel(tt.exp)
 			assert.Equal(t, tt.expected, got, "formatExperimentLabel result mismatch")
 		})
@@ -164,6 +205,7 @@ func TestFormatExperimentLabel(t *testing.T) {
 }
 
 func TestExperimentMatchesFilter(t *testing.T) {
+	t.Parallel()
 	exp := &ExperimentData{
 		Assignments: map[string]string{
 			"style":   "concise",
@@ -238,6 +280,7 @@ func TestExperimentMatchesFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := experimentMatchesFilter(tt.exp, tt.experimentName, tt.variant)
 			assert.Equal(t, tt.want, got, "experimentMatchesFilter result mismatch")
 		})
@@ -245,6 +288,7 @@ func TestExperimentMatchesFilter(t *testing.T) {
 }
 
 func TestFormatExperimentSkipMessage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		runID      int64
@@ -277,6 +321,7 @@ func TestFormatExperimentSkipMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := formatExperimentSkipMessage(tt.runID, tt.experiment, tt.variant)
 			assert.Contains(t, got, tt.wantSubstr, "formatExperimentSkipMessage output mismatch")
 		})
@@ -284,6 +329,7 @@ func TestFormatExperimentSkipMessage(t *testing.T) {
 }
 
 func TestDeriveLastSelectedVariant(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		counts   map[string]int
@@ -318,6 +364,7 @@ func TestDeriveLastSelectedVariant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := deriveLastSelectedVariant(tt.counts)
 			assert.Equal(t, tt.expected, got, "deriveLastSelectedVariant result mismatch")
 		})
@@ -325,7 +372,9 @@ func TestDeriveLastSelectedVariant(t *testing.T) {
 }
 
 func TestFirstExperimentAssignment(t *testing.T) {
+	t.Parallel()
 	t.Run("returns false for nil", func(t *testing.T) {
+		t.Parallel()
 		name, variant, ok := firstExperimentAssignment(nil)
 		assert.False(t, ok)
 		assert.Empty(t, name)
@@ -333,6 +382,7 @@ func TestFirstExperimentAssignment(t *testing.T) {
 	})
 
 	t.Run("returns false for empty assignments", func(t *testing.T) {
+		t.Parallel()
 		name, variant, ok := firstExperimentAssignment(&ExperimentData{Assignments: map[string]string{}})
 		assert.False(t, ok)
 		assert.Empty(t, name)
@@ -340,6 +390,7 @@ func TestFirstExperimentAssignment(t *testing.T) {
 	})
 
 	t.Run("returns alphabetically first assignment", func(t *testing.T) {
+		t.Parallel()
 		exp := &ExperimentData{
 			Assignments: map[string]string{
 				"style":   "concise",
@@ -354,7 +405,9 @@ func TestFirstExperimentAssignment(t *testing.T) {
 }
 
 func TestExtractExperimentDataWithRuns(t *testing.T) {
+	t.Parallel()
 	t.Run("uses last run record when runs array is present", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -385,6 +438,7 @@ func TestExtractExperimentDataWithRuns(t *testing.T) {
 	})
 
 	t.Run("falls back to heuristic when runs array is empty", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -403,6 +457,7 @@ func TestExtractExperimentDataWithRuns(t *testing.T) {
 	})
 
 	t.Run("falls back to heuristic when runs field is absent (legacy state)", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -419,6 +474,7 @@ func TestExtractExperimentDataWithRuns(t *testing.T) {
 	})
 
 	t.Run("skips last run record with empty assignments", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		state := map[string]any{
 			"counts": map[string]any{
@@ -440,5 +496,82 @@ func TestExtractExperimentDataWithRuns(t *testing.T) {
 		require.NotNil(t, got, "should return non-nil ExperimentData")
 		// Falls back to heuristic when last run's assignments map is empty
 		assert.Equal(t, "concise", got.Assignments["style"], "should fall back to heuristic for empty assignments")
+	})
+}
+
+func TestExtractExperimentDataFallsBackToUsageSummary(t *testing.T) {
+	t.Parallel()
+	t.Run("reads assignments from usage activity summary when no state file present", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		usageDir := filepath.Join(dir, "usage", "activity")
+		require.NoError(t, os.MkdirAll(usageDir, 0o755))
+
+		summary := map[string]any{
+			"schema": "usage-activity-summary/v1",
+			"experiments": map[string]any{
+				"assignments": map[string]string{"style": "concise", "caveman": "yes"},
+			},
+		}
+		raw, err := json.Marshal(summary)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(usageDir, "summary.json"), raw, 0o600))
+
+		got := extractExperimentData(dir)
+		require.NotNil(t, got, "should return non-nil ExperimentData from usage summary")
+		assert.Equal(t, "concise", got.Assignments["style"])
+		assert.Equal(t, "yes", got.Assignments["caveman"])
+		assert.Nil(t, got.CumulativeCounts, "usage summary fallback does not have cumulative counts")
+	})
+
+	t.Run("prefers state file over usage summary when both exist", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+
+		// Write experiment state file
+		state := map[string]any{
+			"counts": map[string]any{
+				"style": map[string]int{"detailed": 3, "concise": 1},
+			},
+		}
+		stateRaw, err := json.Marshal(state)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), stateRaw, 0o600))
+
+		// Write usage activity summary with different assignments
+		usageDir := filepath.Join(dir, "usage", "activity")
+		require.NoError(t, os.MkdirAll(usageDir, 0o755))
+		summary := map[string]any{
+			"schema": "usage-activity-summary/v1",
+			"experiments": map[string]any{
+				"assignments": map[string]string{"style": "concise"},
+			},
+		}
+		summaryRaw, err := json.Marshal(summary)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(usageDir, "summary.json"), summaryRaw, 0o600))
+
+		got := extractExperimentData(dir)
+		require.NotNil(t, got, "should return non-nil ExperimentData")
+		// Should use state file (highest count = detailed)
+		assert.Equal(t, "detailed", got.Assignments["style"], "should prefer state file over usage summary")
+	})
+
+	t.Run("returns nil when usage summary has no experiments field", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		usageDir := filepath.Join(dir, "usage", "activity")
+		require.NoError(t, os.MkdirAll(usageDir, 0o755))
+
+		summary := map[string]any{
+			"schema":   "usage-activity-summary/v1",
+			"firewall": map[string]any{"total_requests": 10},
+		}
+		raw, err := json.Marshal(summary)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(usageDir, "summary.json"), raw, 0o600))
+
+		got := extractExperimentData(dir)
+		assert.Nil(t, got, "should return nil when usage summary has no experiments")
 	})
 }

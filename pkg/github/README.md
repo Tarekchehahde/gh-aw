@@ -27,8 +27,8 @@ This package defines how GitHub issue labels are translated into numeric objecti
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `ComputeObjectiveValue` | `func(issueLabels []string) int` | Calculates the numeric value for an issue based on its labels; returns `0` if no labels match or if the receiver is `nil` |
-| `GetObjectiveLabels` | `func(issueLabels []string) []string` | Returns the subset of `issueLabels` that have defined objective values, preserving original order |
-| `ValidateLabelExists` | `func(label string) bool` | Reports whether a given label has a defined objective value |
+| `FilterObjectiveLabels` | `func(issueLabels []string) []string` | Returns the subset of `issueLabels` that have defined objective values, preserving original order |
+| `HasObjectiveLabel` | `func(label string) bool` | Reports whether a given label has a defined objective value |
 | `GetAllLabels` | `func() []string` | Returns all labels defined in the mapping, sorted alphabetically |
 | `MarshalJSON` | `func() ([]byte, error)` | Implements `json.Marshaler`; produces indented JSON output |
 | `String` | `func() string` | Returns a human-readable summary: `ObjectiveMapping{labels: N, logic: X, priorities: M}` |
@@ -38,32 +38,11 @@ This package defines how GitHub issue labels are translated into numeric objecti
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `DefaultObjectiveMapping` | `func() *ObjectiveMapping` | Returns the built-in default label-to-value mapping |
-| `LoadObjectiveMappingFromConfig` | `func() *ObjectiveMapping` | Loads the mapping from environment, config file, or defaults (see precedence below) |
+| `LoadObjectiveMapping` | `func() *ObjectiveMapping` | Loads the mapping from environment, config file, or defaults (see precedence below) |
 
 ### Constants
 
-The package exports named constants for every label and its default value, grouped by priority tier:
-
-| Group | Label constants | Value constants |
-|-------|----------------|-----------------|
-| Critical | `ObjectiveLabelCritical`, `ObjectiveLabelP0` | `ObjectiveValueCritical` (100), `ObjectiveValueP0` (100) |
-| Security | `ObjectiveLabelSecurityFix` | `ObjectiveValueSecurityFix` (70) |
-| Copilot | `ObjectiveLabelCopilotOpt` | `ObjectiveValueCopilotOpt` (75) |
-| Bug | `ObjectiveLabelBug` | `ObjectiveValueBug` (60) |
-| High | `ObjectiveLabelHighPriority`, `ObjectiveLabelP1` | `ObjectiveValueHighPriority` (35), `ObjectiveValueP1` (35) |
-| Safety | `ObjectiveLabelTesting`, `ObjectiveLabelReliability` | `ObjectiveValueTesting` (50), `ObjectiveValueReliability` (50) |
-| Engine | `ObjectiveLabelWorkflow`, `ObjectiveLabelEngine` | `ObjectiveValueWorkflow` (45), `ObjectiveValueEngine` (40) |
-| Integration | `ObjectiveLabelMCP`, `ObjectiveLabelActions`, `ObjectiveLabelCLI` | `ObjectiveValueMCP` (45), `ObjectiveValueActions` (40), `ObjectiveValueCLI` (40) |
-| Performance | `ObjectiveLabelPerformance` | `ObjectiveValuePerformance` (30) |
-| Medium | `ObjectiveLabelMediumPriority`, `ObjectiveLabelP2` | `ObjectiveValueMediumPriority` (20), `ObjectiveValueP2` (20) |
-| Quality | `ObjectiveLabelLintMonster` | `ObjectiveValueLintMonster` (25) |
-| Enhancement | `ObjectiveLabelEnhancement` | `ObjectiveValueEnhancement` (15) |
-| Dependencies | `ObjectiveLabelDependencies` | `ObjectiveValueDependencies` (10) |
-| Low | `ObjectiveLabelLowPriority`, `ObjectiveLabelP3` | `ObjectiveValueLowPriority` (10), `ObjectiveValueP3` (10) |
-| Documentation | `ObjectiveLabelDocumentation` | `ObjectiveValueDocumentation` (5) |
-| No value | `ObjectiveLabelAIGenerated`, `ObjectiveLabelAIInspected`, `ObjectiveLabelSmokeCopilot`, `ObjectiveLabelQuestion`, `ObjectiveLabelGoodFirstIssue` | 0 |
-
-Multi-label logic option constants:
+The package exports constants for multi-label logic options:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
@@ -71,9 +50,34 @@ Multi-label logic option constants:
 | `MultiLabelLogicSum` | `"sum"` | Sum all matching label values |
 | `MultiLabelLogicFirst` | `"first"` | Use the first match in priority order |
 
+For backward compatibility, deprecated exported `ObjectiveLabel*` and
+`ObjectiveValue*` constants are still available for external consumers. Runtime
+scoring behavior is not derived from those constants.
+
+Default label-to-value entries are provided by `DefaultObjectiveMapping()`:
+
+| Label | Value |
+|-------|-------|
+| `critical` | 100 |
+| `p0` | 100 |
+| `security-fix` | 75 |
+| `high-priority` | 50 |
+| `copilot-opt` | 50 |
+| `p1` | 50 |
+| `performance` | 30 |
+| `medium-priority` | 25 |
+| `p2` | 25 |
+| `low-priority` | 10 |
+| `p3` | 10 |
+| `documentation` | 5 |
+
+Labels not listed above (for example `bug`, `testing`, and `reliability`) are
+not part of the default mapping and evaluate to `0` unless provided by
+configuration.
+
 ## Configuration Precedence
 
-`LoadObjectiveMappingFromConfig` resolves the mapping in this order:
+`LoadObjectiveMapping` resolves the mapping in this order:
 
 1. **`OBJECTIVE_MAPPING_JSON` environment variable** — interpreted first as a raw JSON string; if parsing fails, treated as a file path from which JSON is read.
 2. **`.github/objective-mapping.json`** — a repository-level override file.
@@ -85,15 +89,15 @@ Multi-label logic option constants:
 import "github.com/github/gh-aw/pkg/github"
 
 // Load mapping (env > config file > defaults)
-om := github.LoadObjectiveMappingFromConfig()
+om := github.LoadObjectiveMapping()
 
-// Score an issue by its labels
-score := om.ComputeObjectiveValue([]string{"bug", "high-priority"})
-// score == 60  (max of bug=60, high-priority=35)
+// Score an issue by its labels (default mapping: critical=100, high-priority=50, p1=50, ...)
+score := om.ComputeObjectiveValue([]string{"critical", "high-priority"})
+// score == 100  (max of critical=100, high-priority=50)
 
 // Check which labels contributed
-objectiveLabels := om.GetObjectiveLabels([]string{"bug", "good first issue"})
-// objectiveLabels == ["bug"]
+objectiveLabels := om.FilterObjectiveLabels([]string{"critical", "high-priority"})
+// objectiveLabels == ["critical", "high-priority"]
 
 // Use the default mapping directly
 defaults := github.DefaultObjectiveMapping()

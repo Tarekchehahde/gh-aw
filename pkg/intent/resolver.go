@@ -1,10 +1,6 @@
 package intent
 
-import (
-	"slices"
-
-	"github.com/github/gh-aw/pkg/logger"
-)
+import "github.com/github/gh-aw/pkg/logger"
 
 var resolverLog = logger.New("intent:resolver")
 
@@ -42,6 +38,13 @@ type IntentRecord struct {
 	RootURL    string `json:"root_url,omitempty"`
 
 	Labels []string `json:"labels,omitempty"`
+
+	// Domains, Priority, and Risk are optional classification dimensions used by
+	// ResolveRisk to derive a risk level when Risk is not explicitly set. They are
+	// distinct from Labels, which PolicyCondition matches against directly.
+	Domains  []string `json:"domains,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Risk     string   `json:"risk,omitempty"`
 
 	Rule            string `json:"rule,omitempty"`
 	ResolverVersion string `json:"resolver_version,omitempty"`
@@ -86,7 +89,12 @@ func (r Resolver) ResolvePullRequest(pr PullRequestData) IntentRecord {
 	case 0:
 		if len(pr.Labels) > 0 {
 			resolverLog.Printf("ResolvePullRequest: no closing issue, falling back to %d PR label(s) for %s", len(pr.Labels), pr.NodeID)
-			return r.fromLabels(pr.NodeID, pr.URL, pr.Labels, SourceArtifactLabels, "pull_request_label_fallback")
+			return r.fromRoot(RootReference{
+				NodeID: pr.NodeID,
+				Type:   "artifact",
+				URL:    pr.URL,
+				Labels: pr.Labels,
+			}, SourceArtifactLabels, "pull_request_label_fallback")
 		}
 		resolverLog.Printf("ResolvePullRequest: no intent source for %s, marking unlinked", pr.NodeID)
 		return r.unlinked("no_supported_intent_source")
@@ -102,16 +110,12 @@ func (r Resolver) ResolveIssue(nodeID, url string, labels []string) IntentRecord
 		resolverLog.Printf("ResolveIssue: no labels for %s, marking unlinked", nodeID)
 		return r.unlinked("no_supported_intent_source")
 	}
-	return IntentRecord{
-		Status:          r.statusForLabels(labels),
-		Source:          SourceIssueLabels,
-		RootNodeID:      nodeID,
-		RootType:        "issue",
-		RootURL:         url,
-		Labels:          cloneStrings(labels),
-		Rule:            "issue_label_fallback",
-		ResolverVersion: r.ResolverVersion,
-	}
+	return r.fromRoot(RootReference{
+		NodeID: nodeID,
+		Type:   "issue",
+		URL:    url,
+		Labels: labels,
+	}, SourceIssueLabels, "issue_label_fallback")
 }
 
 func (r Resolver) fromRoot(root RootReference, source AttributionSource, rule string) IntentRecord {
@@ -122,19 +126,6 @@ func (r Resolver) fromRoot(root RootReference, source AttributionSource, rule st
 		RootType:        root.Type,
 		RootURL:         root.URL,
 		Labels:          cloneStrings(root.Labels),
-		Rule:            rule,
-		ResolverVersion: r.ResolverVersion,
-	}
-}
-
-func (r Resolver) fromLabels(nodeID, url string, labels []string, source AttributionSource, rule string) IntentRecord {
-	return IntentRecord{
-		Status:          r.statusForLabels(labels),
-		Source:          source,
-		RootNodeID:      nodeID,
-		RootType:        "artifact",
-		RootURL:         url,
-		Labels:          cloneStrings(labels),
 		Rule:            rule,
 		ResolverVersion: r.ResolverVersion,
 	}
@@ -169,11 +160,4 @@ func (r Resolver) statusForLabels(labels []string) AttributionStatus {
 		return AttributionMapped
 	}
 	return AttributionUnmapped
-}
-
-func cloneStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	return slices.Clone(values)
 }

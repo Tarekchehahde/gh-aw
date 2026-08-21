@@ -134,7 +134,7 @@ describe("parse_copilot_log.cjs", () => {
 
       const result = parseCopilotLog(eventsLog);
 
-      expect(result.markdown).toContain("bash");
+      expect(result.markdown).toContain("<summary>Commands and Tools</summary>");
       expect(result.markdown).toContain("file1.txt");
     });
 
@@ -150,7 +150,6 @@ describe("parse_copilot_log.cjs", () => {
 
       const result = parseCopilotLog(eventsLog);
 
-      expect(result.markdown).toContain("bash");
       expect(result.markdown).toContain("cat /tmp/gh-aw/agent/candidates.txt");
       expect(result.markdown).toContain("candidate-list-output");
     });
@@ -166,8 +165,9 @@ describe("parse_copilot_log.cjs", () => {
       const result = parseCopilotLog(eventsLog);
 
       expect(result.markdown).toContain("ls");
-      expect(result.markdown).toContain("/tmp");
       expect(result.markdown).toContain("file1.txt");
+      // cwd is part of input parameters which are not rendered to avoid secret leakage
+      expect(result.markdown).not.toContain('"cwd"');
     });
 
     it("preserves structured input for orphaned completion events without inventing a command", () => {
@@ -179,9 +179,10 @@ describe("parse_copilot_log.cjs", () => {
 
       const result = parseCopilotLog(eventsLog);
 
-      expect(result.markdown).toContain("bash");
-      expect(result.markdown).toContain("/tmp");
+      expect(result.markdown).toContain("<summary>Commands and Tools</summary>");
       expect(result.markdown).toContain("file1.txt");
+      // input parameters are not rendered to avoid secret leakage
+      expect(result.markdown).not.toContain('"cwd"');
     });
 
     it("renders tool output preview from array-based result.content in Copilot CLI events.jsonl", () => {
@@ -194,7 +195,6 @@ describe("parse_copilot_log.cjs", () => {
 
       const result = parseCopilotLog(eventsLog);
 
-      expect(result.markdown).toContain("bash");
       expect(result.markdown).toContain("fileA.txt");
       expect(result.markdown).toContain("fileB.txt");
     });
@@ -390,6 +390,19 @@ describe("parse_copilot_log.cjs", () => {
       expect(result.markdown).toContain("422,200");
       expect(result.markdown).toContain("2,400");
       expect(result.markdown).toContain("375,000");
+    });
+
+    it("strips the columnar 'Resume' footer hint from rendered pretty-print output", () => {
+      // Copilot CLI footer includes a "Resume   copilot --resume=<id>" line aligned in the
+      // same column block as Changes/Duration/Tokens. It is CLI chrome, not agent reasoning,
+      // and must not leak into the rendered reasoning/agent-text section.
+      const prettyLog = ["● Bash", "    └ ok", "The work is done.", "", "Changes    +0 -0", "Duration   1m 0s", "Tokens     ↑ 195.4k (166.2k cached) • ↓ 2.9k", "Resume     copilot --resume=d21d3356-9296-4d1b-a392-49e5069e4e3f"].join("\n");
+
+      const result = parseCopilotLog(prettyLog);
+
+      expect(result.markdown).toContain("The work is done.");
+      expect(result.markdown).not.toContain("--resume=");
+      expect(result.markdown).not.toMatch(/^Resume\s+copilot/m);
     });
 
     it("handles the new footer without a cached segment", () => {

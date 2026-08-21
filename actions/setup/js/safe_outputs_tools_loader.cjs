@@ -142,6 +142,16 @@ function attachHandlers(tools, handlers, logger) {
     dismiss_pull_request_review: handlers.dismissPullRequestReviewHandler,
     update_issue: handlers.updateIssueHandler,
     update_pull_request: handlers.updatePullRequestHandler,
+    close_pull_request: handlers.closePullRequestHandler,
+    merge_pull_request: handlers.mergePullRequestHandler,
+    mark_pull_request_as_ready_for_review: handlers.markPullRequestAsReadyForReviewHandler,
+    add_reviewer: handlers.addReviewerHandler,
+    reply_to_pull_request_review_comment: handlers.replyToPullRequestReviewCommentHandler,
+    close_issue: handlers.closeIssueHandler,
+    add_labels: handlers.addLabelsHandler,
+    remove_labels: handlers.removeLabelsHandler,
+    update_discussion: handlers.updateDiscussionHandler,
+    close_discussion: handlers.closeDiscussionHandler,
   };
 
   tools.forEach(tool => {
@@ -157,9 +167,11 @@ function attachHandlers(tools, handlers, logger) {
       // Create a custom handler that wraps args in inputs and adds workflow_name
       const workflowName = tool._workflow_name.trim();
       tool.handler = args => {
-        // Wrap args in inputs property to match dispatch_workflow schema
+        const { ref, ...inputs } = args ?? {};
+        // Wrap workflow inputs in inputs and pass dispatch ref as top-level field
         return handlers.defaultHandler("dispatch_workflow")({
-          inputs: args,
+          ...(ref && { ref }),
+          ...(args !== undefined && { inputs }),
           workflow_name: workflowName,
         });
       };
@@ -347,7 +359,11 @@ function registerDynamicTools(server, tools, config, outputFile, registerTool, n
         // Write the entry to the output file in JSONL format
         // CRITICAL: Use JSON.stringify WITHOUT formatting parameters for JSONL format
         // Each entry must be on a single line, followed by a newline character
-        fs.appendFileSync(outputFile, `${JSON.stringify(entry)}\n`);
+        try {
+          fs.appendFileSync(outputFile, `${JSON.stringify(entry)}\n`);
+        } catch (err) {
+          throw new Error(`Failed to append to file ${outputFile}: ${getErrorMessage(err)}`, { cause: err });
+        }
 
         // Use output from safe-job config if available
         const outputText = jobConfig?.output ?? `Safe-job '${configKey}' executed successfully with arguments: ${JSON.stringify(args)}`;

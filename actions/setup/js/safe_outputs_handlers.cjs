@@ -2,6 +2,7 @@
 /// <reference types="@actions/github-script" />
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 
@@ -13,20 +14,24 @@ const { getBaseBranch } = require("./get_base_branch.cjs");
 const { lookupCheckout } = require("./checkout_manifest.cjs");
 const { generateGitPatch } = require("./generate_git_patch.cjs");
 const { generateGitBundle } = require("./generate_git_bundle.cjs");
-const { hasMergeCommitsInRange, execGitSync } = require("./git_helpers.cjs");
+const { hasMergeCommitsInRange, execGitSync, ensureSafeDirectoryTrust } = require("./git_helpers.cjs");
 const { enforceCommentLimits } = require("./comment_limit_helpers.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { ERR_CONFIG, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_CONFIG, ERR_PARSE, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
 const { findRepoCheckout } = require("./find_repo_checkout.cjs");
 const { resolveTargetRepoConfig, resolveAndValidateRepo } = require("./repo_helpers.cjs");
 const { getOrGenerateTemporaryId } = require("./temporary_id.cjs");
 const { parseAllowedExtensionsEnv } = require("./allowed_extensions_helpers.cjs");
+const { getStagedPatchDiffSizeBytes } = require("./git_patch_utils.cjs");
 const { sanitizeTitle, applyTitlePrefix } = require("./sanitize_title.cjs");
 const { parseDeduplicateByTitle, normalizeTitleForDedup, findDuplicateByTitle } = require("./issue_title_dedup.cjs");
 const { validateCreatePullRequestIntent, validatePushToPullRequestBranchIntent, validateCreateIssueIntent, validateAddCommentIntent } = require("./intent_probe.cjs");
 const { globPatternToRegex } = require("./glob_pattern_helpers.cjs");
 const { resolveInvocationContext } = require("./invocation_context_helpers.cjs");
 const { lstatGuard } = require("./symlink_guard.cjs");
+const { validateValueAgainstSchema } = require("./mcp_scripts_validation.cjs");
+const { resolveDataSchema } = require("./data_schema_normalizer.cjs");
+const { clearValidationMarker, formatJSONFiles, runCustomMemoryValidation, writeValidationMarker } = require("./memory_custom_validation.cjs");
 
 /** PR event names used for target:triggering context validation across all safe-output handlers. */
 const PR_EVENT_NAMES = new Set(["pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment"]);
@@ -54,7 +59,7 @@ function readJSONFile(filePath) {
   try {
     parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (err) {
-    throw new Error("Failed to parse JSON file " + filePath + ": " + getErrorMessage(err), { cause: err });
+    throw new Error(`${ERR_PARSE}: ` + "Failed to parse JSON file " + filePath + ": " + getErrorMessage(err), { cause: err });
   }
   return parsed;
 }
@@ -117,7 +122,7 @@ function hasExplicitTargetParameter(entry, fieldNames) {
 
 /**
  * @param {string} toolName
- * @returns {{primary?: string, anyOf?: string[]} | null}
+ * @returns {{primary?: string, anyOf?: string[], allOf?: string[]} | null}
  */
 function getWildcardTargetRequirement(toolName) {
   return safeOutputsToolMap.get(toolName)?.["x-safe-outputs-target-requirements"]?.["*"] || null;
@@ -152,6 +157,75 @@ function parseAllowedBranchPatterns(value) {
       .filter(Boolean);
   }
   return [];
+}
+
+/**
+ * Parse trusted comment IDs supplied by workflow configuration.
+ * @param {unknown} value
+ * @returns {Set<string>}
+ */
+function parseAllowedCommentIds(value) {
+  const values = [];
+  const visit = item => {
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child);
+      return;
+    }
+    if (typeof item === "number" && Number.isInteger(item) && item > 0) {
+      values.push(String(item));
+      return;
+    }
+    if (typeof item !== "string") {
+      return;
+    }
+    const trimmed = item.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (trimmed.startsWith("[") || trimmed.startsWith('"')) {
+      try {
+        visit(JSON.parse(trimmed));
+        return;
+      } catch {
+        // Fall through to delimiter parsing.
+      }
+    }
+    for (const part of trimmed.split(/[,\s]+/)) {
+      if (/^[1-9]\d*$/.test(part)) {
+        values.push(part);
+      }
+    }
+  };
+  visit(value);
+  return new Set(values);
+}
+
+/**
+ * Validate an agent-supplied add_comment.comment_id against the trusted workflow allowlist.
+ * Does not mutate the supplied entry; the caller is responsible for applying the normalized value.
+ * @param {Record<string, any>} entry
+ * @param {Record<string, any>} addCommentConfig
+ * @returns {{error: {content: Array<{type: "text", text: string}>, isError: true}} | {error: null, commentId: number | undefined}}
+ */
+function validateAllowedAddCommentId(entry, addCommentConfig) {
+  if (entry.comment_id === undefined || entry.comment_id === null || String(entry.comment_id).trim() === "") {
+    return { error: null, commentId: undefined };
+  }
+  if (addCommentConfig.target !== "*") {
+    return { error: buildIntentErrorResponse("add_comment comment_id is only allowed when safe-outputs.add-comment.target is '*' and the ID is listed in safe-outputs.add-comment.allows-comment-ids.") };
+  }
+  const commentId = Number(entry.comment_id);
+  if (!Number.isInteger(commentId) || commentId <= 0) {
+    return { error: buildIntentErrorResponse("add_comment comment_id must be a positive integer.") };
+  }
+  const allowedCommentIds = parseAllowedCommentIds(addCommentConfig.allows_comment_ids ?? addCommentConfig["allows-comment-ids"]);
+  if (allowedCommentIds.size === 0) {
+    return { error: buildIntentErrorResponse("add_comment comment_id requires safe-outputs.add-comment.allows-comment-ids to list trusted comment IDs.") };
+  }
+  if (!allowedCommentIds.has(String(commentId))) {
+    return { error: buildIntentErrorResponse("add_comment comment_id is not listed in safe-outputs.add-comment.allows-comment-ids.") };
+  }
+  return { error: null, commentId };
 }
 
 /**
@@ -194,43 +268,16 @@ function resolvePatchWorkspacePath(workspacePath) {
   if (!fs.existsSync(resolved)) {
     return { success: false, error: `Invalid patch_workspace_path '${candidatePath}': directory does not exist` };
   }
-  if (!fs.statSync(resolved).isDirectory()) {
+  let resolvedStats;
+  try {
+    resolvedStats = fs.statSync(resolved);
+  } catch (err) {
+    return { success: false, error: `Failed to inspect patch_workspace_path '${candidatePath}': ${getErrorMessage(err)}` };
+  }
+  if (!resolvedStats.isDirectory()) {
     return { success: false, error: `Invalid patch_workspace_path '${candidatePath}': path is not a directory` };
   }
   return { success: true, absolutePath: resolved };
-}
-
-/**
- * Ensure the current git checkout path is trusted in this process context.
- * Injects safe.directory via GIT_CONFIG_COUNT/KEY/VALUE env vars so that all
- * subsequent git commands in this process inherit the trust without writing to
- * ~/.gitconfig (no persistent global git config side effects).
- *
- * GIT_CONFIG_COUNT/KEY/VALUE is supported since git 2.31.
- *
- * @param {string} gitCwd
- * @param {{ debug: (message: string) => void }} server
- * @returns {void}
- */
-function ensureSafeDirectoryTrust(gitCwd, server) {
-  if (!gitCwd) return;
-
-  // Check if gitCwd is already present in the injected env-var config to avoid
-  // duplicate entries when the handler is called more than once in the same process.
-  // The `|| 0` guard converts NaN (from a malformed pre-existing GIT_CONFIG_COUNT) to 0,
-  // preventing GIT_CONFIG_KEY_NaN/VALUE_NaN entries that would corrupt the env-var config chain.
-  const existingCount = parseInt(process.env.GIT_CONFIG_COUNT || "0", 10) || 0;
-  for (let i = 0; i < existingCount; i++) {
-    if (process.env[`GIT_CONFIG_KEY_${i}`] === "safe.directory" && process.env[`GIT_CONFIG_VALUE_${i}`] === gitCwd) {
-      return;
-    }
-  }
-
-  const idx = existingCount;
-  process.env.GIT_CONFIG_COUNT = String(existingCount + 1);
-  process.env[`GIT_CONFIG_KEY_${idx}`] = "safe.directory";
-  process.env[`GIT_CONFIG_VALUE_${idx}`] = gitCwd;
-  server.debug(`Configured git safe.directory for bridge context: ${gitCwd}`);
 }
 
 /**
@@ -254,6 +301,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    * @type {Map<string, number>}
    */
   const operationCounts = new Map();
+  const uploadedAssetPaths = new Set();
 
   /**
    * Return the explicitly user-configured max for a safe-output type, or null if not set / unlimited.
@@ -339,15 +387,23 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       return null;
     }
 
+    const configKey = toolName.replace(/_/g, "-");
+
     const anyOf = Array.isArray(requirement.anyOf) ? requirement.anyOf : [];
-    if (anyOf.length === 0 || hasExplicitTargetParameter(entry, anyOf)) {
-      return null;
+    if (anyOf.length > 0 && !hasExplicitTargetParameter(entry, anyOf)) {
+      const primary = requirement.primary || anyOf[0];
+      const guidance = anyOf.length === 1 ? primary : `one of: ${anyOf.join(", ")}`;
+      return buildIntentErrorResponse(`${toolName} requires ${primary} when safe-outputs.${configKey}.target is '*'. Provide ${guidance} and retry.`);
     }
 
-    const configKey = toolName.replace(/_/g, "-");
-    const primary = requirement.primary || anyOf[0];
-    const guidance = anyOf.length === 1 ? primary : `one of: ${anyOf.join(", ")}`;
-    return buildIntentErrorResponse(`${toolName} requires ${primary} when safe-outputs.${configKey}.target is '*'. Provide ${guidance} and retry.`);
+    const allOf = Array.isArray(requirement.allOf) ? requirement.allOf : [];
+    for (const field of allOf) {
+      if (!hasExplicitTargetParameter(entry, [field])) {
+        return buildIntentErrorResponse(`${toolName} requires ${field} when safe-outputs.${configKey}.target is '*'. Provide ${field} and retry.`);
+      }
+    }
+
+    return null;
   };
 
   /**
@@ -356,7 +412,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    * @returns {Object | null} MCP response if large content was handled, else null
    */
   const maybeHandleLargeContent = entry => {
+    /** @type {any} */
     let largeContent = null;
+    /** @type {any} */
     let largeFieldName = null;
 
     for (const [key, value] of Object.entries(entry)) {
@@ -397,6 +455,29 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    */
   const defaultHandler = type => args => {
     const entry = { ...(args || {}), type };
+    if (entry.data !== undefined) {
+      const toolConfig = getSafeOutputsToolConfig(config, type);
+      const dataEnabled = toolConfig?.data_enabled === true || (toolConfig?.data_schema && typeof toolConfig.data_schema === "object");
+      if (!dataEnabled) {
+        return buildIntentErrorResponse(`${type} data is not enabled (set safe-outputs.data in workflow frontmatter)`);
+      }
+      /** @type {Record<string, any>|null} */
+      let dataSchema = null;
+      try {
+        if (toolConfig?.data_schema !== undefined) {
+          dataSchema = resolveDataSchema(toolConfig.data_schema, `safe-outputs.${type}.data`);
+        }
+      } catch (error) {
+        return buildIntentErrorResponse(`${type} data schema is invalid: ${getErrorMessage(error)}`);
+      }
+      if (dataSchema) {
+        const dataSchemaError = validateValueAgainstSchema(entry.data, dataSchema);
+        if (dataSchemaError) {
+          const errorPath = dataSchemaError.path ? `.${dataSchemaError.path}` : "";
+          return buildIntentErrorResponse(`${type} data${errorPath} ${dataSchemaError.message}`);
+        }
+      }
+    }
     const wildcardTargetValidationError = validateWildcardTargetRequirement(entry);
     if (wildcardTargetValidationError) {
       return wildcardTargetValidationError;
@@ -421,7 +502,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
   try {
     deduplicateByTitle = parseDeduplicateByTitle(createIssueConfig.deduplicate_by_title);
   } catch (error) {
-    throw new Error(`${ERR_VALIDATION}: ${getErrorMessage(error)}`);
+    throw new Error(`${ERR_VALIDATION}: ${getErrorMessage(error)}`, { cause: error });
   }
   const createIssueTitlePrefix = createIssueConfig.title_prefix ?? "";
   /** @type {Map<string, Array<{title: string, normalizedTitle: string}>>} */
@@ -451,6 +532,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (!isInWorkspace && !isInTmp) {
       throw new Error(`${ERR_CONFIG}: File path must be within workspace directory (${workspaceDir}) or /tmp directory. ` + `Provided path: ${filePath} (resolved to: ${absolutePath})`);
     }
+    if (uploadedAssetPaths.has(absolutePath)) {
+      throw new Error(`${ERR_VALIDATION}: Duplicate upload_asset source path is not allowed: ${filePath}`);
+    }
 
     // Validate file exists
     if (!fs.existsSync(filePath)) {
@@ -458,7 +542,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     }
 
     // Get file stats
-    const stats = fs.statSync(filePath);
+    let stats;
+    try {
+      stats = fs.statSync(filePath);
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to inspect file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     const sizeBytes = stats.size;
     const sizeKB = Math.ceil(sizeBytes / 1024);
 
@@ -491,20 +580,35 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     // the artifact-upload step), matching the same pattern used by upload_artifact.
     const assetsDir = path.join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "safeoutputs", "assets");
     if (!fs.existsSync(assetsDir)) {
-      fs.mkdirSync(assetsDir, { recursive: true });
+      try {
+        fs.mkdirSync(assetsDir, { recursive: true });
+      } catch (err) {
+        throw new Error(`${ERR_SYSTEM}: Failed to create directory ${assetsDir}: ${getErrorMessage(err)}`, { cause: err });
+      }
     }
 
     // Read file and compute hash
-    const fileContent = fs.readFileSync(filePath);
+    let fileContent;
+    try {
+      fileContent = fs.readFileSync(filePath);
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     const sha = crypto.createHash("sha256").update(fileContent).digest("hex");
 
     // Extract filename and extension
     const fileName = path.basename(filePath);
     const fileExt = path.extname(fileName).toLowerCase();
 
-    // Copy file to assets directory with original name
-    const targetPath = path.join(assetsDir, fileName);
-    fs.copyFileSync(filePath, targetPath);
+    // Key the staged file by its declared source path so same-basename assets
+    // cannot overwrite each other before the privileged publishing job.
+    const stagedFileName = `${crypto.createHash("sha256").update(filePath).digest("hex")}${fileExt}`;
+    const targetPath = path.join(assetsDir, stagedFileName);
+    try {
+      fs.copyFileSync(filePath, targetPath);
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to copy file ${filePath} to ${targetPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
 
     // Generate target filename as sha + extension (lowercased)
     const targetFileName = (sha + fileExt).toLowerCase();
@@ -536,6 +640,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     };
 
     appendSafeOutputCounted(entry);
+    uploadedAssetPaths.add(absolutePath);
 
     return {
       content: [
@@ -589,10 +694,14 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
     const { repoParts } = repoResult;
+    const configuredHeadRepo = typeof prConfig["head-repo"] === "string" ? prConfig["head-repo"].trim() : "";
+    entry.head_repo = configuredHeadRepo || repoResult.repo;
 
     // Determine the working directory for git operations
     // If repo is specified or configured, find where it's checked out
+    /** @type {any} */
     let repoCwd = null;
+    /** @type {any} */
     let repoSlug = null;
     const patchWorkspacePath = typeof prConfig.patch_workspace_path === "string" ? prConfig.patch_workspace_path.trim() : "";
     const currentCheckoutRepo = typeof prConfig.current_checkout_repo === "string" ? prConfig.current_checkout_repo.trim() : "";
@@ -876,6 +985,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (useBundle) {
       // Bundle transport: preserves merge commits and per-commit metadata
       server.debug(`Generating bundle for create_pull_request with branch: ${entry.branch}${repoCwd ? ` in ${repoCwd} baseBranch: ${baseBranch}` : ""}`);
+      if (Array.isArray(prConfig.excluded_files) && prConfig.excluded_files.length > 0) {
+        transportOptions.excludedFiles = prConfig.excluded_files;
+      }
       const bundleResult = await generateGitBundle(entry.branch, baseBranch, transportOptions);
 
       if (!bundleResult.success) {
@@ -1034,11 +1146,14 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
     const { repoParts } = repoResult;
+    const configuredHeadRepo = typeof pushConfig["head-repo"] === "string" ? pushConfig["head-repo"].trim() : "";
+    entry.head_repo = configuredHeadRepo || repoResult.repo;
 
     // Determine the working directory for git operations.
     // Look up the checkout path when the target repo is explicitly provided by the agent
     // or explicitly configured via target-repo in the workflow config — this ensures patch
     // generation runs from the correct directory when the target repo is checked out in a subdirectory.
+    /** @type {any} */
     let repoCwd = null;
     const itemRepo = repoResult.repo;
     const pushPatchWorkspacePath = typeof pushConfig.patch_workspace_path === "string" ? pushConfig.patch_workspace_path.trim() : "";
@@ -1066,7 +1181,14 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       server.debug(`Using configured patch_workspace_path for push_to_pull_request_branch: ${pushPatchWorkspacePath} -> ${repoCwd}`);
     }
 
-    if (((entry.repo && entry.repo.trim()) || pushConfig["target-repo"]) && !repoCwd) {
+    const envTargetSlug = (process.env.GH_AW_TARGET_REPO_SLUG || "").trim();
+    const currentRepo = (process.env.GITHUB_REPOSITORY || "").toLowerCase();
+    const envSlugIsSideRepo = envTargetSlug && envTargetSlug.toLowerCase() !== currentRepo;
+    if (envTargetSlug && !envSlugIsSideRepo) {
+      server.debug(`GH_AW_TARGET_REPO_SLUG (${envTargetSlug}) matches current repo; not using as side-repo checkout hint for push_to_pull_request_branch`);
+    }
+    const hasExplicitTargetRepoHint = (entry.repo && entry.repo.trim()) || pushConfig["target-repo"] || envSlugIsSideRepo;
+    if (hasExplicitTargetRepoHint && !repoCwd) {
       server.debug(`Looking for checkout of target repo: ${itemRepo}`);
       const checkoutResult = findRepoCheckout(itemRepo);
       if (!checkoutResult.success) {
@@ -1390,6 +1512,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     if (useBundle) {
       // Bundle transport: preserves merge commits and per-commit metadata
       server.debug(`Generating incremental bundle for push_to_pull_request_branch with branch: ${entry.branch}, baseBranch: ${baseBranch}`);
+      if (Array.isArray(pushConfig.excluded_files) && pushConfig.excluded_files.length > 0) {
+        pushTransportOptions.excludedFiles = pushConfig.excluded_files;
+      }
       const bundleResult = await generateGitBundle(entry.branch, baseBranch, pushTransportOptions);
 
       if (!bundleResult.success) {
@@ -1547,6 +1672,9 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const maxFileSize = memoryConf.max_file_size || 10240;
     const maxPatchSize = memoryConf.max_patch_size || 10240;
     const maxFileCount = memoryConf.max_file_count || 100;
+    const validationConfig = memoryConf.validation || null;
+    const validationScript = validationConfig && typeof validationConfig.script === "string" ? validationConfig.script : "";
+    const validationTimeoutSeconds = validationConfig && Number.isFinite(validationConfig.timeout) ? validationConfig.timeout : undefined;
     // The effective limit is max_patch_size × 1.2, matching the push gate in push_repo_memory.cjs.
     // This catches cases where total memory content is close to or exceeds the push diff limit.
     const effectiveMaxPatchSize = Math.floor(maxPatchSize * 1.2);
@@ -1562,6 +1690,30 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
+    clearValidationMarker("repo", memoryId);
+
+    if (memoryConf.format_json === true) {
+      try {
+        const formattedFiles = formatJSONFiles(memoryDir, maxFileSize);
+        if (formattedFiles.length > 0) {
+          core.info(`Formatted ${formattedFiles.length} repo-memory JSON file(s) before validation: ${formattedFiles.join(", ")}`);
+        }
+      } catch (/** @type {any} */ error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                result: "error",
+                error: `Failed to format repo-memory JSON before validation: ${getErrorMessage(error)}`,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     // Recursively scan all files in the memory directory
     /** @type {Array<{relativePath: string, size: number}>} */
     const files = [];
@@ -1571,7 +1723,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
      * @param {string} relativePath
      */
     function scanDir(dirPath, relativePath) {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      let entries;
+      try {
+        entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      } catch (err) {
+        throw new Error(`${ERR_SYSTEM}: Failed to read directory ${dirPath}: ${getErrorMessage(err)}`, { cause: err });
+      }
       for (const entry of entries) {
         // Skip .git directory to avoid counting git metadata as memory content.
         // The memory directory is a git clone, so .git may contain pack files that
@@ -1584,7 +1741,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         if (entry.isDirectory()) {
           scanDir(fullPath, relPath);
         } else if (entry.isFile()) {
-          const stats = fs.statSync(fullPath);
+          let stats;
+          try {
+            stats = fs.statSync(fullPath);
+          } catch (err) {
+            throw new Error(`${ERR_SYSTEM}: Failed to inspect file ${fullPath}: ${getErrorMessage(err)}`, { cause: err });
+          }
           files.push({ relativePath: relPath.replace(/\\/g, "/"), size: stats.size });
         }
       }
@@ -1643,17 +1805,35 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
-    // Check total content size. totalSize is the raw sum of all file sizes in the memory
-    // directory (excluding .git). It is compared against max_patch_size × 1.2 so that
-    // a full rewrite of all memory content would remain within the push gate limit in
-    // push_repo_memory.cjs, which applies the same 1.2× factor to diff additions.
     const totalSize = files.reduce((sum, f) => sum + f.size, 0);
     const totalSizeKb = Math.ceil(totalSize / 1024);
     const effectiveMaxKb = Math.floor(effectiveMaxPatchSize / 1024);
+    const maxPatchSizeKb = Math.floor(maxPatchSize / 1024);
 
-    core.debug(`push_repo_memory validation: ${files.length} files, total ${totalSize} bytes, effective limit ${effectiveMaxPatchSize} bytes`);
+    let patchSizeBytes;
+    try {
+      ensureSafeDirectoryTrust(memoryDir, server);
+      execGitSync(["add", "--sparse", "."], { cwd: memoryDir, stdio: "pipe" });
+      patchSizeBytes = getStagedPatchDiffSizeBytes({ execGitSyncFn: execGitSync, cwd: memoryDir });
+    } catch (/** @type {any} */ error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              result: "error",
+              error: `Failed to compute staged patch diff size for '${memoryDir}': ${getErrorMessage(error)}`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    const patchSizeKb = Math.ceil(patchSizeBytes / 1024);
 
-    if (totalSize > effectiveMaxPatchSize) {
+    core.debug(`push_repo_memory validation: ${files.length} files, total ${totalSize} bytes, patch diff ${patchSizeBytes} bytes, effective limit ${effectiveMaxPatchSize} bytes`);
+
+    if (patchSizeBytes > effectiveMaxPatchSize) {
       return {
         content: [
           {
@@ -1661,11 +1841,10 @@ function createHandlers(server, appendSafeOutput, config = {}) {
             text: JSON.stringify({
               result: "error",
               error:
-                `Total memory size (${totalSizeKb} KB) exceeds the allowed limit of ${effectiveMaxKb} KB ` +
-                `(configured max-patch-size: ${Math.floor(maxPatchSize / 1024)} KB).\n\n` +
-                `Please reduce the total size of files in '${memoryDir}' before the workflow completes. ` +
-                `Consider: summarizing notes instead of keeping full history, removing outdated entries, or compressing data. ` +
-                `Then call push_repo_memory again to verify the size is within limits.`,
+                `Patch diff size (${patchSizeKb} KB, ${patchSizeBytes} bytes) exceeds the allowed limit of ${effectiveMaxKb} KB ` +
+                `(${effectiveMaxPatchSize} bytes, configured max-patch-size: ${maxPatchSizeKb} KB / ${maxPatchSize} bytes with 20% overhead).\n\n` +
+                `Please reduce the size of staged changes in '${memoryDir}' before the workflow completes. ` +
+                `Then call push_repo_memory again to verify the patch size is within limits.`,
             }),
           },
         ],
@@ -1673,13 +1852,68 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       };
     }
 
+    /** @type {ReturnType<typeof runCustomMemoryValidation> | null} */
+    let customValidation = null;
+    if (validationConfig) {
+      customValidation = runCustomMemoryValidation({
+        script: validationScript,
+        memoryDir,
+        memoryId,
+        kind: "repo",
+        timeoutSeconds: validationTimeoutSeconds,
+      });
+      if (!customValidation.ok) {
+        const reason = customValidation.timedOut ? `timed out after ${validationTimeoutSeconds || 30} second(s)` : `exited with code ${customValidation.exitCode}`;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                result: "error",
+                error: `Custom repo-memory validation failed for '${memoryId}': ${reason}.`,
+                storage_validation: {
+                  result: "success",
+                  message: `Storage validation passed: ${files.length} file(s), ${totalSizeKb} KB total content, ${patchSizeKb} KB patch diff (${patchSizeBytes} bytes).`,
+                },
+                custom_validation: {
+                  result: "error",
+                  stdout: customValidation.stdout,
+                  stderr: customValidation.stderr,
+                },
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    const markerPath = writeValidationMarker("repo", memoryId);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
             result: "success",
-            message: `Memory validation passed: ${files.length} file(s), ${totalSizeKb} KB total (limit: ${effectiveMaxKb} KB).`,
+            message:
+              `Storage validation passed: ${files.length} file(s), ${totalSizeKb} KB total content, ` +
+              `${patchSizeKb} KB patch diff (${patchSizeBytes} bytes) (limit: ${effectiveMaxKb} KB / ${effectiveMaxPatchSize} bytes).` +
+              (customValidation ? " Custom domain validation passed." : ""),
+            storage_validation: {
+              result: "success",
+              files: files.length,
+              total_size_kb: totalSizeKb,
+              patch_size_bytes: patchSizeBytes,
+              effective_patch_limit_bytes: effectiveMaxPatchSize,
+            },
+            custom_validation: customValidation
+              ? {
+                  result: "success",
+                  stdout: customValidation.stdout,
+                  stderr: customValidation.stderr,
+                }
+              : undefined,
+            validation_marker: markerPath,
           }),
         },
       ],
@@ -1720,7 +1954,13 @@ function createHandlers(server, appendSafeOutput, config = {}) {
 
     let resolvedTitle = entry.title?.trim() || "";
     if (!resolvedTitle) {
-      resolvedTitle = entry.body?.trim() || "Agent Output";
+      // Use the first non-empty line of the body as the title fallback rather than
+      // the entire body, so the title stays concise and the body remains intact.
+      const firstBodyLine = (entry.body || "")
+        .split("\n")
+        .map(l => l.replace(/^#+\s*/, "").trim())
+        .find(l => l.length > 0);
+      resolvedTitle = firstBodyLine || "Agent Output";
     }
     resolvedTitle = applyTitlePrefix(sanitizeTitle(resolvedTitle, createIssueTitlePrefix), createIssueTitlePrefix);
 
@@ -1851,6 +2091,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const effectiveAddCommentTarget = addCommentConfig.target || "triggering";
     const hasExplicitItemNumber = args?.item_number != null || args?.issue_number != null || args?.["pr-number"] != null;
     if (effectiveAddCommentTarget === "triggering" && !hasExplicitItemNumber) {
+      /** @type {any} */
       let invocationContext = null;
       try {
         invocationContext = resolveInvocationContext(context);
@@ -1881,6 +2122,18 @@ function createHandlers(server, appendSafeOutput, config = {}) {
 
     // Build the entry with a temporary_id
     const entry = { ...(args || {}), type: "add_comment" };
+    const commentIdValidationResult = validateAllowedAddCommentId(entry, addCommentConfig);
+    if (commentIdValidationResult.error) {
+      return commentIdValidationResult.error;
+    }
+    if (commentIdValidationResult.commentId === undefined) {
+      // entry was spread from args, so a blank/whitespace comment_id (rather than an
+      // absent one) could still be sitting on entry; strip it so downstream code never
+      // sees an unvalidated raw value.
+      delete entry.comment_id;
+    } else {
+      entry.comment_id = commentIdValidationResult.commentId;
+    }
     const wildcardTargetValidationError = validateWildcardTargetRequirement(entry);
     if (wildcardTargetValidationError) {
       return wildcardTargetValidationError;
@@ -2020,6 +2273,61 @@ function createHandlers(server, appendSafeOutput, config = {}) {
   };
 
   /**
+   * Resolve an allowed-root path to its canonical form, falling back to path.resolve when the
+   * directory does not yet exist (e.g. GITHUB_WORKSPACE before checkout).
+   * @param {string} root
+   * @returns {string}
+   */
+  function canonicalizeAllowedRoot(root) {
+    try {
+      return fs.realpathSync(root);
+    } catch {
+      return path.resolve(root);
+    }
+  }
+
+  /**
+   * Validate that a canonical absolute path does not refer to sensitive system or credential
+   * locations. Returns an error message string, or null if the path is safe.
+   *
+   * Rejected patterns:
+   *  - Any path with a ".git" directory component (prevents .git/config leakage).
+   *  - System directories: /etc, /proc, /sys, /dev, /run, /boot, /lib*, /usr/lib*.
+   *  - HOME credential/config subtrees: .ssh, .aws, .netrc, .npmrc, .gitconfig, .gnupg,
+   *    .config, .docker, .kube, .azure, .gcp.
+   *
+   * @param {string} canonicalPath - Resolved absolute path (output of fs.realpathSync or path.resolve)
+   * @returns {string|null}
+   */
+  function validateUploadSourcePath(canonicalPath) {
+    const parts = canonicalPath.split(path.sep);
+    if (parts.some(p => p === ".git")) {
+      return `path contains sensitive repository metadata (.git): ${canonicalPath}`;
+    }
+
+    const systemDenied = ["/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/lib", "/lib64", "/usr/lib", "/usr/local/lib"];
+    for (const denied of systemDenied) {
+      const normalDenied = path.resolve(denied);
+      if (canonicalPath === normalDenied || canonicalPath.startsWith(normalDenied + path.sep)) {
+        return `path refers to a system directory: ${canonicalPath}`;
+      }
+    }
+
+    const homeDir = os.homedir();
+    if (homeDir) {
+      const sensitiveNames = [".ssh", ".aws", ".gnupg", ".docker", ".kube", ".azure", ".gcp", ".config", ".netrc", ".npmrc", ".gitconfig", ".gitcredentials", ".git-credentials"];
+      for (const name of sensitiveNames) {
+        const sensitive = path.join(path.resolve(homeDir), name);
+        if (canonicalPath === sensitive || canonicalPath.startsWith(sensitive + path.sep)) {
+          return `path refers to a sensitive HOME location: ${canonicalPath}`;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Recursively copy all regular files from srcDir into destDir, preserving the relative
    * path structure under srcDir. Non-regular entries (sockets, devices, pipes, symlinks)
    * are skipped silently.
@@ -2028,15 +2336,58 @@ function createHandlers(server, appendSafeOutput, config = {}) {
    */
   function copyDirectoryRecursive(srcDir, destDir) {
     if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true });
+      try {
+        fs.mkdirSync(destDir, { recursive: true });
+      } catch (err) {
+        throw new Error(`${ERR_SYSTEM}: Failed to create directory ${destDir}: ${getErrorMessage(err)}`, { cause: err });
+      }
     }
-    for (const ent of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to read directory ${srcDir}: ${getErrorMessage(err)}`, { cause: err });
+    }
+    for (const ent of entries) {
       const srcPath = path.join(srcDir, ent.name);
       const destPath = path.join(destDir, ent.name);
       if (ent.isDirectory()) {
+        // Reject sensitive directory names at every level (e.g. foo/.git/config).
+        let canonicalSrcPath;
+        try {
+          canonicalSrcPath = fs.realpathSync(srcPath);
+        } catch (err) {
+          throw new Error(`${ERR_SYSTEM}: Failed to resolve canonical path for ${srcPath}: ${getErrorMessage(err)}`, { cause: err });
+        }
+        const sensitiveErr = validateUploadSourcePath(canonicalSrcPath);
+        if (sensitiveErr) {
+          throw {
+            code: -32602,
+            message: `${ERR_VALIDATION}: upload_artifact: ${sensitiveErr}`,
+          };
+        }
         copyDirectoryRecursive(srcPath, destPath);
       } else if (ent.isFile() && !ent.isSymbolicLink() && !fs.existsSync(destPath)) {
-        fs.copyFileSync(srcPath, destPath);
+        // Revalidate each file's canonical path before copying.
+        let canonicalSrcPath;
+        try {
+          canonicalSrcPath = fs.realpathSync(srcPath);
+        } catch (err) {
+          throw new Error(`${ERR_SYSTEM}: Failed to resolve canonical path for ${srcPath}: ${getErrorMessage(err)}`, { cause: err });
+        }
+        const sensitiveErr = validateUploadSourcePath(canonicalSrcPath);
+        if (sensitiveErr) {
+          throw {
+            code: -32602,
+            message: `${ERR_VALIDATION}: upload_artifact: ${sensitiveErr}`,
+          };
+        }
+        try {
+          fs.copyFileSync(srcPath, destPath);
+          fs.chmodSync(destPath, 0o600);
+        } catch (err) {
+          throw new Error(`${ERR_SYSTEM}: Failed to copy file ${srcPath} to ${destPath}: ${getErrorMessage(err)}`, { cause: err });
+        }
       }
       // Skip symlinks, sockets, pipes, block/char devices — non-regular file types.
     }
@@ -2085,9 +2436,47 @@ function createHandlers(server, appendSafeOutput, config = {}) {
         };
       }
 
+      // Canonicalize to detect traversal escapes and symlink chains.
+      let canonicalFilePath;
+      try {
+        canonicalFilePath = fs.realpathSync(filePath);
+      } catch (err) {
+        throw {
+          code: -32602,
+          message: `${ERR_VALIDATION}: upload_artifact: failed to resolve canonical path for ${filePath}: ${getErrorMessage(err)}`,
+        };
+      }
+
+      // Reject sensitive paths (system dirs, .git, HOME credentials).
+      const sensitiveError = validateUploadSourcePath(canonicalFilePath);
+      if (sensitiveError) {
+        throw {
+          code: -32602,
+          message: `${ERR_VALIDATION}: upload_artifact: ${sensitiveError}`,
+        };
+      }
+
+      // Enforce allowed canonical source roots: staging dir and GITHUB_WORKSPACE.
+      // RUNNER_TEMP is intentionally excluded — only the specific staging subdirectory is allowed.
       const stagingDir = path.join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "safeoutputs", "upload-artifacts");
+      const allowedRoots = [canonicalizeAllowedRoot(stagingDir)];
+      if (process.env.GITHUB_WORKSPACE) {
+        allowedRoots.push(canonicalizeAllowedRoot(process.env.GITHUB_WORKSPACE));
+      }
+      const withinAllowedRoot = allowedRoots.some(root => canonicalFilePath === root || canonicalFilePath.startsWith(root + path.sep));
+      if (!withinAllowedRoot) {
+        throw {
+          code: -32602,
+          message: `${ERR_VALIDATION}: upload_artifact: path is outside allowed source roots (GITHUB_WORKSPACE, staging directory): ${canonicalFilePath}`,
+        };
+      }
+
       if (!fs.existsSync(stagingDir)) {
-        fs.mkdirSync(stagingDir, { recursive: true });
+        try {
+          fs.mkdirSync(stagingDir, { recursive: true });
+        } catch (err) {
+          throw new Error(`${ERR_SYSTEM}: Failed to create directory ${stagingDir}: ${getErrorMessage(err)}`, { cause: err });
+        }
       }
 
       const destName = path.basename(filePath);
@@ -2097,7 +2486,12 @@ function createHandlers(server, appendSafeOutput, config = {}) {
       } else {
         const destPath = path.join(stagingDir, destName);
         if (!fs.existsSync(destPath)) {
-          fs.copyFileSync(filePath, destPath);
+          try {
+            fs.copyFileSync(filePath, destPath);
+            fs.chmodSync(destPath, 0o600);
+          } catch (err) {
+            throw new Error(`${ERR_SYSTEM}: Failed to copy file ${filePath} to ${destPath}: ${getErrorMessage(err)}`, { cause: err });
+          }
         }
       }
 
@@ -2136,6 +2530,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const effectiveTarget = updateIssueConfig.target || "triggering";
 
     if (effectiveTarget === "triggering") {
+      /** @type {any} */
       let invocationContext = null;
       try {
         invocationContext = resolveInvocationContext(context);
@@ -2188,6 +2583,7 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     const updatePRConfig = getSafeOutputsToolConfig(config, "update_pull_request");
     const effectivePRTarget = updatePRConfig.target || "triggering";
     if (effectivePRTarget === "triggering") {
+      /** @type {any} */
       let invocationContext = null;
       try {
         invocationContext = resolveInvocationContext(context);
@@ -2218,6 +2614,246 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     return defaultHandler("update_pull_request")(args || {});
   };
 
+  // ============================================================
+  // Egress context validators for tools that target existing items
+  // ============================================================
+  //
+  // Per Safe Outputs Specification MCE1: these handlers validate that the
+  // required triggering context (PR, issue, or discussion) is available
+  // BEFORE writing to NDJSON. When a tool targets a triggering entity
+  // (no explicit item number supplied) on a scheduled or workflow_dispatch
+  // run that has no such context, the agent receives an actionable error
+  // immediately rather than a downstream processing hard-failure.
+  //
+  // Pattern: if an explicit target number is provided, bypass the context
+  // check and let the downstream handler resolve it normally. Only when the
+  // number is absent do we gate on triggering-context availability.
+
+  /**
+   * Build a handler that validates triggering context before recording to NDJSON.
+   * Used for tools that fall back to triggering entity context when no explicit
+   * target number is supplied (e.g. close_pull_request, close_issue, add_labels).
+   *
+   * Context validation only runs when the tool's configured `target` is `"triggering"`
+   * (the default). When `target` is a fixed number (e.g. `"42"`) or `"*"` (wildcard),
+   * the check is skipped: the fixed number is resolved downstream, and wildcard
+   * enforcement is handled by `validateWildcardTargetRequirement`.
+   *
+   * @param {Object} opts
+   * @param {string} opts.toolName - Normalised tool name (e.g. "close_pull_request")
+   * @param {string[]} opts.explicitNumberFields - Args fields that constitute an explicit target
+   *   (if any is present the context check is skipped)
+   * @param {"pr"|"issue"|"issue_or_pr"|"discussion"} opts.contextType - Required triggering context
+   * @param {(eventName: string) => string} opts.buildErrorMessage - Returns the error string to
+   *   surface when the required context is missing
+   * @returns {(args: any) => any} Handler function
+   */
+  const createTriggeringContextHandler = ({ toolName, explicitNumberFields, contextType, buildErrorMessage }) => {
+    return args => {
+      const toolConfig = getSafeOutputsToolConfig(config, toolName);
+      const effectiveTarget = toolConfig.target || "triggering";
+
+      // Only validate triggering context when the tool is configured to target the
+      // triggering entity. With a fixed number target the downstream handler resolves
+      // it directly; with wildcard targeting the per-call number requirement is
+      // enforced by validateWildcardTargetRequirement in defaultHandler.
+      if (effectiveTarget === "triggering") {
+        // If the caller supplied an explicit target number, skip context validation.
+        // The downstream execution handler will resolve the number normally.
+        const hasExplicitNumber = explicitNumberFields.some(field => args?.[field] != null);
+        if (!hasExplicitNumber) {
+          /** @type {any} */
+          let invocationContext = null;
+          try {
+            invocationContext = resolveInvocationContext(context);
+          } catch (err) {
+            // A validation error (e.g. disallowed target_repo / SEC-005) is a real failure — surface it.
+            const errMsg = getErrorMessage(err);
+            if (errMsg.startsWith(ERR_VALIDATION)) {
+              return buildIntentErrorResponse(errMsg);
+            }
+            // Unexpected structural error: skip validation and let downstream handle gracefully.
+          }
+          if (invocationContext != null) {
+            const { effectiveEventName, effectivePayload } = resolveEffectiveContext(invocationContext, context);
+            const isIssueCommentOnPR = effectiveEventName === "issue_comment" && Boolean(effectivePayload?.issue?.pull_request);
+
+            let hasContext;
+            if (contextType === "pr") {
+              hasContext = PR_EVENT_NAMES.has(effectiveEventName) || isIssueCommentOnPR;
+            } else if (contextType === "issue") {
+              hasContext = effectiveEventName === "issues" || (effectiveEventName === "issue_comment" && !isIssueCommentOnPR);
+            } else if (contextType === "issue_or_pr") {
+              const isPR = PR_EVENT_NAMES.has(effectiveEventName) || isIssueCommentOnPR;
+              const isIssue = effectiveEventName === "issues" || (effectiveEventName === "issue_comment" && !isIssueCommentOnPR);
+              hasContext = isPR || isIssue;
+            } else if (contextType === "discussion") {
+              hasContext = effectiveEventName === "discussion" || effectiveEventName === "discussion_comment";
+            } else {
+              hasContext = false;
+            }
+
+            if (!hasContext) {
+              return buildIntentErrorResponse(buildErrorMessage(effectiveEventName));
+            }
+          }
+        }
+      }
+
+      return defaultHandler(toolName)(args || {});
+    };
+  };
+
+  /**
+   * Handler for close_pull_request tool.
+   * Per Safe Outputs Specification MCE1: validates PR context on egress when no
+   * explicit pull_request_number is supplied.
+   */
+  const closePullRequestHandler = createTriggeringContextHandler({
+    toolName: "close_pull_request",
+    explicitNumberFields: ["pull_request_number"],
+    contextType: "pr",
+    buildErrorMessage: eventName =>
+      `close_pull_request requires a pull request context but the workflow is running on a "${eventName}" event. ` +
+      `The close-pull-request handler auto-targets the pull request that triggered this workflow. ` +
+      `To close a specific pull request, supply pull_request_number explicitly.`,
+  });
+
+  /**
+   * Handler for merge_pull_request tool.
+   * Per Safe Outputs Specification MCE1: validates PR context on egress when no
+   * explicit pull_request_number is supplied.
+   */
+  const mergePullRequestHandler = createTriggeringContextHandler({
+    toolName: "merge_pull_request",
+    explicitNumberFields: ["pull_request_number"],
+    contextType: "pr",
+    buildErrorMessage: eventName =>
+      `merge_pull_request requires a pull request context but the workflow is running on a "${eventName}" event. ` +
+      `The merge-pull-request handler auto-targets the pull request that triggered this workflow. ` +
+      `To merge a specific pull request, supply pull_request_number explicitly.`,
+  });
+
+  /**
+   * Handler for mark_pull_request_as_ready_for_review tool.
+   * Per Safe Outputs Specification MCE1: validates PR context on egress when no
+   * explicit pull_request_number is supplied.
+   */
+  const markPullRequestAsReadyForReviewHandler = createTriggeringContextHandler({
+    toolName: "mark_pull_request_as_ready_for_review",
+    explicitNumberFields: ["pull_request_number"],
+    contextType: "pr",
+    buildErrorMessage: eventName =>
+      `mark_pull_request_as_ready_for_review requires a pull request context but the workflow is running on a "${eventName}" event. ` +
+      `This handler auto-targets the pull request that triggered this workflow. ` +
+      `To target a specific pull request, supply pull_request_number explicitly.`,
+  });
+
+  /**
+   * Handler for add_reviewer tool.
+   * Per Safe Outputs Specification MCE1: validates PR context on egress when no
+   * explicit pull_request_number is supplied.
+   */
+  const addReviewerHandler = createTriggeringContextHandler({
+    toolName: "add_reviewer",
+    explicitNumberFields: ["pull_request_number"],
+    contextType: "pr",
+    buildErrorMessage: eventName =>
+      `add_reviewer requires a pull request context but the workflow is running on a "${eventName}" event. ` +
+      `The add-reviewer handler auto-targets the pull request that triggered this workflow. ` +
+      `To add a reviewer to a specific pull request, supply pull_request_number explicitly.`,
+  });
+
+  /**
+   * Handler for reply_to_pull_request_review_comment tool.
+   * Per Safe Outputs Specification MCE1: validates PR context on egress when no
+   * explicit pull_request_number is supplied.
+   */
+  const replyToPullRequestReviewCommentHandler = createTriggeringContextHandler({
+    toolName: "reply_to_pull_request_review_comment",
+    explicitNumberFields: ["pull_request_number"],
+    contextType: "pr",
+    buildErrorMessage: eventName =>
+      `reply_to_pull_request_review_comment requires a pull request context but the workflow is running on a "${eventName}" event. ` +
+      `This handler auto-targets the pull request that triggered this workflow. ` +
+      `To reply to a review comment on a specific pull request, supply pull_request_number explicitly.`,
+  });
+
+  /**
+   * Handler for close_issue tool.
+   * Per Safe Outputs Specification MCE1: validates issue context on egress when no
+   * explicit issue_number is supplied.
+   */
+  const closeIssueHandler = createTriggeringContextHandler({
+    toolName: "close_issue",
+    explicitNumberFields: ["issue_number"],
+    contextType: "issue",
+    buildErrorMessage: eventName =>
+      `close_issue requires an issue context but the workflow is running on a "${eventName}" event. ` +
+      `The close-issue handler auto-targets the issue that triggered this workflow. ` +
+      `To close a specific issue, supply issue_number explicitly.`,
+  });
+
+  /**
+   * Handler for add_labels tool.
+   * Per Safe Outputs Specification MCE1: validates issue or PR context on egress when no
+   * explicit item_number is supplied.
+   */
+  const addLabelsHandler = createTriggeringContextHandler({
+    toolName: "add_labels",
+    explicitNumberFields: ["item_number", "issue_number", "pr_number", "pull_number"],
+    contextType: "issue_or_pr",
+    buildErrorMessage: eventName =>
+      `add_labels requires an issue or pull request context but the workflow is running on a "${eventName}" event. ` +
+      `The add-labels handler auto-targets the issue or pull request that triggered this workflow. ` +
+      `To label a specific item, supply item_number explicitly.`,
+  });
+
+  /**
+   * Handler for remove_labels tool.
+   * Per Safe Outputs Specification MCE1: validates issue or PR context on egress when no
+   * explicit item_number is supplied.
+   */
+  const removeLabelsHandler = createTriggeringContextHandler({
+    toolName: "remove_labels",
+    explicitNumberFields: ["item_number", "issue_number", "pr_number", "pull_number"],
+    contextType: "issue_or_pr",
+    buildErrorMessage: eventName =>
+      `remove_labels requires an issue or pull request context but the workflow is running on a "${eventName}" event. ` +
+      `The remove-labels handler auto-targets the issue or pull request that triggered this workflow. ` +
+      `To remove labels from a specific item, supply item_number explicitly.`,
+  });
+
+  /**
+   * Handler for update_discussion tool.
+   * Per Safe Outputs Specification MCE1: validates discussion context on egress when no
+   * explicit discussion_number is supplied.
+   */
+  const updateDiscussionHandler = createTriggeringContextHandler({
+    toolName: "update_discussion",
+    explicitNumberFields: ["discussion_number"],
+    contextType: "discussion",
+    buildErrorMessage: eventName =>
+      `update_discussion requires a discussion context but the workflow is running on a "${eventName}" event. ` +
+      `The update-discussion handler auto-targets the discussion that triggered this workflow. ` +
+      `To update a specific discussion, supply discussion_number explicitly.`,
+  });
+
+  /**
+   * Handler for close_discussion tool.
+   * Per Safe Outputs Specification MCE1: validates discussion context on egress when no
+   * explicit discussion_number is supplied.
+   */
+  const closeDiscussionHandler = createTriggeringContextHandler({
+    toolName: "close_discussion",
+    explicitNumberFields: ["discussion_number"],
+    contextType: "discussion",
+    buildErrorMessage: eventName =>
+      `close_discussion requires a discussion context but the workflow is running on a "${eventName}" event. ` +
+      `The close-discussion handler auto-targets the discussion that triggered this workflow. ` +
+      `To close a specific discussion, supply discussion_number explicitly.`,
+  });
+
   return {
     defaultHandler,
     uploadAssetHandler,
@@ -2233,6 +2869,16 @@ function createHandlers(server, appendSafeOutput, config = {}) {
     dismissPullRequestReviewHandler,
     updateIssueHandler,
     updatePullRequestHandler,
+    closePullRequestHandler,
+    mergePullRequestHandler,
+    markPullRequestAsReadyForReviewHandler,
+    addReviewerHandler,
+    replyToPullRequestReviewCommentHandler,
+    closeIssueHandler,
+    addLabelsHandler,
+    removeLabelsHandler,
+    updateDiscussionHandler,
+    closeDiscussionHandler,
   };
 }
 

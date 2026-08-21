@@ -541,6 +541,10 @@ func transformRepoPattern(pattern string) string {
 //     a GitHub App configured, auto-lockdown detection will set repos=all at runtime, so a
 //     write-sink policy with accept=["*"] is returned to match that runtime behaviour.
 //
+// When private-to-public-flows: allow is declared, sink-visibility is omitted from the returned
+// policy per MCP Gateway Specification Section 10.9.3: the blanket allow disables both
+// forcePublicRepos and sink-visibility enforcement.
+//
 // Returns nil when workflowData is nil, when no GitHub tool is present, or when a GitHub App is
 // configured (auto-lockdown is skipped for GitHub App tokens, which are already repo-scoped).
 func deriveWriteSinkGuardPolicyFromWorkflow(workflowData *WorkflowData) map[string]any {
@@ -554,9 +558,21 @@ func deriveWriteSinkGuardPolicyFromWorkflow(workflowData *WorkflowData) map[stri
 
 	toolConfig, _ := rawGithubTool.(map[string]any)
 
+	// Detect blanket opt-out: private-to-public-flows: allow.
+	// Per Section 10.9.3, allow disables sink-visibility enforcement in addition to forcePublicRepos.
+	blanketAllow := workflowData.ParsedTools != nil &&
+		workflowData.ParsedTools.GitHub != nil &&
+		workflowData.ParsedTools.GitHub.PrivateToPublicFlows == "allow"
+
 	// Try to derive from explicit guard policy first
 	policy := deriveSafeOutputsGuardPolicyFromGitHub(toolConfig)
 	if policy != nil {
+		if blanketAllow {
+			// Strip sink-visibility from write-sink when blanket allow is declared.
+			if writeSink, ok := policy["write-sink"].(map[string]any); ok {
+				delete(writeSink, "sink-visibility")
+			}
+		}
 		return policy
 	}
 
@@ -566,11 +582,14 @@ func deriveWriteSinkGuardPolicyFromWorkflow(workflowData *WorkflowData) map[stri
 	// sink-visibility is set as a runtime expression so that the write-sink guard can enforce
 	// public/private/internal semantics based on the actual repository visibility at workflow execution time.
 	if rawGithubTool != false && len(getGitHubGuardPolicies(toolConfig)) == 0 && !hasGitHubApp(toolConfig) {
+		writeSink := map[string]any{
+			"accept": []string{"*"},
+		}
+		if !blanketAllow {
+			writeSink["sink-visibility"] = sinkVisibilityRuntimeExpr
+		}
 		return map[string]any{
-			"write-sink": map[string]any{
-				"accept":          []string{"*"},
-				"sink-visibility": sinkVisibilityRuntimeExpr,
-			},
+			"write-sink": writeSink,
 		}
 	}
 
@@ -598,4 +617,34 @@ func getGitHubDockerImageVersion(githubTool map[string]any) string {
 	}
 	githubConfigLog.Printf("GitHub MCP Docker image version: %s", githubDockerImageVersion)
 	return githubDockerImageVersion
+}
+
+// getGitHubFeatures returns the comma-separated feature flag string for the GitHub MCP server.
+// When "features" is explicitly set in tools.github, that value is returned as-is.
+// Otherwise, "fields_param" is enabled by default when the effective server version is v1.6.0
+// or later, because that version introduced the optional fields-filtering parameter for
+// list/search tools (search_code, list_pull_requests, search_issues, etc.).
+// As of v1.8.0, the fields parameter is available by default without the feature flag;
+// the flag is still emitted for v1.6.0–v1.7.x compatibility and is a no-op on v1.8.0+.
+// Enabling fields_param reduces token usage by letting agents request only the fields they need.
+func getGitHubFeatures(githubTool map[string]any) string {
+	// Respect an explicit user-supplied features override.
+	// An explicit empty string disables all feature flags; any other string is forwarded as-is.
+	if featuresRaw, exists := githubTool["features"]; exists {
+		if features, ok := featuresRaw.(string); ok {
+			githubConfigLog.Printf("GitHub MCP features (explicit): %q", features)
+			return features
+		}
+	}
+
+	// Default: enable fields_param when the server version supports it (v1.6.0+).
+	// On v1.8.0+ the fields parameter is available by default, so the flag is a no-op.
+	version := getGitHubDockerImageVersion(githubTool)
+	if versionAtLeast(version, string(constants.DefaultGitHubMCPServerVersion), "v1.6.0") {
+		githubConfigLog.Printf("GitHub MCP features (default v1.6.0+): fields_param")
+		return GitHubMCPFeatureFieldsParam
+	}
+
+	githubConfigLog.Printf("GitHub MCP features: none (version %s < v1.6.0)", version)
+	return ""
 }

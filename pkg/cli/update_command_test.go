@@ -82,27 +82,80 @@ This is the base content.`
 	}
 }
 
-func TestNewUpdateCommand_HasDisableSecurityScannerFlag(t *testing.T) {
-	cmd := NewUpdateCommand(func(string) error { return nil })
-	require.NotNil(t, cmd, "update command should be created")
+// TestMergeWorkflowContent_PreservesUnchangedObjectFormImports is a regression test
+// for: gh aw update replacing a valid, unchanged upstream object-form import
+// (uses/with) with `imports: []` when only the prompt body changed upstream.
+func TestMergeWorkflowContent_PreservesUnchangedObjectFormImports(t *testing.T) {
+	base := `---
+on: push
+engine: claude
+imports:
+  - uses: shared/control.md
+    with:
+      role: orchestrator
+---
 
-	flag := cmd.Flags().Lookup("no-security-scanner")
-	require.NotNil(t, flag, "update command should register --no-security-scanner")
-	assert.Equal(t, "Skip security scanning of workflow markdown content", flag.Usage, "flag help text should match add/trial wording")
+# Dependabot Workflow
 
-	// Deprecated alias should still be registered
-	deprecated := cmd.Flags().Lookup("disable-security-scanner")
-	require.NotNil(t, deprecated, "update command should keep --disable-security-scanner as a deprecated alias")
-	assert.Equal(t, "use --no-security-scanner instead", deprecated.Deprecated)
-}
+Base prompt body.`
 
-func TestNewUpdateCommand_DeprecatesDisableReleaseBumpFlag(t *testing.T) {
-	cmd := NewUpdateCommand(func(string) error { return nil })
-	require.NotNil(t, cmd)
+	// Local has no modifications relative to base.
+	current := `---
+on: push
+engine: claude
+imports:
+  - uses: shared/control.md
+    with:
+      role: orchestrator
+source: test/repo/dependabot.md@v1.0.0
+---
 
-	flag := cmd.Flags().Lookup("disable-release-bump")
-	require.NotNil(t, flag, "update command should keep --disable-release-bump as a deprecated alias")
-	assert.Equal(t, "use --no-release-bump instead", flag.Deprecated)
+# Dependabot Workflow
+
+Base prompt body.`
+
+	// Upstream only changes the prompt body; the object-form import is unchanged.
+	new := `---
+on: push
+engine: claude
+imports:
+  - uses: shared/control.md
+    with:
+      role: orchestrator
+source: test/repo/dependabot.md@v1.1.0
+---
+
+# Dependabot Workflow
+
+Updated prompt body.`
+
+	oldSourceSpec := "test/repo/dependabot.md@v1.0.0"
+	newRef := "v1.1.0"
+
+	merged, hasConflicts, err := MergeWorkflowContent(base, current, new, oldSourceSpec, newRef, "", false)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if hasConflicts {
+		t.Errorf("Expected no conflicts, merged content:\n%s", merged)
+	}
+
+	if strings.Contains(merged, "imports: []") {
+		t.Fatalf("Expected the unchanged upstream import to be preserved, but imports were emptied:\n%s", merged)
+	}
+
+	if !strings.Contains(merged, "uses: shared/control.md") && !strings.Contains(merged, "shared/control.md") {
+		t.Errorf("Expected the shared/control.md import to be preserved, got:\n%s", merged)
+	}
+
+	if !strings.Contains(merged, "role: orchestrator") {
+		t.Errorf("Expected the import 'with' fields to be preserved, got:\n%s", merged)
+	}
+
+	if !strings.Contains(merged, "Updated prompt body.") {
+		t.Errorf("Expected upstream prompt body change to be applied, got:\n%s", merged)
+	}
 }
 
 func TestNewUpdateCommand_CoolDownFlagUsage(t *testing.T) {
@@ -123,6 +176,15 @@ func TestNewUpdateCommand_MentionsEnterpriseSourceResolution(t *testing.T) {
 	assert.Contains(t, cmd.Long, "Use full https://github.com/... source URLs for other public github.com workflows.")
 }
 
+func TestNewUpdateCommand_HasApproveFlag(t *testing.T) {
+	cmd := NewUpdateCommand(func(string) error { return nil })
+	require.NotNil(t, cmd, "update command should be created")
+
+	flag := cmd.Flags().Lookup("approve")
+	require.NotNil(t, flag, "update command should register --approve flag")
+	assert.Contains(t, flag.Usage, "When strict mode is active", "--approve description should match compile/upgrade semantics")
+}
+
 // TestMergeWorkflowContent_WithConflicts tests a merge with conflicts
 func TestMergeWorkflowContent_WithConflicts(t *testing.T) {
 	base := `---
@@ -137,6 +199,7 @@ This is the original content.`
 	current := `---
 on: push
 engine: claude
+source: test/repo/workflow.md@v1.0.0
 ---
 
 # Original Workflow
@@ -167,6 +230,10 @@ This is the upstream modified content.`
 	// Check for conflict markers
 	if !strings.Contains(merged, "<<<<<<<") || !strings.Contains(merged, ">>>>>>>") {
 		t.Error("Expected conflict markers in merged content")
+	}
+
+	if !strings.Contains(merged, "source: test/repo/workflow.md@v1.1.0") {
+		t.Errorf("Expected source field to be restored in conflict output, got:\n%s", merged)
 	}
 
 	// The merged content should contain both versions
@@ -371,6 +438,139 @@ source: old/repo/workflow.md@v1.0.0
 	if !strings.Contains(updated, "# Test Workflow") {
 		t.Error("Expected markdown content to be preserved")
 	}
+}
+
+// TestMergeWorkflowContent_SourceInMiddle tests that source field position in current
+// (in the middle of frontmatter, before other fields) does not cause merge conflicts.
+// This replicates the ci-doctor.md scenario where source was committed before features/evals.
+func TestMergeWorkflowContent_SourceInMiddle(t *testing.T) {
+	// Upstream base: no source field, has features and evals at end of frontmatter
+	base := `---
+on: push
+engine: claude
+features:
+  gh-aw-detection: true
+evals:
+  - id: ci_failure_investigated
+    question: Did the agent investigate failed CI workflows?
+---
+
+# CI Doctor
+
+Test content.`
+
+	// Local current: source field is in the MIDDLE (before features/evals), as it was
+	// committed in a file where source was placed before other trailing fields.
+	current := `---
+on: push
+engine: claude
+source: test/repo/ci-doctor.md@v1.0.0
+features:
+  gh-aw-detection: true
+evals:
+  - id: ci_failure_investigated
+    question: Did the agent investigate failed CI workflows?
+---
+
+# CI Doctor
+
+Test content.`
+
+	// Upstream new: no source field, same structure but updated description
+	new := `---
+on: push
+engine: claude
+features:
+  gh-aw-detection: true
+evals:
+  - id: ci_failure_investigated
+    question: Did the agent investigate failed CI workflows?
+---
+
+# CI Doctor
+
+Test content updated upstream.`
+
+	oldSourceSpec := "test/repo/ci-doctor.md@v1.0.0"
+	newRef := "v1.1.0"
+
+	merged, hasConflicts, err := MergeWorkflowContent(base, current, new, oldSourceSpec, newRef, "", false)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if hasConflicts {
+		t.Errorf("Expected no conflicts when source field is in a different position but content is otherwise unchanged, merged content:\n%s", merged)
+	}
+
+	// Source field should be updated to the new version
+	if !strings.Contains(merged, "source: test/repo/ci-doctor.md@v1.1.0") {
+		t.Errorf("Expected source field to be updated to v1.1.0, got:\n%s", merged)
+	}
+
+	// Upstream markdown change should be present
+	if !strings.Contains(merged, "Test content updated upstream.") {
+		t.Errorf("Expected upstream markdown change to be present, got:\n%s", merged)
+	}
+}
+
+// TestMergeWorkflowContent_SourceRefDoesNotConflictWithLocalFrontmatterExpansion
+// covers a managed source ref update next to a large local frontmatter extension.
+func TestMergeWorkflowContent_SourceRefDoesNotConflictWithLocalFrontmatterExpansion(t *testing.T) {
+	base := `---
+tools:
+  cache-memory: true
+  web-fetch:
+
+timeout-minutes: 10
+---
+
+# Workflow
+`
+
+	current := `---
+tools:
+  cache-memory: true
+  web-fetch:
+  web-search:
+  github:
+    mode: gh-proxy
+
+timeout-minutes: 20
+
+steps:
+  - name: Local pre-analysis
+    with:
+      source: local-input
+    env:
+      source: local-env
+    run: echo ready
+
+features:
+  gh-aw-detection: true
+evals:
+  - id: investigated
+    question: Was the failure investigated?
+source: test/repo/ci-doctor.md@v1.0.0
+---
+
+# Workflow
+`
+
+	newContent := base
+	oldSourceSpec := "test/repo/ci-doctor.md@v1.0.0"
+	newRef := "v1.1.0"
+
+	merged, hasConflicts, err := MergeWorkflowContent(base, current, newContent, oldSourceSpec, newRef, "", false)
+	require.NoError(t, err)
+	require.False(t, hasConflicts, "managed source ref changes must not conflict with local frontmatter additions:\n%s", merged)
+	assert.Contains(t, merged, "web-search:")
+	assert.Contains(t, merged, "timeout-minutes: 20")
+	assert.Contains(t, merged, "source: local-input")
+	assert.Contains(t, merged, "source: local-env")
+	assert.Contains(t, merged, "source: test/repo/ci-doctor.md@v1.1.0")
+	assert.NotContains(t, merged, "source: test/repo/ci-doctor.md@v1.0.0")
+	assert.NotContains(t, merged, "<<<<<<<")
 }
 
 // TestMergeWorkflowContent_Integration tests the merge with temporary files
@@ -592,9 +792,22 @@ func TestShowUpdateSummary(t *testing.T) {
 			// This test just verifies the function doesn't panic and can be called
 			// We don't check the exact output format since it uses console helpers
 			// and the exact formatting may change
-			showUpdateSummary(tt.successfulUpdates, tt.failedUpdates)
+			showUpdateSummary(tt.successfulUpdates, tt.failedUpdates, false)
 		})
 	}
+}
+
+func TestGroupUpdateFailuresCollapsesSAMLRateLimitErrors(t *testing.T) {
+	t.Parallel()
+	failures := []updateFailure{
+		{Name: "workflow-b", Error: "SAML enforcement: API rate limit exceeded"},
+		{Name: "workflow-a", Error: "forbidden by SAML enforcement; rate limit exceeded"},
+	}
+
+	groups := groupUpdateFailures(failures)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "workflow-a, workflow-b", groups[0].Workflows)
+	assert.Equal(t, "SAML-restricted authenticated access; anonymous GitHub API fallback is rate-limited", groups[0].Reason)
 }
 
 // TestHasLocalModifications tests the local modifications detection
@@ -719,6 +932,39 @@ source: test/repo/workflow.md@v1.0.0
 			expectModified: false,
 			description:    "Both files minimal but identical",
 		},
+		{
+			name: "source field in different position - not a modification",
+			sourceContent: `---
+on: push
+engine: claude
+features:
+  gh-aw-detection: true
+evals:
+  - id: check_one
+    question: Did the agent do the thing?
+---
+
+# Test Workflow
+
+Test content.`,
+			localContent: `---
+on: push
+engine: claude
+source: test/repo/workflow.md@v1.0.0
+features:
+  gh-aw-detection: true
+evals:
+  - id: check_one
+    question: Did the agent do the thing?
+---
+
+# Test Workflow
+
+Test content.`,
+			sourceSpec:     "test/repo/workflow.md@v1.0.0",
+			expectModified: false,
+			description:    "Source field in a different position (before features/evals instead of at end) should not be treated as local modification",
+		},
 	}
 
 	for _, tt := range tests {
@@ -760,7 +1006,7 @@ This is a test workflow.
 
 	// Test with refreshStopTime=false (should preserve existing stop time if lock exists)
 	t.Run("compileWorkflowWithRefresh false", func(t *testing.T) {
-		err := compileWorkflowWithRefresh(context.Background(), workflowFile, false, false, "", false)
+		err := compileWorkflowWithRefresh(context.Background(), workflowFile, false, false, "", false, false)
 		if err != nil {
 			t.Logf("Compilation failed (expected in test environment): %v", err)
 			// In a test environment without full setup, compilation may fail,
@@ -770,7 +1016,7 @@ This is a test workflow.
 
 	// Test with refreshStopTime=true (should regenerate stop time)
 	t.Run("compileWorkflowWithRefresh true", func(t *testing.T) {
-		err := compileWorkflowWithRefresh(context.Background(), workflowFile, false, false, "", true)
+		err := compileWorkflowWithRefresh(context.Background(), workflowFile, false, false, "", true, false)
 		if err != nil {
 			t.Logf("Compilation failed (expected in test environment): %v", err)
 			// In a test environment without full setup, compilation may fail,
@@ -1058,7 +1304,7 @@ func TestRunUpdateWorkflows_NoSourceWorkflows(t *testing.T) {
 
 	// Running update with no source workflows should succeed with an info message, not an error
 	err := RunUpdateWorkflows(context.Background(), UpdateWorkflowsOptions{})
-	assert.NoError(t, err, "Should not error when no workflows with source field exist")
+	require.NoError(t, err, "Should not error when no workflows with source field exist")
 }
 
 // TestRunUpdateWorkflows_SpecificWorkflowNotFound tests that RunUpdateWorkflows errors for unknown workflow name
@@ -1077,5 +1323,5 @@ func TestRunUpdateWorkflows_SpecificWorkflowNotFound(t *testing.T) {
 		WorkflowNames: []string{"nonexistent"},
 	})
 	require.Error(t, err, "Should error when specified workflow not found")
-	assert.Contains(t, err.Error(), "no workflows found matching the specified names")
+	require.ErrorContains(t, err, "no workflows found matching the specified names")
 }

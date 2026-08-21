@@ -9,9 +9,12 @@ Agentic workflows have two parts: the **YAML frontmatter**, which is compiled in
 
 See [Creating Agentic Workflows](/gh-aw/setup/creating-workflows/) for guidance on creating workflows with AI assistance.
 
+> [!TIP]
+> Working in `github/gh-aw` itself? Treat any edit under `.github/workflows/*.md` as a cue to run `make recompile` before committing. CI checks the generated `.lock.yml` files for drift, so this is the safest default even when you're only changing markdown instructions. For early feedback while iterating locally, you can run `gh aw compile --watch --schedule-seed github/gh-aw`, then finish with `make recompile`.
+
 ## Editing Without Recompilation
 
-You can edit the **markdown body** directly on GitHub.com or in any editor without recompiling. That includes task instructions, output templates, conditional guidance, context, and examples.
+You can edit the **markdown body** directly on GitHub.com or in any editor without recompiling. That includes instructions, output templates, conditional guidance, context, and examples.
 
 ### Example: Adding Instructions
 
@@ -42,19 +45,10 @@ Read issue #${{ github.event.issue.number }} and add appropriate labels.
 
 ## Labeling Criteria
 
-Apply these labels based on content:
-- `bug`: Issues describing incorrect behavior with reproduction steps
-- `enhancement`: Feature requests or improvements
-- `question`: Help requests or clarifications needed
-- `documentation`: Documentation updates or corrections
-
-For priority, consider:
-- `high-priority`: Security issues, critical bugs, blocking issues
-- `medium-priority`: Important features, non-critical bugs
-- `low-priority`: Nice-to-have improvements, minor enhancements
+Apply labels for bugs, enhancements, questions, and documentation updates. For priority, use `high-priority` for security or blocking issues, `medium-priority` for important but non-critical work, and `low-priority` for minor improvements.
 ```
 
-✅ This change takes effect immediately without recompilation.
+✅ This change takes effect immediately without recompilation. In `github/gh-aw`, still run `make recompile` before committing so CI sees fresh `.lock.yml` files alongside the markdown change.
 
 ## Editing With Recompilation Required
 
@@ -117,16 +111,33 @@ Run this command: ${{ github.event.comment.body }}
 
 Use `steps.sanitized.outputs.text` for sanitized user input instead.
 
+## Recompiling with a Stable Schedule Seed
+
+If a workflow uses fuzzy schedules such as `daily`, `weekly`, or `every 2h`, recompilation can change the generated cron output when the compiler derives its scatter seed from repository metadata that differs across clones.
+
+For shared repositories, pass a canonical repository slug with `--schedule-seed` so every contributor generates the same cron expressions:
+
+```bash
+gh aw compile --schedule-seed github/gh-aw
+```
+
+The repository `Makefile` uses this pattern in `make recompile`:
+
+```bash
+make recompile
+```
+
+Use a fixed seed whenever deterministic schedule output matters, especially for workflows committed to version control.
+
 ## Quick Rule of Thumb
 
-- Edit the markdown body for instruction changes.
-- Recompile after any frontmatter change.
-- Use sanitized step outputs instead of raw user input in expressions.
+Edit the markdown body for instruction changes, and recompile after any frontmatter change. Use `--schedule-seed` or a project `make recompile` target when fuzzy schedules must compile deterministically across contributors, and use sanitized step outputs instead of raw user input in expressions.
 
 ## Related Documentation
 
-- [Workflow Structure](/gh-aw/reference/workflow-structure/) - Overall file organization
-- [Frontmatter Reference](/gh-aw/reference/frontmatter/) - All configuration options
-- [Markdown Reference](/gh-aw/reference/markdown/) - Writing effective instructions
-- [Compilation Process](/gh-aw/reference/compilation-process/) - How compilation works
-- [Templating](/gh-aw/reference/templating/) - Expression syntax and substitution
+- [Workflow Structure](/gh-aw/reference/workflow-structure/) for file organization
+- [Frontmatter Reference](/gh-aw/reference/frontmatter/) for configuration options
+- [Markdown Reference](/gh-aw/reference/markdown/) for writing instructions
+- [Compilation Process](/gh-aw/reference/compilation-process/) for compilation details
+- [Templating](/gh-aw/reference/templating/) for expression syntax
+- [Workshop](https://github.com/githubnext/gh-aw-workshop) for hands-on exercises

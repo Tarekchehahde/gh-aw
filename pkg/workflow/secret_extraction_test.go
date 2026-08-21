@@ -372,33 +372,6 @@ func TestReplaceSecretsWithEnvVars_FallbackExpressionDeterminism(t *testing.T) {
 	}
 }
 
-// TestReplaceSecretsWithBashVars_FallbackExpressionDeterminism verifies that
-// ReplaceSecretsWithBashVars produces deterministic output for fallback expressions
-// with two secret references. Mirrors TestReplaceSecretsWithEnvVars_FallbackExpressionDeterminism.
-func TestReplaceSecretsWithBashVars_FallbackExpressionDeterminism(t *testing.T) {
-	value := "${{ secrets.DD_APPLICATION_KEY || secrets.DD_APP_KEY }}"
-
-	const runs = 50
-	var first string
-	for i := range runs {
-		got := ReplaceSecretsWithBashVars(value)
-		if i == 0 {
-			first = got
-			continue
-		}
-		if got != first {
-			t.Errorf("non-deterministic output: run 0 produced %q, run %d produced %q", first, i, got)
-		}
-	}
-
-	// "DD_APPLICATION_KEY" sorts before "DD_APP_KEY" ('L' < '_'), so it wins.
-	want := "${DD_APPLICATION_KEY}"
-	if first != want {
-		t.Errorf("ReplaceSecretsWithBashVars(%q) = %q, want %q", value, first, want)
-	}
-}
-
-// TestSharedExtractSecretsFromValueEdgeCases tests edge cases for the shared ExtractSecretsFromValue utility function
 func TestSharedExtractSecretsFromValueEdgeCases(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -583,6 +556,92 @@ func TestFormatInputNameAsEnvVar(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			actual := formatInputNameAsEnvVar(tt.inputName)
 			assert.Equal(t, tt.expected, actual, "Input name should be converted to the expected env var")
+		})
+	}
+}
+
+func TestContainsJobOutputExpr(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{
+			name:  "pure job output expression",
+			value: "${{ needs.fetch_token.outputs.token }}",
+			want:  true,
+		},
+		{
+			name:  "job output with extra whitespace",
+			value: "${{  needs.fetch_token.outputs.token  }}",
+			want:  true,
+		},
+		{
+			name:  "job output embedded in a larger string",
+			value: "Bearer ${{ needs.auth_job.outputs.access_token }}",
+			want:  true,
+		},
+		{
+			name:  "secret expression is not a job output",
+			value: "${{ secrets.GH_TOKEN }}",
+			want:  false,
+		},
+		{
+			name:  "static value is not a job output",
+			value: "https://api.example.com",
+			want:  false,
+		},
+		{
+			name:  "needs.result (no .outputs.) is not a job output",
+			value: "${{ needs.some_job.result }}",
+			want:  false,
+		},
+		{
+			name:  "github token expression is not a job output",
+			value: "${{ github.token }}",
+			want:  false,
+		},
+		{
+			name:  "job output with hyphenated job name",
+			value: "${{ needs.fetch-token.outputs.token }}",
+			want:  true,
+		},
+		{
+			name:  "needs not first token in expression (sub-expression with &&)",
+			value: "${{ github.ref && needs.auth.outputs.token }}",
+			want:  true,
+		},
+		{
+			name:  "needs not first token in expression (sub-expression with ||)",
+			value: "${{ env.FALLBACK || needs.mint.outputs.gh_token }}",
+			want:  true,
+		},
+		{
+			name:  "bracket notation with single quotes",
+			value: "${{ needs['auth'].outputs['token'] }}",
+			want:  true,
+		},
+		{
+			name:  "bracket notation with double quotes",
+			value: `${{ needs["auth"].outputs["token"] }}`,
+			want:  true,
+		},
+		{
+			name:  "full bracket notation (job and outputs key both in brackets)",
+			value: "${{ needs['auth']['outputs']['token'] }}",
+			want:  true,
+		},
+		{
+			name:  "bracket notation embedded after other token",
+			value: "${{ github.token || needs['mint'].outputs['gh_token'] }}",
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContainsJobOutputExpr(tt.value)
+			assert.Equal(t, tt.want, got, "ContainsJobOutputExpr(%q)", tt.value)
 		})
 	}
 }

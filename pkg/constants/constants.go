@@ -133,11 +133,28 @@ const (
 
 	// GeminiLLMGatewayPort is the port for the Gemini LLM gateway
 	GeminiLLMGatewayPort = 10003
-
-	// AntigravityLLMGatewayPort is the port for the Antigravity LLM gateway.
-	// Aliased to GeminiLLMGatewayPort because the two share the same port value.
-	AntigravityLLMGatewayPort = GeminiLLMGatewayPort
 )
+
+// AWFNoProxyHosts is the value for the NO_PROXY and no_proxy environment variables
+// in the AWF agent execution environment.  Both plain hostnames and explicit host:port
+// forms are listed because some HTTP client runtimes (e.g. Bun)
+// compare the full host:port string against the list rather than stripping the port
+// before matching, causing them to route through Squid even when the hostname alone
+// appears in the list.
+// AWFAPIProxyContainerIP is also listed so that requests from custom providers
+// (e.g. an awf-proxy provider) routed to the internal api-proxy sidecar
+// bypass Squid instead of being forwarded through it.
+const AWFNoProxyHosts = "localhost,127.0.0.1," +
+	"host.docker.internal," +
+	"host.docker.internal:10000," +
+	"host.docker.internal:10001," +
+	"host.docker.internal:10002," +
+	"host.docker.internal:10003," +
+	AWFAPIProxyContainerIP + "," +
+	AWFAPIProxyContainerIP + ":10000," +
+	AWFAPIProxyContainerIP + ":10001," +
+	AWFAPIProxyContainerIP + ":10002," +
+	AWFAPIProxyContainerIP + ":10003"
 
 // DefaultGitHubLockdown is the default value for the GitHub MCP server lockdown setting.
 // Lockdown mode restricts the GitHub MCP server to the triggering repository only.
@@ -150,8 +167,25 @@ const OTELSentryEndpointSecretName = "GH_AW_OTEL_SENTRY_ENDPOINT"
 
 // AWF (Agentic Workflow Firewall) constants
 
-// AWFDefaultCommand is the default AWF command prefix
-const AWFDefaultCommand = "sudo -E awf"
+// AWFDefaultCommand is the default AWF command prefix.
+// Strict security (no sudo) is the default since AWF v0.27.32.
+const AWFDefaultCommand = "awf"
+
+// AWFCloudHypervisorCommand runs AWF with the host privileges required to
+// create a Cloud Hypervisor VM while preserving the runner paths it consumes.
+// sudo supplies SUDO_UID and SUDO_GID for AWF to recover the invoking identity.
+const AWFCloudHypervisorCommand = "sudo --preserve-env awf"
+
+// DefaultCloudHypervisorVCPUs and DefaultCloudHypervisorMemoryMiB are the
+// minimum viable guest sizing defaults for the Cloud Hypervisor agent runtime.
+const (
+	DefaultCloudHypervisorVCPUs     = 2
+	DefaultCloudHypervisorMemoryMiB = 4096
+)
+
+// AWFLegacySecurityCommand is the AWF command prefix for legacy security mode.
+// Used by the docker-sudo-iptables runtime profile.
+const AWFLegacySecurityCommand = "sudo -E awf"
 
 // AWFProxyLogsDir is the default directory for AWF proxy logs
 const AWFProxyLogsDir = "/tmp/gh-aw/sandbox/firewall/logs"
@@ -265,9 +299,12 @@ const GhAwRootDirShell = "${RUNNER_TEMP}/gh-aw"
 // Uses the shell env var form since mounts are resolved in a shell context.
 const DefaultGhAwMount = GhAwRootDirShell + ":" + GhAwRootDirShell + ":ro"
 
+// GhCLIPath is the path to the gh CLI binary in the GitHub Actions runner.
+const GhCLIPath = "/usr/bin/gh"
+
 // DefaultGhBinaryMount is the mount path for the gh CLI binary in containerized MCP servers
 // The gh CLI is required for agentic-workflows MCP server to run gh commands
-const DefaultGhBinaryMount = "/usr/bin/gh:/usr/bin/gh:ro"
+const DefaultGhBinaryMount = GhCLIPath + ":" + GhCLIPath + ":ro"
 
 // DefaultTmpGhAwMount is the mount path for temporary gh-aw files in containerized MCP servers
 // Used for logs, cache, and other runtime data that needs read-write access
@@ -405,8 +442,13 @@ const AgentsDir = ".github/agents/"
 const WorkflowsLockYmlGlob = WorkflowsDirSlash + "*.lock.yml"
 
 // WorkflowsLockYmlGitAttributesEntry is the .gitattributes entry that marks lock YAML
-// files as generated and sets the merge strategy.
-const WorkflowsLockYmlGitAttributesEntry = WorkflowsLockYmlGlob + " linguist-generated=true merge=ours"
+// files as generated.
+const WorkflowsLockYmlGitAttributesEntry = WorkflowsLockYmlGlob + " linguist-generated=true"
+
+// WorkflowsLockYmlGitAttributesEntryLegacy is the previous .gitattributes entry format that
+// included an ineffective "merge=ours" attribute. It is only used to detect and clean up
+// entries that gh-aw itself previously wrote, so we do not overwrite repository-owned policy.
+const WorkflowsLockYmlGitAttributesEntryLegacy = WorkflowsLockYmlGlob + " linguist-generated=true merge=ours"
 
 // Temporary runtime directory constants (/tmp/gh-aw tree)
 //
@@ -440,6 +482,9 @@ const AgentStdioLogPath = TmpGhAwDir + "/agent-stdio.log"
 // AwPromptsFile is the runtime prompt file path populated by the setup action.
 // Engine harnesses read this file to pass the compiled prompt to the AI engine.
 const AwPromptsFile = TmpGhAwDir + "/aw-prompts/prompt.txt"
+
+// AwPromptsFileExpr is the host-side prompt path in GitHub Actions expression form.
+const AwPromptsFileExpr = GhAwRootDir + "/aw-prompts/prompt.txt"
 
 // AwPromptsFileShell is the runtime prompt file path in shell env-var form for host-side paths.
 const AwPromptsFileShell = GhAwRootDirShell + "/aw-prompts/prompt.txt"
@@ -485,9 +530,6 @@ const TmpAwPatchGlob = TmpGhAwDir + "/aw-*.patch"
 // TmpGeminiClientErrorGlob is the glob for Gemini client error JSON diagnostic files.
 const TmpGeminiClientErrorGlob = TmpGhAwDir + "/gemini-client-error-*.json"
 
-// TmpAntigravityClientErrorGlob is the glob for Antigravity client error JSON diagnostic files.
-const TmpAntigravityClientErrorGlob = TmpGhAwDir + "/antigravity-client-error-*.json"
-
 // TmpPiAgentDir is the Pi engine agent working directory.
 const TmpPiAgentDir = TmpGhAwDir + "/pi-agent-dir"
 
@@ -498,9 +540,17 @@ const ThreatDetectionLogPath = TmpGhAwDir + "/threat-detection/detection.log"
 const ThreatDetectionDir = TmpGhAwDir + "/threat-detection"
 
 // ThreatDetectionResultPath is the structured verdict output file written by the
-// external threat-detect binary (features: gh-aw-detection: true). The binary writes
+// external threat-detect binary (enabled by default; set features.gh-aw-detection to false
+// to use the inline path). The binary writes
 // a four-field JSON verdict to this path via --output; threat-detect conclude reads it.
 const ThreatDetectionResultPath = TmpGhAwDir + "/threat-detection/detection_result.json"
+
+// ThreatDetectionStepSummaryPath is the path used as the step-summary target inside the
+// AWF sandbox for the external threat-detect binary. The sandbox cannot write to the
+// runner's real GITHUB_STEP_SUMMARY path (the _runner_file_commands directory is not
+// mounted), so threat-detect is invoked with --step-summary pointing here instead.
+// A post-execution host step then appends this file to the real $GITHUB_STEP_SUMMARY.
+const ThreatDetectionStepSummaryPath = TmpGhAwDir + "/step-summary.md"
 
 // TmpProxyLogsDir is the DIFC proxy logs directory (with trailing slash).
 const TmpProxyLogsDir = TmpGhAwDir + "/proxy-logs/"

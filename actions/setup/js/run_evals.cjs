@@ -33,11 +33,13 @@
 const fs = require("fs");
 const path = require("path");
 
-const { ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_VALIDATION, ERR_SYSTEM } = require("./error_codes.cjs");
+const { getErrorMessage } = require("./error_helpers.cjs");
+const { EVALS_OUTPUT_PATH } = require("./evals_constants.cjs");
+const { resolveModelWithFallback } = require("./model_fallback.cjs");
 
 const EVALS_DIR = "/tmp/gh-aw/evals";
 const EVALS_LOG_PATH = "/tmp/gh-aw/evals/evals.log";
-const EVALS_OUTPUT_PATH = "/tmp/gh-aw/evals.jsonl";
 const AGENT_OUTPUT_FILENAME = "agent_output.json";
 
 // ---------------------------------------------------------------------------
@@ -60,7 +62,8 @@ async function setupMain() {
   try {
     questions = JSON.parse(questionsRaw);
   } catch (e) {
-    core.setFailed(`${ERR_VALIDATION}: GH_AW_EVALS_QUESTIONS is not valid JSON: ` + e.message);
+    const eAny = /** @type {any} */ e;
+    core.setFailed(`${ERR_VALIDATION}: GH_AW_EVALS_QUESTIONS is not valid JSON: ` + (eAny?.message ?? String(e)));
     return;
   }
 
@@ -69,14 +72,27 @@ async function setupMain() {
     return;
   }
 
-  fs.mkdirSync(EVALS_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(EVALS_DIR, { recursive: true });
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to create directory ${EVALS_DIR}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   // Load agent output for evaluation context
   const agentOutputPath = path.join(EVALS_DIR, AGENT_OUTPUT_FILENAME);
   let agentOutputContent = "";
   if (fs.existsSync(agentOutputPath)) {
-    const stats = fs.statSync(agentOutputPath);
-    agentOutputContent = fs.readFileSync(agentOutputPath, "utf-8");
+    let stats;
+    try {
+      stats = fs.statSync(agentOutputPath);
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to inspect file ${agentOutputPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
+    try {
+      agentOutputContent = fs.readFileSync(agentOutputPath, "utf-8");
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to read file ${agentOutputPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     core.info(`Agent output loaded: ${agentOutputPath} (${stats.size} bytes)`);
   } else {
     core.warning(`Agent output not found at ${agentOutputPath}. ` + "Ensure the agent artifact includes agent_output.json. " + "Evaluation will proceed without agent context.");
@@ -84,8 +100,12 @@ async function setupMain() {
 
   const prompt = buildEvalPrompt(questions, agentOutputContent);
 
-  fs.mkdirSync("/tmp/gh-aw/aw-prompts", { recursive: true });
-  fs.writeFileSync("/tmp/gh-aw/aw-prompts/prompt.txt", prompt);
+  try {
+    fs.mkdirSync("/tmp/gh-aw/aw-prompts", { recursive: true });
+    fs.writeFileSync("/tmp/gh-aw/aw-prompts/prompt.txt", prompt);
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to prepare eval prompt file: ${getErrorMessage(err)}`, { cause: err });
+  }
   core.exportVariable("GH_AW_PROMPT", "/tmp/gh-aw/aw-prompts/prompt.txt");
 
   core.info(`BinEval setup complete: wrote prompt with ${questions.length} question(s)`);
@@ -105,7 +125,8 @@ async function setupMain() {
  */
 async function parseMain() {
   const questionsRaw = process.env.GH_AW_EVALS_QUESTIONS;
-  const model = process.env.GH_AW_EVALS_MODEL || "";
+  const model = resolveModelWithFallback(process.env, "GH_AW_EVALS_MODEL") || "";
+  const runID = process.env.GITHUB_RUN_ID || "unknown";
 
   /** @type {Array<{id: string, question: string}>} */
   let questions = [];
@@ -119,15 +140,32 @@ async function parseMain() {
 
   if (!fs.existsSync(EVALS_LOG_PATH)) {
     core.warning(`Evals log not found at ${EVALS_LOG_PATH}; no results written`);
-    fs.writeFileSync(EVALS_OUTPUT_PATH, "");
+    try {
+      fs.writeFileSync(EVALS_OUTPUT_PATH, "");
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to write file ${EVALS_OUTPUT_PATH}: ${getErrorMessage(err)}`, { cause: err });
+    }
     return;
   }
 
-  const logContent = fs.readFileSync(EVALS_LOG_PATH, "utf-8");
+  let logContent;
+  try {
+    logContent = fs.readFileSync(EVALS_LOG_PATH, "utf-8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${EVALS_LOG_PATH}: ${getErrorMessage(err)}`, { cause: err });
+  }
   core.info(`Parsing evals log: ${EVALS_LOG_PATH} (${logContent.length} bytes)`);
 
+  // Build a search corpus that includes both raw log lines AND any assistant text
+  // extracted from JSONL log entries (e.g. Pi engine turn_end events).  The engine
+  // may emit answers inside JSON-encoded strings where newlines are represented as
+  // the escape sequence "\n", so the line-based regex patterns below would miss them
+  // unless the JSON content is decoded first.
+  const extractedText = extractAssistantTextFromJsonlLog(logContent);
+  const searchContent = extractedText ? logContent + "\n" + extractedText : logContent;
+
   // Collect all positional Q1/Q2/... answers from the log for fallback lookup
-  const positionalAnswers = extractAllPositionalAnswers(logContent);
+  const positionalAnswers = extractAllPositionalAnswers(searchContent);
 
   const timestamp = new Date().toISOString();
   const results = [];
@@ -136,17 +174,17 @@ async function parseMain() {
     const q = questions[i];
 
     // Try ID-specific match first (e.g. "builds: YES"), then positional (Q1: YES)
-    let answer = extractAnswerByID(logContent, q.id);
+    let answer = extractAnswerByID(searchContent, q.id);
     if (answer === "UNKNOWN" && i < positionalAnswers.length && positionalAnswers[i]) {
       answer = positionalAnswers[i];
     }
-
     const record = {
       id: q.id,
       question: q.question,
       answer,
       model,
       timestamp,
+      runid: runID,
     };
     results.push(record);
     core.info(`Q[${q.id}]: ${answer}`);
@@ -154,25 +192,14 @@ async function parseMain() {
 
   // Write JSONL — one JSON object per line
   const jsonlLines = results.map(r => JSON.stringify(r));
-  fs.writeFileSync(EVALS_OUTPUT_PATH, jsonlLines.join("\n") + (jsonlLines.length > 0 ? "\n" : ""));
+  try {
+    fs.writeFileSync(EVALS_OUTPUT_PATH, jsonlLines.join("\n") + (jsonlLines.length > 0 ? "\n" : ""));
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to write file ${EVALS_OUTPUT_PATH}: ${getErrorMessage(err)}`, { cause: err });
+  }
   core.info(`BinEval results written to ${EVALS_OUTPUT_PATH} (${results.length} record(s))`);
-
-  const yesCount = results.filter(r => r.answer === "YES").length;
-  const noCount = results.filter(r => r.answer === "NO").length;
-  const unknownCount = results.filter(r => r.answer === "UNKNOWN").length;
-
-  await core.summary
-    .addHeading("BinEval Results", 2)
-    .addTable([
-      [
-        { data: "ID", header: true },
-        { data: "Question", header: true },
-        { data: "Answer", header: true },
-      ],
-      ...results.map(r => [r.id, r.question, r.answer]),
-      ["", `YES: ${yesCount} | NO: ${noCount} | UNKNOWN: ${unknownCount}`, ""],
-    ])
-    .write();
+  // Step summary rendering is handled by the dedicated render_evals_summary.cjs step
+  // that runs after secret redaction, so the published summary is always redacted.
 }
 
 // ---------------------------------------------------------------------------
@@ -220,10 +247,13 @@ ${agentSection}
 
 <instructions>
 Answer each question on a separate line using EXACTLY this format:
-Q1: YES
-Q2: NO
+<question-id>: YES
+<question-id>: NO
+<question-id>: UNKNOWN
 
-Use only YES or NO. Do not provide explanations or reasoning.
+Use only YES, NO, or UNKNOWN. Do not provide explanations or reasoning.
+Use the exact question IDs provided in <questions>.
+If the agent output does not provide enough evidence to safely answer YES or NO, answer UNKNOWN.
 Evaluate each question solely based on the agent output shown above.
 </instructions>`;
 }
@@ -265,4 +295,51 @@ function extractAnswerByID(logContent, id) {
   return "UNKNOWN";
 }
 
-module.exports = { main, setupMain, parseMain };
+/**
+ * Extracts all assistant text content from a JSONL engine log.
+ * Engines such as Pi emit one JSON object per line (JSONL). The assistant's
+ * final answer lives in a `turn_end` event (v3 schema) or `assistant` events
+ * (v1 legacy schema) where newlines are JSON-encoded as the two-character
+ * sequence `\n`.  Parsing those JSON objects restores the actual newlines so
+ * the positional regex patterns can match correctly.
+ *
+ * Returns a single string with all extracted text joined by newlines, or an
+ * empty string when no JSONL content is found.
+ * @param {string} logContent
+ * @returns {string}
+ */
+function extractAssistantTextFromJsonlLog(logContent) {
+  const texts = [];
+  for (const line of logContent.split("\n")) {
+    const trimmed = line.trim();
+    // Find the first '{' which starts the JSON object.  Some runner environments
+    // prefix log lines with a timestamp (e.g. "2026-07-16T07:21:45Z {...}");
+    // stripping that prefix lets us parse the JSON regardless.
+    const jsonStart = trimmed.indexOf("{");
+    if (jsonStart === -1) continue;
+    let obj;
+    try {
+      obj = JSON.parse(trimmed.slice(jsonStart));
+    } catch {
+      continue;
+    }
+    // v3 schema: turn_end carries the complete assistant message.
+    // Claude engine's native stream-json format also emits a top-level
+    // "assistant" event with the same nested message.content array shape
+    // (e.g. `{"type":"assistant","message":{"content":[{"type":"text","text":...}]}}`),
+    // so both are handled identically here.
+    if ((obj.type === "turn_end" || obj.type === "assistant") && obj.message && Array.isArray(obj.message.content)) {
+      for (const part of obj.message.content) {
+        if (part && typeof part.text === "string") {
+          texts.push(part.text);
+        }
+      }
+      // v1 legacy schema: assistant event carries raw text content directly
+    } else if (obj.type === "assistant" && typeof obj.content === "string" && obj.content) {
+      texts.push(obj.content);
+    }
+  }
+  return texts.join("\n");
+}
+
+module.exports = { main, setupMain, parseMain, extractAssistantTextFromJsonlLog };

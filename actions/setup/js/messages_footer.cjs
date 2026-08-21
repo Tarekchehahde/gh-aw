@@ -14,6 +14,7 @@ const { getBlockedDomains, generateBlockedDomainsSection } = require("./firewall
 const { getDifcFilteredEvents, generateDifcFilteredSection } = require("./gateway_difc_filtered.cjs");
 const { formatCompactInteger } = require("./compact_numbers.cjs");
 const { formatAIC } = require("./model_costs.cjs");
+const { reduceModelNameToIdentifier } = require("./model_aliases.cjs");
 const { getDetectionWarningMessage } = require("./messages_run_status.cjs");
 
 /**
@@ -76,15 +77,16 @@ function getAmbientContextFromEnv() {
 /**
  * @param {string} label
  * @param {number|undefined} value
+ * @param {string|undefined} [modelAlias]
  * @returns {{ value: number|undefined, formatted: string|undefined, suffix: string }}
  */
-function buildAICEntry(label, value) {
+function buildAICEntry(label, value, modelAlias) {
   const formatted = typeof value === "number" ? formatAIC(value) : undefined;
-  const labelPrefix = label ? `${label} ` : "";
+  const prefix = [label, modelAlias].filter(Boolean).join(" ");
   return {
     value,
     formatted,
-    suffix: formatted ? ` · ${labelPrefix}${formatted} AIC` : "",
+    suffix: formatted ? ` · ${prefix ? `${prefix}${modelAlias ? " · " : " "}` : ""}${formatted} AIC` : "",
   };
 }
 
@@ -95,33 +97,49 @@ function buildAICEntry(label, value) {
  *   aiCredits: number|undefined,
  *   aiCreditsFormatted: string|undefined,
  *   aiCreditsSuffix: string,
+ *   aiModel: string|undefined,
+ *   aiModelShort: string|undefined,
+ *   compressedModelName: string|undefined,
  *   agentAiCredits: number|undefined,
  *   agentAiCreditsFormatted: string|undefined,
  *   agentAiCreditsSuffix: string,
+ *   evalsAiCredits: number|undefined,
+ *   evalsAiCreditsFormatted: string|undefined,
+ *   evalsAiCreditsSuffix: string,
  *   threatDetectionAiCredits: number|undefined,
  *   threatDetectionAiCreditsFormatted: string|undefined,
  *   threatDetectionAiCreditsSuffix: string
  * }}
  */
 function getAICFromEnv() {
+  const aiModel = process.env.GH_AW_PRIMARY_MODEL || process.env.GH_AW_ENGINE_MODEL || undefined;
+  const compressedModelName = reduceModelNameToIdentifier(aiModel);
   const totalAIC = parsePositiveAIC(process.env.GH_AW_AIC);
   const explicitAgentAIC = parsePositiveAIC(process.env.GH_AW_AGENT_AIC);
+  const evalsAIC = parsePositiveAIC(process.env.GH_AW_EVALS_AIC);
   const threatDetectionAIC = parsePositiveAIC(process.env.GH_AW_THREAT_DETECTION_AIC);
   const agentAIC = typeof explicitAgentAIC === "number" ? explicitAgentAIC : totalAIC;
-  const agentEntry = buildAICEntry("", agentAIC);
+  const agentEntry = buildAICEntry("", agentAIC, compressedModelName);
+  const evalsEntry = buildAICEntry("◇", evalsAIC);
   const threatDetectionEntry = buildAICEntry("⌖", threatDetectionAIC);
-  const useBreakdown = threatDetectionEntry.suffix.length > 0;
-  const aiCredits = useBreakdown ? (agentAIC || 0) + (threatDetectionAIC || 0) : typeof totalAIC === "number" ? totalAIC : agentAIC;
+  const useBreakdown = threatDetectionEntry.suffix.length > 0 || evalsEntry.suffix.length > 0;
+  const aiCredits = useBreakdown ? (agentAIC || 0) + (threatDetectionAIC || 0) + (evalsAIC || 0) : typeof totalAIC === "number" ? totalAIC : agentAIC;
   const aiCreditsFormatted = typeof aiCredits === "number" ? formatAIC(aiCredits) : undefined;
-  const aiCreditsSuffix = useBreakdown ? `${agentEntry.suffix}${threatDetectionEntry.suffix}` : aiCreditsFormatted ? ` · ${aiCreditsFormatted} AIC` : "";
+  const aiCreditsSuffix = useBreakdown ? `${agentEntry.suffix}${threatDetectionEntry.suffix}${evalsEntry.suffix}` : buildAICEntry("", aiCredits, compressedModelName).suffix;
 
   return {
     aiCredits,
     aiCreditsFormatted,
     aiCreditsSuffix,
+    aiModel,
+    aiModelShort: compressedModelName,
+    compressedModelName,
     agentAiCredits: agentEntry.value,
     agentAiCreditsFormatted: agentEntry.formatted,
     agentAiCreditsSuffix: agentEntry.suffix,
+    evalsAiCredits: evalsEntry.value,
+    evalsAiCreditsFormatted: evalsEntry.formatted,
+    evalsAiCreditsSuffix: evalsEntry.suffix,
     threatDetectionAiCredits: threatDetectionEntry.value,
     threatDetectionAiCreditsFormatted: threatDetectionEntry.formatted,
     threatDetectionAiCreditsSuffix: threatDetectionEntry.suffix,
@@ -158,9 +176,15 @@ function getFooterMessage(ctx) {
     aiCredits: envAIC,
     aiCreditsFormatted: envAICFormatted,
     aiCreditsSuffix: envAICSuffix,
+    aiModel,
+    aiModelShort,
+    compressedModelName,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -168,6 +192,8 @@ function getFooterMessage(ctx) {
   const { ambientContext: envAmbientContext, ambientContextFormatted: envAmbientContextFormatted, ambientContextSuffix: envAmbientContextSuffix } = getAmbientContextFromEnv();
   const aiCredits = ctx.aiCredits ?? envAIC;
   const ambientContext = envAmbientContext;
+  const detectionConclusion = process.env.GH_AW_DETECTION_CONCLUSION || undefined;
+  const detectionReason = process.env.GH_AW_DETECTION_REASON || undefined;
 
   // Pre-compute history_link as a ready-to-use markdown suffix (empty string when unavailable)
   const historyLink = ctx.historyUrl ? ` · [◷](${ctx.historyUrl})` : "";
@@ -181,7 +207,7 @@ function getFooterMessage(ctx) {
   let aiCreditsSuffix = envAICSuffix;
   if (hasExplicitContextAIC) {
     aiCreditsFormatted = explicitContextAIC ? formatAIC(explicitContextAIC) : undefined;
-    aiCreditsSuffix = aiCreditsFormatted ? ` · ${aiCreditsFormatted} AIC` : "";
+    aiCreditsSuffix = buildAICEntry("", explicitContextAIC, compressedModelName).suffix;
   }
   const aiCreditsSuffixForTemplate = `${aiCreditsSuffix}${envAmbientContextSuffix}`;
 
@@ -193,12 +219,20 @@ function getFooterMessage(ctx) {
     agenticWorkflowUrl,
     aiCreditsFormatted,
     aiCreditsSuffix: aiCreditsSuffixForTemplate,
+    aiModel,
+    aiModelShort,
+    aiCreditsUnit: "AIC",
+    detectionConclusion,
+    detectionReason,
     ambientContext,
     ambientContextFormatted: envAmbientContextFormatted,
     ambientContextSuffix: envAmbientContextSuffix,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -377,9 +411,15 @@ function getFooterAgentFailureIssueMessage(ctx) {
     aiCredits: envAIC,
     aiCreditsFormatted: envAICFormatted,
     aiCreditsSuffix: envAICSuffix,
+    aiModel,
+    aiModelShort,
+    compressedModelName,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -389,8 +429,10 @@ function getFooterAgentFailureIssueMessage(ctx) {
   const explicitContextAIC = parseExplicitContextAIC(ctx.aiCredits);
   const aiCredits = hasExplicitContextAIC ? explicitContextAIC : envAIC;
   const aiCreditsFormatted = hasExplicitContextAIC ? (explicitContextAIC ? formatAIC(explicitContextAIC) : undefined) : envAICFormatted;
-  const aiCreditsSuffix = hasExplicitContextAIC ? (aiCreditsFormatted ? ` · ${aiCreditsFormatted} AIC` : "") : envAICSuffix;
+  const aiCreditsSuffix = hasExplicitContextAIC ? buildAICEntry("", explicitContextAIC, compressedModelName).suffix : envAICSuffix;
   const aiCreditsSuffixForTemplate = `${aiCreditsSuffix}${ambientContextSuffix}`;
+  const detectionConclusion = process.env.GH_AW_DETECTION_CONCLUSION || undefined;
+  const detectionReason = process.env.GH_AW_DETECTION_REASON || undefined;
 
   // Create context with both camelCase and snake_case keys, including computed history_link and agentic_workflow_url
   const templateContext = toSnakeCase({
@@ -400,9 +442,17 @@ function getFooterAgentFailureIssueMessage(ctx) {
     aiCredits,
     aiCreditsFormatted,
     aiCreditsSuffix: aiCreditsSuffixForTemplate,
+    aiModel,
+    aiModelShort,
+    aiCreditsUnit: "AIC",
+    detectionConclusion,
+    detectionReason,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -452,9 +502,15 @@ function getFooterAgentFailureCommentMessage(ctx) {
     aiCredits: envAIC,
     aiCreditsFormatted: envAICFormatted,
     aiCreditsSuffix: envAICSuffix,
+    aiModel,
+    aiModelShort,
+    compressedModelName,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -464,8 +520,10 @@ function getFooterAgentFailureCommentMessage(ctx) {
   const explicitContextAIC = parseExplicitContextAIC(ctx.aiCredits);
   const aiCredits = hasExplicitContextAIC ? explicitContextAIC : envAIC;
   const aiCreditsFormatted = hasExplicitContextAIC ? (explicitContextAIC ? formatAIC(explicitContextAIC) : undefined) : envAICFormatted;
-  const aiCreditsSuffix = hasExplicitContextAIC ? (aiCreditsFormatted ? ` · ${aiCreditsFormatted} AIC` : "") : envAICSuffix;
+  const aiCreditsSuffix = hasExplicitContextAIC ? buildAICEntry("", explicitContextAIC, compressedModelName).suffix : envAICSuffix;
   const aiCreditsSuffixForTemplate = `${aiCreditsSuffix}${ambientContextSuffix}`;
+  const detectionConclusion = process.env.GH_AW_DETECTION_CONCLUSION || undefined;
+  const detectionReason = process.env.GH_AW_DETECTION_REASON || undefined;
 
   // Create context with both camelCase and snake_case keys, including computed history_link and agentic_workflow_url
   const templateContext = toSnakeCase({
@@ -475,9 +533,17 @@ function getFooterAgentFailureCommentMessage(ctx) {
     aiCredits,
     aiCreditsFormatted,
     aiCreditsSuffix: aiCreditsSuffixForTemplate,
+    aiModel,
+    aiModelShort,
+    aiCreditsUnit: "AIC",
+    detectionConclusion,
+    detectionReason,
     agentAiCredits,
     agentAiCreditsFormatted,
     agentAiCreditsSuffix,
+    evalsAiCredits,
+    evalsAiCreditsFormatted,
+    evalsAiCreditsSuffix,
     threatDetectionAiCredits,
     threatDetectionAiCreditsFormatted,
     threatDetectionAiCreditsSuffix,
@@ -670,7 +736,10 @@ function generateFooterWithMessages(workflowName, runUrl, workflowSource, workfl
   }
 
   // Attribution footer line comes after any guard notices
-  let footer = guardNotices + "\n\n" + getFooterMessage(ctx);
+  // Attribution footer line comes after any guard notices. Only add the separating
+  // blank line when guard notices are present, otherwise the footer would start with
+  // stray blank lines that render as a large gap after the body.
+  let footer = guardNotices ? guardNotices.trim() + "\n\n" + getFooterMessage(ctx) : getFooterMessage(ctx);
 
   // Add installation instructions if source is available
   const installMessage = getFooterInstallMessage(ctx);

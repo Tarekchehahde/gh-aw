@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGenerateGVisorInstallStep verifies that the gVisor install step contains
-// the expected content from the reference implementation.
+// TestGenerateGVisorInstallStep verifies that the gVisor install step references
+// the correct shell script with the pinned version and required runner-guard suppression.
 func TestGenerateGVisorInstallStep(t *testing.T) {
 	step := generateGVisorInstallStep()
 	require.NotEmpty(t, step, "gVisor install step must not be empty")
@@ -22,43 +22,50 @@ func TestGenerateGVisorInstallStep(t *testing.T) {
 	content := strings.Join(step, "\n")
 
 	assert.Contains(t, content, "Install gVisor (runsc)", "step should have a recognizable name")
-
-	// Architecture detection: must use uname -m, not hardcoded amd64/arm64.
-	assert.Contains(t, content, "uname -m", "must detect architecture via uname -m")
-	assert.NotContains(t, content, "amd64", "must NOT remap architecture to amd64")
-	assert.NotContains(t, content, "arm64", "must NOT remap architecture to arm64")
-
-	// Both binaries must be downloaded.
-	assert.Contains(t, content, "runsc", "must download runsc binary")
-	assert.Contains(t, content, "containerd-shim-runsc-v1", "must download containerd-shim-runsc-v1")
-
-	// Must use gVisor's official download URL.
-	assert.Contains(t, content, "storage.googleapis.com/gvisor", "must use official gVisor download URL")
-
-	// Must use a pinned release (not "latest") for reproducible supply-chain-safe installs.
+	assert.Contains(t, content, "runner-guard:ignore RGS-012",
+		"step should include runner-guard suppression for verified gVisor download false-positive")
+	assert.Contains(t, content, "sudo_gvisor_install.sh", "step must reference the sudo gVisor install script")
+	assert.Contains(t, content, "${RUNNER_TEMP}/gh-aw/actions/", "must use RUNNER_TEMP script path")
 	assert.Contains(t, content, constants.DefaultGVisorVersion,
-		"must use pinned gVisor release, not a mutable pointer like 'latest'")
-	assert.NotContains(t, content, "/latest/", "must NOT use the mutable 'latest' release path")
+		"must pass pinned gVisor release version to the script")
+	assert.NotContains(t, content, "latest", "must NOT reference the mutable 'latest' release")
+}
 
-	// Both binaries must be integrity-verified via SHA-512 before sudo install.
-	assert.Contains(t, content, "runsc.sha512", "must download SHA-512 for runsc")
-	assert.Contains(t, content, "containerd-shim-runsc-v1.sha512", "must download SHA-512 for containerd-shim-runsc-v1")
-	assert.Contains(t, content, "sha512sum -c", "must verify SHA-512 checksums before installing")
+// TestGVisorInstallScriptContent verifies that the sudo_gvisor_install.sh
+// shell script exists and contains the expected key operations.
+func TestGVisorInstallScriptContent(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	script := filepath.Join(wd, "..", "..", "actions", "setup", "sh", "sudo_gvisor_install.sh")
+	content, err := os.ReadFile(script)
+	require.NoError(t, err, "sudo_gvisor_install.sh must exist")
+	s := string(content)
 
-	// Must install binaries to system path (requires sudo).
-	assert.Contains(t, content, "sudo install", "must install binaries with sudo")
-	assert.Contains(t, content, "/usr/local/bin/runsc", "must install runsc to /usr/local/bin")
+	// Must detect architecture dynamically, not hardcode amd64/arm64.
+	assert.Contains(t, s, "uname -m", "must detect architecture via uname -m")
+	assert.NotContains(t, s, "amd64", "must NOT remap architecture to amd64")
+	assert.NotContains(t, s, "arm64", "must NOT remap architecture to arm64")
 
-	// Must register the runtime with Docker.
-	assert.Contains(t, content, "sudo runsc install", "must register runsc with Docker via runsc install")
+	// Both binaries must be downloaded and integrity-verified.
+	assert.Contains(t, s, "runsc", "must download runsc binary")
+	assert.Contains(t, s, "containerd-shim-runsc-v1", "must download containerd-shim-runsc-v1")
+	assert.Contains(t, s, "storage.googleapis.com/gvisor", "must use official gVisor download URL")
+	assert.Contains(t, s, "runsc.sha512", "must download SHA-512 for runsc")
+	assert.Contains(t, s, "containerd-shim-runsc-v1.sha512", "must download SHA-512 for containerd-shim-runsc-v1")
+	assert.Contains(t, s, "sha512sum -c", "must verify SHA-512 checksums before installing")
 
-	// Must use systemctl restart (NOT reload) to restart Docker.
-	assert.Contains(t, content, "systemctl restart docker", "must restart Docker with systemctl restart")
-	assert.NotContains(t, content, "systemctl reload docker", "must NOT use systemctl reload (breaks host-gateway DNS)")
+	// Must install with sudo (hence the sudo_ prefix).
+	assert.Contains(t, s, "sudo install", "must install binaries with sudo")
+	assert.Contains(t, s, "/usr/local/bin/runsc", "must install runsc to /usr/local/bin")
+	assert.Contains(t, s, "sudo runsc install", "must register runsc with Docker via runsc install")
 
-	// Must verify the runtime works (pre-pull to avoid network dependency during test run).
-	assert.Contains(t, content, "docker pull hello-world", "must pre-pull hello-world image")
-	assert.Contains(t, content, "docker run --rm --runtime=runsc", "must verify gVisor runtime with a test container")
+	// Must restart Docker (not reload).
+	assert.Contains(t, s, "systemctl restart docker", "must restart Docker with systemctl restart")
+	assert.NotContains(t, s, "systemctl reload docker", "must NOT use systemctl reload (breaks host-gateway DNS)")
+
+	// Must verify the runtime works end-to-end.
+	assert.Contains(t, s, "docker pull hello-world", "must pre-pull hello-world image")
+	assert.Contains(t, s, "docker run --rm --runtime=runsc", "must verify gVisor runtime with a test container")
 }
 
 // TestGVisorInstallStepOrderInBuildNpmEngineInstallStepsWithAWF verifies that the
@@ -107,8 +114,8 @@ func TestGVisorAWFConfigJSON(t *testing.T) {
 		WorkflowData: &WorkflowData{
 			EngineConfig: &EngineConfig{ID: "copilot"},
 			NetworkPermissions: &NetworkPermissions{
-				// Pin a version that supports containerRuntime (AWFContainerRuntimeMinVersion = v0.28.0).
-				Firewall: &FirewallConfig{Enabled: true, Version: "v0.28.0"},
+				// Pin to a version that supports containerRuntime (AWFContainerRuntimeMinVersion = v0.27.30).
+				Firewall: &FirewallConfig{Enabled: true, Version: "v0.27.30"},
 			},
 			SandboxConfig: &SandboxConfig{
 				Agent: &AgentSandboxConfig{
@@ -136,8 +143,8 @@ func TestGVisorAWFConfigJSONVersionGated(t *testing.T) {
 		WorkflowData: &WorkflowData{
 			EngineConfig: &EngineConfig{ID: "copilot"},
 			NetworkPermissions: &NetworkPermissions{
-				// Default version (v0.27.29) predates containerRuntime support.
-				Firewall: &FirewallConfig{Enabled: true},
+				// Pin to a version that predates containerRuntime support.
+				Firewall: &FirewallConfig{Enabled: true, Version: "v0.27.29"},
 			},
 			SandboxConfig: &SandboxConfig{
 				Agent: &AgentSandboxConfig{
@@ -184,10 +191,8 @@ func TestGVisorValidation_ArcDindIncompatible(t *testing.T) {
 	workflowData := &WorkflowData{
 		SandboxConfig: &SandboxConfig{
 			Agent: &AgentSandboxConfig{
-				ID:                    "awf",
-				Runtime:               AgentRuntimeGVisor,
-				NetworkIsolation:      false,
-				SudoExplicitlyEnabled: true,
+				ID:      "awf",
+				Runtime: AgentRuntimeGVisor,
 			},
 		},
 		RunnerConfig: &RunnerConfig{Topology: RunnerTopologyArcDind},
@@ -199,20 +204,19 @@ func TestGVisorValidation_ArcDindIncompatible(t *testing.T) {
 
 	err := validateSandboxConfig(workflowData)
 	require.Error(t, err, "gVisor + arc-dind must produce a compile-time error")
-	assert.Contains(t, err.Error(), "arc-dind", "error must mention arc-dind")
-	assert.Contains(t, err.Error(), "gvisor", "error must mention gvisor")
+	require.ErrorContains(t, err, "arc-dind", "error must mention arc-dind")
+	require.ErrorContains(t, err, "gvisor", "error must mention gvisor")
 }
 
-// TestGVisorValidation_SudoFalseAllowed verifies that gVisor + sudo:false (default) is
-// a valid combination. The gVisor install step invokes sudo in shell commands directly,
-// independently of sandbox.agent.sudo.
-func TestGVisorValidation_SudoFalseAllowed(t *testing.T) {
+// TestGVisorValidation_RootlessProfileAllowed verifies that the gvisor runtime profile
+// is valid. The gVisor install step invokes sudo in shell commands directly, while AWF
+// itself keeps running rootless.
+func TestGVisorValidation_RootlessProfileAllowed(t *testing.T) {
 	workflowData := &WorkflowData{
 		SandboxConfig: &SandboxConfig{
 			Agent: &AgentSandboxConfig{
-				ID:               "awf",
-				Runtime:          AgentRuntimeGVisor,
-				NetworkIsolation: true, // sudo: false (default or explicit)
+				ID:      "awf",
+				Runtime: AgentRuntimeGVisor,
 			},
 		},
 		NetworkPermissions: &NetworkPermissions{
@@ -222,19 +226,17 @@ func TestGVisorValidation_SudoFalseAllowed(t *testing.T) {
 	}
 
 	err := validateSandboxConfig(workflowData)
-	require.NoError(t, err, "gVisor + sudo:false must be a valid combination")
+	require.NoError(t, err, "the gvisor runtime profile must be a valid combination")
 }
 
 // TestGVisorValidation_ValidCombination verifies that a valid gVisor configuration
-// passes validation (sandbox validation does not reject gVisor; sudo: true is a separate
-// deprecation check in strict-mode validation).
+// passes validation.
 func TestGVisorValidation_ValidCombination(t *testing.T) {
 	workflowData := &WorkflowData{
 		SandboxConfig: &SandboxConfig{
 			Agent: &AgentSandboxConfig{
-				ID:               "awf",
-				Runtime:          AgentRuntimeGVisor,
-				NetworkIsolation: true, // sudo: false (default)
+				ID:      "awf",
+				Runtime: AgentRuntimeGVisor,
 			},
 		},
 		NetworkPermissions: &NetworkPermissions{
@@ -245,27 +247,6 @@ func TestGVisorValidation_ValidCombination(t *testing.T) {
 
 	err := validateSandboxConfig(workflowData)
 	assert.NoError(t, err, "gVisor on a standard runner must pass validation")
-}
-
-// TestGVisorStrictModeSudoTrueError verifies that sandbox.agent.sudo: true combined
-// with runtime: gvisor still produces a strict-mode error. The gVisor install step
-// uses shell-level sudo directly and does not require AWF itself to run as sudo.
-func TestGVisorStrictModeSudoTrueError(t *testing.T) {
-	sandboxConfig := &SandboxConfig{
-		Agent: &AgentSandboxConfig{
-			ID:                    "awf",
-			Runtime:               AgentRuntimeGVisor,
-			NetworkIsolation:      false,
-			SudoExplicitlyEnabled: true,
-		},
-	}
-
-	compiler := NewCompiler()
-	compiler.strictMode = true
-
-	err := compiler.validateStrictSandboxCustomization(sandboxConfig)
-	require.Error(t, err, "sudo:true + runtime:gvisor must still produce a strict-mode error")
-	assert.Contains(t, err.Error(), "sudo", "error must mention sudo")
 }
 
 // TestGVisorFrontmatterExtraction verifies end-to-end that a workflow with
@@ -295,6 +276,7 @@ sandbox:
 	require.NoError(t, err)
 
 	compiler := NewCompiler()
+	compiler.SetSkipValidation(false) // exercise AWF config schema validation; containerRuntime must pass
 	err = compiler.CompileWorkflow(testFile)
 	require.NoError(t, err, "compilation with runtime: gvisor must succeed")
 
@@ -308,11 +290,10 @@ sandbox:
 	// AWF install step must also be present.
 	assert.Contains(t, lockStr, "Install AWF binary", "compiled workflow must include AWF install step")
 
-	// containerRuntime: gvisor must NOT appear with the default AWF version (v0.27.29),
-	// which predates containerRuntime support. It will be emitted once the minimum
-	// version (AWFContainerRuntimeMinVersion) is released.
-	assert.NotContains(t, lockStr, `\"containerRuntime\":\"gvisor\"`,
-		"containerRuntime must not be emitted for default AWF version")
+	// containerRuntime: gvisor must appear with the default AWF version (v0.27.30),
+	// which supports containerRuntime (AWFContainerRuntimeMinVersion = v0.27.30).
+	assert.Contains(t, lockStr, `\"containerRuntime\":\"gvisor\"`,
+		"containerRuntime must be emitted for default AWF version")
 
 	// gVisor step must appear before AWF step.
 	gvisorPos := strings.Index(lockStr, "Install gVisor")

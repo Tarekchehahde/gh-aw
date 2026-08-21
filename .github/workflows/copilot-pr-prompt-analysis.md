@@ -21,6 +21,7 @@ engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 network:
   allowed:
     - defaults
@@ -29,8 +30,8 @@ network:
 
 sandbox:
   agent:  # Firewall enabled (migrated from network.firewall)
+    runtime: cloud-hypervisor
     id: awf
-    sudo: false
 imports:
   - uses: shared/daily-audit-base.md
     with:
@@ -41,6 +42,7 @@ imports:
       branch-name: "memory/prompt-analysis"
       description: "Historical prompt pattern analysis"
   - shared/copilot-pr-analysis-base.md
+  - shared/reporting.md
 
   - shared/otlp.md
 timeout-minutes: 15
@@ -49,14 +51,14 @@ tools:
   cli-proxy: true
 features:
   gh-aw-detection: true
+evals:
+  - id: prompt_patterns_analyzed
+    question: Did the agent analyze prompt patterns used in Copilot PR interactions?
+  - id: optimization_findings_produced
+    question: Were findings produced identifying common usage patterns and optimization opportunities?
 ---
 
 ### Copilot PR Prompt Pattern Analysis
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are an AI analytics agent that analyzes the patterns in prompts used to create pull requests via GitHub Copilot, correlating them with PR outcomes (merged vs closed).
 

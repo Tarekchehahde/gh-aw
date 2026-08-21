@@ -657,8 +657,63 @@ This test verifies that auto-merge configuration is properly handled.
 	}
 
 	// Verify that the auto-merge configuration is in the handler config JSON
-	if !strings.Contains(lockContentStr, `"auto_merge":true`) {
+	handlerConfig := extractHandlerConfig(t, lockContentStr)
+	if handlerConfig["create_pull_request"]["auto_merge"] != true {
 		t.Error("Expected auto_merge:true in handler config JSON")
+	}
+}
+
+func TestCreatePullRequestAutoMergeMethodConfig(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "test-auto-merge-method-*")
+
+	testMarkdown := `---
+on:
+  pull_request:
+    types: [opened]
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+strict: false
+safe-outputs:
+  create-pull-request:
+    auto-merge: squash
+---
+
+# Test Create Pull Request Auto-Merge Method
+`
+
+	mdFile := filepath.Join(tmpDir, "test-auto-merge-method.md")
+	if err := os.WriteFile(mdFile, []byte(testMarkdown), 0644); err != nil {
+		t.Fatalf("Failed to write test markdown file: %v", err)
+	}
+
+	compiler := NewCompiler()
+	workflowData, err := compiler.ParseWorkflowFile(mdFile)
+	if err != nil {
+		t.Fatalf("Failed to parse workflow: %v", err)
+	}
+
+	if workflowData.SafeOutputs == nil || workflowData.SafeOutputs.CreatePullRequests == nil {
+		t.Fatal("Expected create-pull-request configuration to be parsed")
+	}
+	if workflowData.SafeOutputs.CreatePullRequests.AutoMerge == nil || *workflowData.SafeOutputs.CreatePullRequests.AutoMerge != "squash" {
+		t.Fatalf("Expected auto-merge to be squash, got %#v", workflowData.SafeOutputs.CreatePullRequests.AutoMerge)
+	}
+
+	if err := compiler.CompileWorkflow(mdFile); err != nil {
+		t.Fatalf("Failed to compile workflow: %v", err)
+	}
+
+	lockFile := stringutil.MarkdownToLockFile(mdFile)
+	lockContent, err := os.ReadFile(lockFile)
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+
+	handlerConfig := extractHandlerConfig(t, string(lockContent))
+	if handlerConfig["create_pull_request"]["auto_merge"] != "squash" {
+		t.Error(`Expected auto_merge:"squash" in handler config JSON`)
 	}
 }
 
@@ -807,7 +862,8 @@ safe-outputs:
 	if err != nil {
 		t.Fatalf("Failed to read generated lock file: %v", err)
 	}
-	if !strings.Contains(string(lockContent), `"signed_commits":false`) {
+	handlerConfig := extractHandlerConfig(t, string(lockContent))
+	if handlerConfig["create_pull_request"]["signed_commits"] != false {
 		t.Error("Expected signed_commits:false in handler config JSON")
 	}
 }

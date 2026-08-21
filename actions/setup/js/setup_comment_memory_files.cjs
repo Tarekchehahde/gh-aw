@@ -4,13 +4,15 @@ require("./shim.cjs");
 
 const fs = require("fs");
 const path = require("path");
-const { ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_VALIDATION, ERR_SYSTEM } = require("./error_codes.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { parseAllowedRepos, validateTargetRepo } = require("./repo_helpers.cjs");
 const {
   COMMENT_MEMORY_DIR,
   COMMENT_MEMORY_MAX_SCAN_PAGES,
   COMMENT_MEMORY_MAX_SCAN_EMPTY_PAGES,
+  COMMENT_MEMORY_MAX_FILE_BYTES,
+  COMMENT_MEMORY_MAX_TOTAL_BYTES,
   COMMENT_MEMORY_PROMPT_START_MARKER,
   COMMENT_MEMORY_PROMPT_END_MARKER,
   extractCommentMemoryEntries,
@@ -139,11 +141,32 @@ async function collectCommentMemoryFiles(githubClient, commentMemoryConfig) {
     }
   }
 
-  fs.mkdirSync(COMMENT_MEMORY_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(COMMENT_MEMORY_DIR, { recursive: true });
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to create directory ${COMMENT_MEMORY_DIR}: ${getErrorMessage(err)}`, { cause: err });
+  }
+  let totalBytes = 0;
+  for (const [memoryId, content] of memoryMap.entries()) {
+    const writtenContent = `${content}\n`;
+    const contentBytes = Buffer.byteLength(writtenContent, "utf8");
+    if (contentBytes > COMMENT_MEMORY_MAX_FILE_BYTES) {
+      throw new Error(`${ERR_VALIDATION}: comment_memory file '${memoryId}.md' is ${contentBytes} bytes, exceeding max ${COMMENT_MEMORY_MAX_FILE_BYTES} bytes`);
+    }
+    totalBytes += contentBytes;
+    if (totalBytes > COMMENT_MEMORY_MAX_TOTAL_BYTES) {
+      throw new Error(`${ERR_VALIDATION}: comment_memory total size ${totalBytes} bytes exceeds max ${COMMENT_MEMORY_MAX_TOTAL_BYTES} bytes`);
+    }
+  }
+
   const writtenFiles = [];
   for (const [memoryId, content] of memoryMap.entries()) {
     const filePath = path.join(COMMENT_MEMORY_DIR, `${memoryId}.md`);
-    fs.writeFileSync(filePath, `${content}\n`);
+    try {
+      fs.writeFileSync(filePath, `${content}\n`);
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to write file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     writtenFiles.push(filePath);
   }
 
@@ -168,7 +191,12 @@ ${fileList}
 </comment-memory-files>
 ${COMMENT_MEMORY_PROMPT_END_MARKER}`;
 
-  let promptContent = fs.readFileSync(PROMPT_PATH, "utf8");
+  let promptContent;
+  try {
+    promptContent = fs.readFileSync(PROMPT_PATH, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${PROMPT_PATH}: ${getErrorMessage(err)}`, { cause: err });
+  }
   const start = promptContent.indexOf(COMMENT_MEMORY_PROMPT_START_MARKER);
   const end = promptContent.indexOf(COMMENT_MEMORY_PROMPT_END_MARKER);
   if (start >= 0 && end > start) {
@@ -177,7 +205,11 @@ ${COMMENT_MEMORY_PROMPT_END_MARKER}`;
   } else {
     promptContent = `${promptContent.trimEnd()}\n\n${injectedBlock}\n`;
   }
-  fs.writeFileSync(PROMPT_PATH, promptContent);
+  try {
+    fs.writeFileSync(PROMPT_PATH, promptContent);
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to write file ${PROMPT_PATH}: ${getErrorMessage(err)}`, { cause: err });
+  }
   core.info("comment_memory setup: injected comment-memory prompt guidance");
 }
 

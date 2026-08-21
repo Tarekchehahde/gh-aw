@@ -1,7 +1,8 @@
 // @ts-check
 /// <reference types="@actions/github-script" />
 
-const { getDetectionReasonText, getThreatDetectedMarker } = require("./threat_detection_warning.cjs");
+const { getDetectionReasonText, getThreatDetectedMarker, isToolingFailureReason } = require("./threat_detection_warning.cjs");
+const { getPromptPath, renderTemplateFromFile } = require("./messages_core.cjs");
 
 /**
  * Generates a standalone workflow-id XML comment marker for searchability.
@@ -105,21 +106,20 @@ function generateXMLMarker(workflowName, runUrl) {
 }
 
 /**
- * Get the detection caution alert for expired entity closing comments.
+ * Get the detection alert for expired entity closing comments.
  * Reads GH_AW_DETECTION_CONCLUSION and GH_AW_DETECTION_REASON from environment variables.
- * Returns the caution alert markdown when conclusion is "warning", or empty string otherwise.
+ * Returns alert markdown when conclusion is "warning", or empty string otherwise.
  *
- * Note: This function is intentionally kept inline (not imported from messages_footer.cjs)
- * because importing messages_footer.cjs here would cause the bundler to inline
- * messages_core.cjs which contains 'GH_AW_SAFE_OUTPUT_MESSAGES:' in a warning message,
- * breaking tests that check for env var declarations.
+ * When the reason indicates a tooling failure (agent_failure or parse_error) a [!WARNING]
+ * admonition is used so reviewers can distinguish "detection engine crashed" from "detection
+ * engine found something". Actual threat findings (threat_detected) keep [!CAUTION].
  *
- * Warning reason text and threat marker formatting are centralized in
+ * Note: Warning reason text and threat marker formatting are centralized in
  * threat_detection_warning.cjs to keep warning-mode messaging consistent.
  *
  * @param {string} workflowName - Name of the workflow
  * @param {string} runUrl - URL of the workflow run
- * @returns {string} Caution alert markdown or empty string
+ * @returns {string} Alert markdown or empty string
  */
 function getExpiredEntityCautionAlert(workflowName, runUrl) {
   const detectionConclusion = process.env.GH_AW_DETECTION_CONCLUSION;
@@ -128,7 +128,11 @@ function getExpiredEntityCautionAlert(workflowName, runUrl) {
   }
   const detectionReason = process.env.GH_AW_DETECTION_REASON || "";
   const reasonText = getDetectionReasonText(detectionReason);
-  return `> [!CAUTION]\n> agentic threat detected\n> Threat detection flagged this output in warn mode. Manual review is REQUIRED before any follow-up automation.\n> ${getThreatDetectedMarker(detectionReason)}\n>\n> <details>\n> <summary>Details</summary>\n>\n> ${reasonText}\n>\n> Review the [workflow run logs](${runUrl}) for details.\n> </details>`;
+  const context = { threat_detected_marker: getThreatDetectedMarker(detectionReason), reason_text: reasonText, run_url: runUrl };
+  if (isToolingFailureReason(detectionReason)) {
+    return renderTemplateFromFile(getPromptPath("threat_detection_engine_error.md"), context).trimEnd();
+  }
+  return renderTemplateFromFile(getPromptPath("threat_detection_caution.md"), context).trimEnd();
 }
 
 /**

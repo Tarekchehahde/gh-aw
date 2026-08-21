@@ -13,13 +13,17 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    id: awf
 tracker-id: security-red-team
-engine: claude
+engine:
+  id: opencode
+model: copilot/claude-sonnet-4.5
 strict: true
+network:
+  allowed:
+    - defaults
+    - github
 tools:
-  cli-proxy: true
   cache-memory: true
   github:
     mode: gh-proxy
@@ -28,7 +32,7 @@ tools:
 safe-outputs:
   create-issue:
     title-prefix: "🚨 [SECURITY]"
-    labels: ["security", "red-team"]
+    labels: ["security", "red-team", "cookie"]
     max: 5
 experiments:
   reasoning_depth:
@@ -50,21 +54,25 @@ experiments:
     issue: 31673
 timeout-minutes: 60
 imports:
+  - shared/opencode.md
   - shared/security-analysis-base.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[security-red-team] "
       expires: 3d
+  - shared/reporting.md
 
   - shared/otlp.md
+evals:
+  - id: security_scan_performed
+    question: Did the agent perform a deep red teaming security scan of actions/setup/js and actions/setup/sh directories?
+  - id: findings_reported_or_noop
+    question: Were security findings (backdoors, secret leaks, malicious code) reported, or was noop used when no issues were detected?
+features:
+  gh-aw-detection: true
 ---
 
 ### Daily Security Red Team Agent
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are a specialized **Security Red Team Agent** performing deep security analysis on the codebase. Your mission is to identify backdoors, secret leaks, destructive code, and other malicious patterns in the `actions/setup/js` and `actions/setup/sh` directories.
 
@@ -640,28 +648,34 @@ if [ ${#FINDINGS[@]} -gt 0 ]; then
   
   # Create issue using safe-outputs
   cat > /tmp/gh-aw/agent/security-issue.md <<EOF
-# 🚨 Security Red Team Findings - $(date +%Y-%m-%d)
+### 🚨 Security Red Team Findings - $(date +%Y-%m-%d)
 
 **Scan Mode**: $SCAN_MODE  
 **Technique**: $TECHNIQUE  
 **Files Analyzed**: $FILE_COUNT  
 **Findings**: ${#FINDINGS[@]}
 
-## 📋 Executive Summary
+### 📋 Executive Summary
 
 The daily security red team scan has detected **${#FINDINGS[@]}** potential security issues in the \`actions/setup/js\` and \`actions/setup/sh\` directories using the **$TECHNIQUE** technique.
 
-## 🔍 Detailed Findings
+<details>
+<summary><b>🔍 View Detailed Findings</b></summary>
 
 $FINDINGS_DETAILS
 
-## 🛠️ Remediation Tasks
+</details>
+
+<details>
+<summary><b>🛠️ View Remediation Tasks</b></summary>
 
 @pelikhan The following tasks have been generated to address the security findings. Please review and execute as appropriate:
 
 $FIX_TASKS
 
-## 📊 Analysis Metadata
+</details>
+
+### 📊 Analysis Metadata
 
 - **Repository**: ${{ github.repository }}
 - **Run ID**: ${{ github.run_id }}
@@ -670,7 +684,7 @@ $FIX_TASKS
 - **Scan Type**: $SCAN_MODE
 - **Cache Location**: /tmp/gh-aw/cache-memory/security-red-team
 
-## 🎯 Next Steps
+### 🎯 Next Steps
 
 1. **Triage**: Review each finding and determine if it's a true positive or false positive
 2. **Prioritize**: Address high-severity issues first (secret exfiltration, backdoors)

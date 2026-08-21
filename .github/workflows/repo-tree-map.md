@@ -11,9 +11,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: copilot
 
@@ -36,6 +33,9 @@ imports:
 
 
   - shared/otlp.md
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Repository Tree Map Generator

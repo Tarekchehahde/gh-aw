@@ -21,6 +21,7 @@ engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 steps:
   - name: Install gh-aw CLI
     env:
@@ -67,7 +68,7 @@ steps:
       # --artifacts mcp: only download the MCP gateway log artifact (sufficient for DIFC checking).
       # --timeout 8: cap execution at 8 minutes to prevent runaway downloads.
       gh aw logs --filtered-integrity --start-date -7d --json -c 200 \
-        --artifacts mcp --timeout 8 \
+        --artifacts mcp --timeout 8 --output .github/aw/logs \
         > "$FRESH_LOGS" || true
 
       # Validate JSON output and fall back to an empty dataset on failure
@@ -113,6 +114,31 @@ steps:
           }
         }' > "$CACHE_FILE"
 
+  - name: Download firewall-enabled workflow runs
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    run: |
+      mkdir -p /tmp/gh-aw/agent/firewall
+      FIREWALL_RUNS=/tmp/gh-aw/agent/firewall/firewall-enabled-runs.json
+      EMPTY_DATA='{"runs":[],"summary":{"total_runs":0}}'
+
+      # Download logs filtered to only runs with the firewall feature enabled.
+      # --artifacts activation: only download the activation artifact (aw_info.json)
+      # needed for firewall detection, avoiding large agent artifact downloads.
+      # --timeout 8: cap execution at 8 minutes to prevent runaway downloads.
+      gh aw logs --firewall --start-date -7d --json -c 100 \
+        --artifacts activation --timeout 8 --output .github/aw/logs \
+        > "$FIREWALL_RUNS" || true
+
+      # Validate JSON output and fall back to an empty dataset on failure
+      if ! jq -e '.runs' "$FIREWALL_RUNS" > /dev/null 2>&1; then
+        echo "No valid firewall logs produced; continuing with empty dataset"
+        echo "$EMPTY_DATA" > "$FIREWALL_RUNS"
+      fi
+
+      count=$(jq '.runs | length' "$FIREWALL_RUNS" 2>/dev/null || echo 0)
+      echo "Downloaded $count firewall-enabled workflow runs"
+
 tools:
   bash:
     - "*"
@@ -141,8 +167,16 @@ imports:
   - shared/otlp.md
 sandbox:
   agent:
-    sudo: false
+    id: awf
+evals:
+  - id: security_data_analyzed
+    question: Did the agent analyze firewall traffic and DIFC integrity-filtered events for the reporting period?
+  - id: unified_report_created
+    question: Was a unified security observability report created combining both data sources?
+features:
+  gh-aw-detection: true
 ---
+
 {{#runtime-import? .github/shared-instructions.md}}
 
 # Daily Security Observability Report
@@ -168,16 +202,7 @@ Both datasets cover the **last 7 days** and share the cache-memory path `/tmp/gh
 
 **ALWAYS PERFORM FRESH ANALYSIS**: This report must always use fresh data from the audit tool. Do NOT skip analysis based on cached results or reuse aggregated statistics from previous runs.
 
-Use the `logs` tool from the agentic-workflows MCP server to collect workflow runs that have firewall enabled:
-
-**Tool call:**
-```json
-{
-  "firewall": true,
-  "start_date": "-7d",
-  "count": 100
-}
-```
+Read the pre-downloaded list of firewall-enabled workflow runs from `/tmp/gh-aw/agent/firewall/firewall-enabled-runs.json`. This file was populated by the startup step and contains runs from the last 7 days with the firewall feature enabled. Extract the `run_id` from each entry in the `runs` array.
 
 ### Step 1.2: Early Exit if No Firewall Data
 
@@ -666,4 +691,21 @@ Create a single GitHub discussion combining both signals.
 
 ### Output Format
 
-Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+**Report Structure Guidelines**
+
+- Use `###` (or lower) headers only.
+- Keep summary and critical actions visible; move long detail into `<details>` blocks.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+
+```markdown
+### Summary
+
+**X items found** — [brief description]
+
+<details>
+<summary><b>View Full Details</b></summary>
+
+... detailed content here ...
+
+</details>
+```

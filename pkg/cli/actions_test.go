@@ -9,9 +9,10 @@ import (
 )
 
 func TestConvertToGitHubActionsEnv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		input       any
+		input       map[string]any
 		envMetadata []EnvironmentVariable
 		expected    map[string]string
 	}{
@@ -112,14 +113,6 @@ func TestConvertToGitHubActionsEnv(t *testing.T) {
 			},
 		},
 		{
-			name: "non-map input returns empty map",
-			input: []string{
-				"${API_TOKEN}",
-			},
-			envMetadata: []EnvironmentVariable{},
-			expected:    map[string]string{},
-		},
-		{
 			name: "env variable not in metadata and key differs from token name",
 			input: map[string]any{
 				"MY_KEY": "${SOME_TOKEN}",
@@ -143,6 +136,7 @@ func TestConvertToGitHubActionsEnv(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := convertToGitHubActionsEnv(tt.input, tt.envMetadata)
 			assert.Equal(t, tt.expected, result, "convertToGitHubActionsEnv should produce the expected environment variable map")
 		})

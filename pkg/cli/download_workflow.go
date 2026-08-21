@@ -12,6 +12,7 @@ import (
 	"github.com/github/gh-aw/pkg/constants"
 
 	"github.com/github/gh-aw/pkg/console"
+	"github.com/github/gh-aw/pkg/errorutil"
 	"github.com/github/gh-aw/pkg/fileutil"
 	"github.com/github/gh-aw/pkg/gitutil"
 	"github.com/github/gh-aw/pkg/logger"
@@ -28,14 +29,25 @@ func downloadWorkflowContentViaGit(ctx context.Context, repo, path, ref string, 
 
 	downloadLog.Printf("Attempting git fallback for downloading workflow content: %s/%s@%s", repo, path, ref)
 
+	if err := gitutil.ValidateGitRef(ref); err != nil {
+		return nil, fmt.Errorf("refusing git fallback: %w", err)
+	}
+	if err := gitutil.ValidateGitPath(path); err != nil {
+		return nil, fmt.Errorf("refusing git fallback: %w", err)
+	}
+
 	// Use git archive to get the file content without cloning
 	githubHost := getGitHubHostForRepo(repo)
 	repoURL := fmt.Sprintf("%s/%s.git", githubHost, repo)
 
-	// git archive command: git archive --remote=<repo> <ref> <path>
+	// git archive command: git archive --remote=<repo> <ref> -- <path>
+	// The '--' end-of-options separator ensures path is never parsed as a git flag
+	// even if it begins with '-' (argument injection, CWE-88).
+	// ValidateGitRef/ValidateGitPath above guard against leading '-' and '..' at
+	// this layer; '--' is kept as defence-in-depth per the git(1) specification.
 	// #nosec G204 -- repoURL, ref, and path are from workflow import configuration authored by the
 	// developer; exec.CommandContext with separate args (not shell execution) prevents shell injection.
-	cmd := exec.CommandContext(ctx, "git", "archive", "--remote="+repoURL, ref, path)
+	cmd := exec.CommandContext(ctx, "git", "archive", "--remote="+repoURL, ref, "--", path)
 	archiveOutput, err := cmd.Output()
 	if err != nil {
 		downloadLog.Printf("git archive failed, falling back to git clone: repo=%s, ref=%s, err=%v", repo, ref, err)
@@ -60,6 +72,17 @@ func downloadWorkflowContentViaGit(ctx context.Context, repo, path, ref string, 
 
 // downloadWorkflowContentViaGitClone downloads a workflow file by shallow cloning with sparse checkout
 func downloadWorkflowContentViaGitClone(ctx context.Context, repo, path, ref string, verbose bool) ([]byte, error) {
+	// Validate and clean the path early to prevent path traversal before it is
+	// used as a sparse-checkout pattern or joined with a filesystem base directory.
+	cleanedPath := filepath.Clean(path)
+	if filepath.IsAbs(cleanedPath) || strings.HasPrefix(cleanedPath, ".."+string(filepath.Separator)) || cleanedPath == ".." {
+		return nil, fmt.Errorf("unsafe path in workflow reference: %q", path)
+	}
+	// Use forward slashes so the sparse-checkout pattern is valid for Git on all
+	// platforms (Git patterns use "/" as separator; backslashes are escapes).
+	// filepath.Join handles forward slashes correctly when building the local path.
+	path = filepath.ToSlash(cleanedPath)
+
 	if verbose {
 		fmt.Fprintln(os.Stderr, console.FormatVerboseMessage(fmt.Sprintf("Fetching %s/%s@%s via git clone", repo, path, ref)))
 	}
@@ -107,7 +130,7 @@ func downloadWorkflowContentViaGitClone(ctx context.Context, repo, path, ref str
 	}
 
 	// Check if ref is a SHA (40 hex characters)
-	isSHA := len(ref) == 40 && gitutil.IsHexString(ref)
+	isSHA := gitutil.IsValidFullSHACaseInsensitive(ref)
 	downloadLog.Printf("Fetching ref via sparse checkout: is_sha=%t", isSHA)
 
 	if isSHA {
@@ -175,7 +198,7 @@ func downloadWorkflowContent(ctx context.Context, repo, path, ref string, verbos
 	if err != nil {
 		// Check if this is an authentication error
 		outputStr := string(output)
-		if gitutil.IsAuthError(outputStr) || gitutil.IsAuthError(err.Error()) {
+		if errorutil.IsAuthError(outputStr) || errorutil.IsAuthError(err.Error()) {
 			downloadLog.Printf("GitHub API authentication failed, attempting git fallback for %s/%s@%s", repo, path, ref)
 			// Try fallback using git commands
 			content, gitErr := downloadWorkflowContentViaGit(ctx, repo, path, ref, verbose)

@@ -18,13 +18,18 @@ imports:
   - uses: ./serena.md
     with:
       languages: ["go"]
+pre-agent-steps:
+  - name: Setup Go
+    uses: actions/setup-go@v7.0.0
+    with:
+      go-version-file: go.mod
+      cache: true
+  - name: Verify Go installation
+    run: go version
 ---
 
-## Serena Go Code Analysis
+## Go-specific constraints
 
-### Analysis Constraints
-
-1. **Only analyze `.go` files** — Ignore all other file types
-2. **Skip test files** — Never analyze files ending in `_test.go`
-3. **Focus on `pkg/` directory** — Primary analysis area
-4. **Use Serena for semantic analysis** — Leverage LSP capabilities for deeper insights
+1. Analyze only `.go` files.
+2. Skip files ending in `_test.go`.
+3. Prioritize `pkg/` as the primary analysis area.

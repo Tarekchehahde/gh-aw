@@ -29,22 +29,27 @@ type ForecastConfig struct {
 	// TimeoutMinutes gracefully cancels forecast computation after the configured
 	// number of minutes. Zero disables timeout.
 	TimeoutMinutes int
+	// DownloadConcurrency is the maximum number of usage-artifact downloads to run in
+	// parallel. Zero or negative uses the default (defaultForecastDownloadConcurrency).
+	DownloadConcurrency int
 }
 
 // NewForecastCommand creates the forecast command.
 func NewForecastCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "forecast [workflow]...",
-		Short: "[EXPERIMENTAL] Forecast AI Credit (AIC) usage for agentic workflows",
-		Long: `[EXPERIMENTAL] Forecast AI Credit (AIC) usage for agentic workflows by sampling
+		Short: "Forecast AI Credit (AIC) usage for agentic workflows",
+		Long: `Forecast AI Credit (AIC) usage for agentic workflows by sampling
 recent run history and projecting forward on a per-week or per-month basis.
 
 The forecaster downloads a sample of recent completed workflow runs and derives
 per-run metrics (AIC, duration, success rate). When runs have been
 previously processed by 'gh aw logs', cached token-usage data is used. The
-observed run frequency is then projected to the target period using a Monte Carlo
+observed run frequency is then projected to the target period using a statistical
 simulation that models three sources of uncertainty: run count (Poisson), per-run
 AIC usage (bootstrap resampling), and per-run success (Bernoulli).
+
+All forecasts are estimates derived from historical samples and may be inaccurate.
 
 Accounts for:
   - A/B experiment variants (results are split per variant when present)
@@ -84,20 +89,22 @@ Backtesting (--eval):
 			sampleSize, _ := cmd.Flags().GetInt("sample")
 			evalMode, _ := cmd.Flags().GetBool("eval")
 			timeoutMinutes, _ := cmd.Flags().GetInt("timeout")
+			downloadConcurrency, _ := cmd.Flags().GetInt("concurrency")
 
 			forecastRunLog.Printf("Forecast command invoked: workflow_count=%d, days=%d, period=%s, sample_size=%d, eval=%v, timeout_minutes=%d, json=%v, repo=%q",
 				len(args), days, period, sampleSize, evalMode, timeoutMinutes, jsonOutput, repoOverride)
 
 			config := ForecastConfig{
-				WorkflowIDs:    args,
-				Days:           days,
-				Period:         period,
-				JSONOutput:     jsonOutput,
-				Verbose:        verbose,
-				RepoOverride:   repoOverride,
-				SampleSize:     sampleSize,
-				EvalMode:       evalMode,
-				TimeoutMinutes: timeoutMinutes,
+				WorkflowIDs:         args,
+				Days:                days,
+				Period:              period,
+				JSONOutput:          jsonOutput,
+				Verbose:             verbose,
+				RepoOverride:        repoOverride,
+				SampleSize:          sampleSize,
+				EvalMode:            evalMode,
+				TimeoutMinutes:      timeoutMinutes,
+				DownloadConcurrency: downloadConcurrency,
 			}
 
 			return RunForecast(config)
@@ -108,7 +115,8 @@ Backtesting (--eval):
 	cmd.Flags().String("period", "month", "Aggregation period for projections: week or month")
 	cmd.Flags().Int("sample", 100, "Maximum number of completed runs to sample per workflow")
 	cmd.Flags().Bool("eval", false, "Evaluate forecast quality against past data (backtesting mode)")
-	cmd.Flags().Int("timeout", 0, "Gracefully stop forecast computation after this many minutes (0 disables timeout)")
+	cmd.Flags().Int("timeout", 0, "Gracefully stop forecast computation after this many minutes (0 = no timeout)")
+	cmd.Flags().Int("concurrency", 0, "Maximum number of concurrent usage-artifact downloads (0 = use default)")
 	addRepoFlag(cmd)
 	addJSONFlag(cmd)
 

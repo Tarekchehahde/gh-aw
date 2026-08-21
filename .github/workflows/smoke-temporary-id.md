@@ -49,6 +49,7 @@ timeout-minutes: 10
 imports:
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
 experiments:
@@ -70,6 +71,14 @@ experiments:
     tags: [cost-efficiency, sub-agents, smoke-tests]
 features:
   gh-aw-detection: false
+evals:
+  - id: sub_agent_strategy_goal_met
+    question: Does the agent output show that the objective for experiment sub_agent_strategy was successfully completed?
+
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Smoke Test: Temporary ID Functionality

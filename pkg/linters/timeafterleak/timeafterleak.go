@@ -10,29 +10,31 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
+var pkgLog = logger.New("linters:timeafterleak")
+
 // Analyzer is the time-after-leak analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "timeafterleak",
-	Doc:      "reports time.After calls used as the channel-receive expression in a select CommClause that is enclosed by a for or range loop; does not flag receives inside case bodies, single-case selects without a default, or selects enclosed only by a function literal boundary",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/timeafterleak",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("timeafterleak", "reports time.After calls used as the channel-receive expression in a select CommClause that is enclosed by a for or range loop; does not flag receives inside case bodies, single-case selects without a default, or selects enclosed only by a function literal boundary", run)
 
 func run(pass *analysis.Pass) (any, error) {
 	insp, err := astutil.Inspector(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "timeafterleak")
+
+	pkgLog.Printf("analyzing package %s", pass.Pkg.Path())
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
+	if err != nil {
+		return nil, err
+	}
 
 	for cur := range insp.Root().Preorder((*ast.CallExpr)(nil)) {
 		call, ok := cur.Node().(*ast.CallExpr)
@@ -44,10 +46,10 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 
 		pos := pass.Fset.PositionFor(call.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
+		if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
 			continue
 		}
-		if nolint.HasDirective(pos, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(pos, noLintIndex, "timeafterleak") {
 			continue
 		}
 
@@ -55,6 +57,7 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 
+		pkgLog.Printf("flagging time.After inside loop select at %s", pos)
 		pass.ReportRangef(call,
 			"time.After creates a new timer on each loop iteration that is not garbage collected until it fires; use time.NewTimer with Reset and Stop instead")
 	}
@@ -117,26 +120,8 @@ func isInsideLoopSelectComm(cur inspector.Cursor) bool {
 		return false
 	}
 
-	// If the enclosing SelectStmt has no other CommClause (no other channel case
-	// and no default), the timer must fire — it cannot be preempted, so there is
-	// no accumulation. A default clause (CommClause with nil Comm) can preempt
-	// the timer and is still flagged.
-	for selCur := range clauseCur.Enclosing((*ast.SelectStmt)(nil)) {
-		sel, ok := selCur.Node().(*ast.SelectStmt)
-		if !ok {
-			break
-		}
-		hasOther := false
-		for _, stmt := range sel.Body.List {
-			if other, isComm := stmt.(*ast.CommClause); isComm && other != cc {
-				hasOther = true
-				break
-			}
-		}
-		if !hasOther {
-			return false
-		}
-		break
+	if isSingleCaseSelect(clauseCur, cc) {
+		return false
 	}
 
 	// Walk up from the CommClause to find an enclosing for or range loop,
@@ -152,6 +137,27 @@ func isInsideLoopSelectComm(cur inspector.Cursor) bool {
 		case *ast.FuncLit:
 			return false
 		}
+	}
+	return false
+}
+
+// isSingleCaseSelect reports whether the CommClause cc is the only clause in
+// its enclosing SelectStmt. Single-case selects are not flagged because the
+// timer must fire — no accumulation is possible.
+// A default clause (CommClause with nil Comm) is counted as another clause,
+// so a select with a timer case plus a default returns false and is reportable.
+func isSingleCaseSelect(clauseCur inspector.Cursor, cc *ast.CommClause) bool {
+	for selCur := range clauseCur.Enclosing((*ast.SelectStmt)(nil)) {
+		sel, ok := selCur.Node().(*ast.SelectStmt)
+		if !ok {
+			break
+		}
+		for _, stmt := range sel.Body.List {
+			if other, isComm := stmt.(*ast.CommClause); isComm && other != cc {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

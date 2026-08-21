@@ -35,9 +35,9 @@
       "allowed": ["*"]
     },
     {
-      "container": "mcp/memory",
-      "entrypointArgs": ["-v", "/tmp/gh-aw/cache-memory:/app/dist"],
-      "allowed": ["store_memory", "retrieve_memory", "list_memories"]
+      "container": "ghcr.io/example/mcp-server:latest",
+      "entrypointArgs": ["stdio"],
+      "allowed": ["example_tool"]
     }
   ],
   "properties": {
@@ -65,9 +65,9 @@
     },
     "container": {
       "type": "string",
-      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*$",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*(?:@sha256:[a-f0-9]{64})?$",
       "description": "Container image for stdio MCP connections (alternative to command)",
-      "examples": ["docker.io/mcp/brave-search", "mcp/memory", "ghcr.io/github/github-mcp-server:latest"]
+      "examples": ["docker.io/mcp/brave-search", "ghcr.io/example/mcp-server:latest", "ghcr.io/github/github-mcp-server:latest"]
     },
     "args": {
       "type": "array",
@@ -202,6 +202,12 @@
       "type": ["string", "number"],
       "description": "Version or tag for container images",
       "examples": ["latest", "v1.0.0", "stable", 20, 3.11]
+    },
+    "required": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether this MCP server must pass the startup connectivity check. When false, a server that cannot be reached at startup logs a warning and the workflow continues without it.",
+      "examples": [false]
     }
   },
   "anyOf": [{ "required": ["type"] }, { "required": ["url"] }, { "required": ["command"] }, { "required": ["container"] }],

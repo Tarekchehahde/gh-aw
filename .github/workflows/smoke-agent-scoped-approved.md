@@ -22,6 +22,7 @@ strict: true
 imports:
   - shared/github-guard-policy.md
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   github:
     mode: local
@@ -46,6 +47,10 @@ safe-outputs:
 timeout-minutes: 10
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Guard Policy Smoke Test: scoped/approved (scoped patterns)

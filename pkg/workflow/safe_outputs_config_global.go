@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/logger"
@@ -29,6 +30,11 @@ func (c *Compiler) extractGlobalConfigFields(outputMap map[string]any, config *S
 		if urlsStr, ok := urls.(string); ok {
 			config.URLs = urlsStr
 		}
+	}
+
+	// Parse safe-outputs.data configuration (false, true, inline schema object, or expression).
+	if data, exists := outputMap["data"]; exists {
+		config.Data = data
 	}
 
 	// Parse allowed-github-references configuration
@@ -163,7 +169,8 @@ func (c *Compiler) extractGlobalConfigFields(outputMap map[string]any, config *S
 					}
 				}
 			}
-			config.ReportFailureAsIssue = reportFailureAsIssue // Preserve original value for proper serialization
+			reportAsIssue := TemplatableBool("true")
+			config.ReportFailureAsIssue = &reportAsIssue
 			config.ReportFailureAsIssueCategories = includedCategories
 			config.ReportFailureAsIssueExcludedCategories = excludedCategories
 			if len(includedCategories) > 0 && len(excludedCategories) > 0 {
@@ -179,17 +186,12 @@ func (c *Compiler) extractGlobalConfigFields(outputMap map[string]any, config *S
 				safeOutputsConfigLog.Printf("Failed to preprocess report-failure-as-issue field: %v (ignoring invalid value and leaving field unset)", err)
 			} else {
 				if reportFailureAsIssueStr, ok := outputMap["report-failure-as-issue"].(string); ok {
-					switch reportFailureAsIssueStr {
-					case "true":
-						config.ReportFailureAsIssue = true
-					case "false":
-						config.ReportFailureAsIssue = false
-					default:
-						config.ReportFailureAsIssue = reportFailureAsIssueStr
-					}
-					safeOutputsConfigLog.Printf("Report failure as issue: %v", config.ReportFailureAsIssue)
+					reportAsIssue := TemplatableBool(reportFailureAsIssueStr)
+					config.ReportFailureAsIssue = &reportAsIssue
+					safeOutputsConfigLog.Printf("Report failure as issue: %s", reportAsIssue.String())
 				} else if reportFailureAsIssueBool, ok := outputMap["report-failure-as-issue"].(bool); ok {
-					config.ReportFailureAsIssue = reportFailureAsIssueBool
+					reportAsIssue := TemplatableBool(strconv.FormatBool(reportFailureAsIssueBool))
+					config.ReportFailureAsIssue = &reportAsIssue
 					safeOutputsConfigLog.Printf("Report failure as issue: %t", reportFailureAsIssueBool)
 				}
 			}
@@ -201,6 +203,14 @@ func (c *Compiler) extractGlobalConfigFields(outputMap map[string]any, config *S
 		if failureIssueRepoStr, ok := failureIssueRepo.(string); ok && failureIssueRepoStr != "" {
 			config.FailureIssueRepo = failureIssueRepoStr
 			safeOutputsConfigLog.Printf("Failure issue repo: %s", failureIssueRepoStr)
+		}
+	}
+
+	// Handle report-failed-jobs flag (bool, default true)
+	if reportFailedJobs, exists := outputMap["report-failed-jobs"]; exists {
+		if reportFailedJobsBool, ok := reportFailedJobs.(bool); ok {
+			config.ReportFailedJobs = &reportFailedJobsBool
+			safeOutputsConfigLog.Printf("Report failed jobs: %t", reportFailedJobsBool)
 		}
 	}
 

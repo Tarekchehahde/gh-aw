@@ -19,6 +19,11 @@ func TestShellEscapeArg(t *testing.T) {
 			expected: "hello",
 		},
 		{
+			name:     "empty argument is quoted to preserve positional argument count",
+			input:    "",
+			expected: "''",
+		},
+		{
 			name:     "argument with parentheses",
 			input:    "shell(git add:*)",
 			expected: "'shell(git add:*)'",
@@ -246,7 +251,7 @@ func TestBuildDockerCommandWithExpandableVars(t *testing.T) {
 		{
 			name:     "empty command",
 			input:    "",
-			expected: "",
+			expected: "''",
 		},
 		{
 			name:     "injection attempt in GITHUB_WORKSPACE context",

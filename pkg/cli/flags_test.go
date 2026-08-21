@@ -68,16 +68,6 @@ func TestShortFlagConsistency(t *testing.T) {
 			description:  "compile should have force short flag",
 		},
 
-		// -F flag (raw-field in run command)
-		{
-			name:         "run command has -F for --raw-field",
-			shortFlag:    "F",
-			longFlag:     "raw-field",
-			commandSetup: func() *cobra.Command { return createRunCommandStub() },
-			shouldExist:  true,
-			description:  "run should have raw-field short flag (uppercase F)",
-		},
-
 		// -j flag (json)
 		{
 			name:         "compile command has -j for --json",
@@ -192,12 +182,12 @@ func TestShortFlagConsistency(t *testing.T) {
 			description:  "disable should have repo short flag",
 		},
 		{
-			name:         "logs command does not have -e for --engine",
+			name:         "logs command has -e for --engine",
 			shortFlag:    "e",
 			longFlag:     "engine",
 			commandSetup: func() *cobra.Command { return NewLogsCommand() },
-			shouldExist:  false,
-			description:  "logs should not have engine short flag",
+			shouldExist:  true,
+			description:  "logs should have engine short flag",
 		},
 
 		// -w flag (watch)
@@ -272,14 +262,6 @@ func createNewCommandStub() *cobra.Command {
 	return cmd
 }
 
-func createRunCommandStub() *cobra.Command {
-	cmd := &cobra.Command{Use: "run"}
-	cmd.Flags().StringArrayP("raw-field", "F", []string{}, "Add string parameter")
-	cmd.Flags().StringP("engine", "e", "", "Override AI engine")
-	cmd.Flags().StringP("repo", "r", "", "Target repository")
-	return cmd
-}
-
 func createEnableCommandStub() *cobra.Command {
 	cmd := &cobra.Command{Use: "enable"}
 	cmd.Flags().StringP("repo", "r", "", "Target repository")
@@ -303,7 +285,7 @@ func TestEngineFlagUsageText(t *testing.T) {
 		t.Fatal("Expected --engine override flag to exist")
 	}
 
-	if engineFlag.Usage != "Override AI engine (copilot, claude, codex, gemini, crush)" {
+	if engineFlag.Usage != EngineFlagOverrideUsage {
 		t.Errorf("Unexpected --engine override usage text: %s", engineFlag.Usage)
 	}
 
@@ -314,7 +296,72 @@ func TestEngineFlagUsageText(t *testing.T) {
 		t.Fatal("Expected --engine filter flag to exist")
 	}
 
-	if filterFlag.Usage != "Filter logs by AI engine (copilot, claude, codex, gemini, crush)" {
+	if filterFlag.Usage != EngineFlagFilterUsage {
 		t.Errorf("Unexpected --engine filter usage text: %s", filterFlag.Usage)
 	}
+}
+
+func TestAddSecurityScannerFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "test"}
+	addSecurityScannerFlag(cmd)
+
+	primary := cmd.Flags().Lookup("no-security-scanner")
+	if primary == nil {
+		t.Fatal("addSecurityScannerFlag should register --no-security-scanner")
+	}
+	if primary.Usage != "Skip security scanning of workflow markdown content" {
+		t.Errorf("Unexpected --no-security-scanner usage: %s", primary.Usage)
+	}
+
+	deprecated := cmd.Flags().Lookup("disable-security-scanner")
+	if deprecated == nil {
+		t.Fatal("addSecurityScannerFlag should register --disable-security-scanner as a deprecated alias")
+	}
+	if deprecated.Deprecated != "use --no-security-scanner instead" {
+		t.Errorf("Expected deprecation message 'use --no-security-scanner instead', got %q", deprecated.Deprecated)
+	}
+}
+
+func TestResolveDeprecatedBoolFlag(t *testing.T) {
+	t.Parallel()
+
+	setup := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "test"}
+		cmd.Flags().Bool("new-flag", false, "new flag")
+		cmd.Flags().Bool("old-flag", false, "old flag")
+		_ = cmd.Flags().MarkDeprecated("old-flag", "use --new-flag instead")
+		return cmd
+	}
+
+	t.Run("both false returns false", func(t *testing.T) {
+		t.Parallel()
+		cmd := setup()
+		if resolveDeprecatedBoolFlag(cmd, "new-flag", "old-flag") {
+			t.Error("expected false when both flags are unset")
+		}
+	})
+
+	t.Run("new flag true returns true", func(t *testing.T) {
+		t.Parallel()
+		cmd := setup()
+		if err := cmd.Flags().Set("new-flag", "true"); err != nil {
+			t.Fatalf("failed to set new-flag: %v", err)
+		}
+		if !resolveDeprecatedBoolFlag(cmd, "new-flag", "old-flag") {
+			t.Error("expected true when new flag is set")
+		}
+	})
+
+	t.Run("old flag true returns true", func(t *testing.T) {
+		t.Parallel()
+		cmd := setup()
+		if err := cmd.Flags().Set("old-flag", "true"); err != nil {
+			t.Fatalf("failed to set old-flag: %v", err)
+		}
+		if !resolveDeprecatedBoolFlag(cmd, "new-flag", "old-flag") {
+			t.Error("expected true when deprecated old flag is set")
+		}
+	})
 }

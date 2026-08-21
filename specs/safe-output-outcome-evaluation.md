@@ -3,7 +3,7 @@ title: Safe Output Outcome Evaluation Specification
 version: 1.0.0
 status: Working Draft
 date: 2026-05-15
-last_updated: 2026-05-16
+last_updated: 2026-08-01
 ---
 
 # Safe Output Outcome Evaluation Specification
@@ -19,11 +19,11 @@ Every safe output type has a measurable outcome. This spec defines the exact eva
 
 ## Norms
 
-The key words **MUST**, **MUST NOT**, and **SHOULD** in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+The key words **MUST**, **MUST NOT**, and **SHOULD** in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119). These requirements apply to **outcome evaluation workers** as the primary conformance target unless a different conformance target is explicitly named in the requirement.
 
 1. Outcome evaluation workers **MUST** treat GitHub API `404` responses as terminal for deleted or inaccessible objects and classify according to object semantics (for example, a deleted issue/PR should be `rejected`, while a transient target with no persistent evaluable object should be `ignored`).
 2. Outcome evaluation workers **MUST** treat GitHub API `5xx` responses as transient infrastructure failures and return `pending` for that check cycle while recording retry metadata (`status_code`, `retry_after`, `attempt`).
-3. Outcome evaluation workers **MUST** treat GitHub API rate-limit responses (`403` with limit exhaustion or `429`) as transient and **SHOULD** reschedule evaluation using the reset window before emitting final outcomes.
+3. Outcome evaluation workers **MUST** treat GitHub API rate-limit responses (`403` with limit exhaustion or `429`) as transient. Outcome evaluation workers **SHOULD** reschedule evaluation using the reset window before emitting final outcomes.
 4. Outcome evaluation workers **MUST NOT** emit `accepted` or `rejected` when API failures prevent verification of the authoritative object state.
 
 ## Provenance Limits
@@ -35,6 +35,7 @@ Outcome evaluation is based on observable GitHub state and actor identity, not h
 3. Outcome evaluation workers **MUST NOT** infer hidden AI assistance when GitHub exposes only a normal user identity.
 4. Metrics and fields that use `human_*` names are historical names. In this specification they mean actor-visible, non-bot activity unless explicit provenance metadata is available.
 5. Implementations **SHOULD** prefer explicit provenance markers when available, such as bot identities, GitHub App identities, trace IDs, labels, commit trailers, or other durable metadata emitted by the workflow.
+6. When GitHub surfaces an action under a GitHub App or bot identity (including app-token API writes performed on behalf of a human), outcome evaluation workers **MUST** classify that action as bot/app activity for `human_*` fields unless separate durable provenance metadata explicitly identifies a visible non-bot actor.
 
 ## Outcome Categories
 
@@ -128,14 +129,14 @@ Rows marked `evalGenericSticky` fallback are generic existence checks, not type-
 | `update_pull_request` | implemented | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval_update.go` | `actions/setup/js/update_pull_request.cjs`, `actions/setup/js/evaluate_outcomes.cjs` |
 | `close_issue` | partial | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCloseSticky`) | `actions/setup/js/close_issue.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (`evaluateCloseIssue`) |
 | `close_pull_request` | partial | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCloseSticky`) | `actions/setup/js/close_pull_request.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (`evaluateClosePullRequest`) |
-| `close_discussion` | partial | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCloseDiscussion`) | `actions/setup/js/close_discussion.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
-| `create_discussion` | partial | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCreateDiscussion`) | `actions/setup/js/create_discussion.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
+| `close_discussion` | implemented | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCloseDiscussion`) | `actions/setup/js/close_discussion.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (`evaluateCloseDiscussion`) |
+| `create_discussion` | implemented | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalCreateDiscussion`) | `actions/setup/js/create_discussion.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (`evaluateCreateDiscussion`) |
 | `update_discussion` | partial | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval_workflow.go` (`evalUpdateDiscussion`) | `actions/setup/js/update_discussion.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
 | `create_pull_request_review_comment` | partial | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval.go` (`evalReviewComment`) | `actions/setup/js/create_pr_review_comment.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
 | `submit_pull_request_review` | implemented | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval_review.go` | `actions/setup/js/submit_pr_review.cjs`, `actions/setup/js/evaluate_outcomes.cjs` |
 | `reply_to_pull_request_review_comment` | not-started | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval.go` (`evalGenericSticky` fallback) | `actions/setup/js/reply_to_pr_review_comment.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
 | `resolve_pull_request_review_thread` | partial | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval.go` (`evalResolveThread`) | `actions/setup/js/resolve_pr_review_thread.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
-| `push_to_pull_request_branch` | partial | `pkg/workflow/push_to_pull_request_branch_validation.go`, `pkg/cli/outcome_eval.go` (`evalPushToPRBranch`) | `actions/setup/js/push_to_pull_request_branch.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
+| `push_to_pull_request_branch` | implemented | `pkg/workflow/push_to_pull_request_branch_validation.go`, `pkg/cli/outcome_eval.go` (`evalPushToPRBranch`) | `actions/setup/js/push_to_pull_request_branch.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (`evaluatePushToPullRequestBranchOutcome`) |
 | `mark_pull_request_as_ready_for_review` | partial | `pkg/workflow/safe_outputs_config.go`, `pkg/cli/outcome_eval.go` (`evalMarkReady`) | `actions/setup/js/mark_pull_request_as_ready_for_review.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
 | `assign_to_agent` | partial | `pkg/workflow/safe_outputs_dispatch.go`, `pkg/cli/outcome_eval.go` (`evalAssignToAgent`) | `actions/setup/js/assign_to_agent.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
 | `dispatch_workflow` | partial | `pkg/workflow/dispatch_workflow.go`, `pkg/cli/outcome_eval_workflow.go` (`evalDispatchWorkflow`) | `actions/setup/js/dispatch_workflow.cjs`, `actions/setup/js/evaluate_outcomes.cjs` (generic fallback) |
@@ -669,6 +670,48 @@ No outcome to evaluate. Skip.
 
 No outcome to evaluate. Skip.
 
+## 30. `replace_label`
+
+**Question:** Did the label replacement stick? Specifically: is `label_to_add` present on the item and is `label_to_remove` absent?
+
+**API:** `GET /repos/{owner}/{repo}/issues/{number}/labels`
+
+**Evaluation:**
+
+| Condition | Outcome |
+|-----------|---------|
+| `label_to_add` is present on the item AND `label_to_remove` is absent | `accepted` |
+| `label_to_add` is absent from the item | `rejected` |
+| `label_to_add` is present but `label_to_remove` is also still present | `rejected` (partial failure — remove did not apply) |
+| Item not found (`404`) | `rejected` |
+| API transient failure (`5xx`, timeout, transport error) | `pending` |
+| `lifecycle` | N/A — `replace_label` has no lifecycle bot-close behavior |
+| `lifecycle_close` | N/A — `replace_label` has no lifecycle bot-close behavior |
+| `ignored` | N/A — label state is always evaluable when the item is accessible; no time-bounded engagement signal applies |
+
+**Extra signals:**
+- `label_to_add`: the label name that should be present after the replacement
+- `label_to_remove`: the label name that should be absent after the replacement
+- `zero_touch`: `accepted` and no actor-visible non-bot label changes detected after the replacement
+
+**Additional OTel attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `ghaw.outcome.replace_label.label_to_add` | string | Label that should be present after the replacement |
+| `ghaw.outcome.replace_label.label_to_remove` | string | Label that should be absent after the replacement |
+| `ghaw.outcome.replace_label.add_present` | bool | Whether `label_to_add` is present at evaluation time |
+| `ghaw.outcome.replace_label.remove_absent` | bool | Whether `label_to_remove` is absent at evaluation time |
+
+**API failure safeguards (`replace_label`):**
+
+1. If `GET /repos/{owner}/{repo}/issues/{number}/labels` returns `404`, outcome evaluation workers **MUST** classify as `rejected` because the authoritative labeling target is no longer reachable.
+2. If the API returns `5xx`, timeout, or transport failure, outcome evaluation workers **MUST** classify as `pending`, record retry metadata, and retry without emitting a terminal outcome.
+3. If the API returns rate-limit responses (`403` exhaustion or `429`), outcome evaluation workers **MUST** classify as `pending` and reschedule evaluation using the reset window.
+4. While any transient API failure condition exists, outcome evaluation workers **MUST NOT** emit `accepted` or `rejected` for label replacement state.
+
+**References:** See [replace-label-spec.md](replace-label-spec.md) for the full definition of the `replace_label` safe-output type, including the message schema, processing model, and REST interface.
+
 ---
 
 ## Derived Metrics
@@ -735,6 +778,81 @@ The table below specifies one conformance test row per safe-output type. Each ro
 | `update_release` | `update_release` | Release field(s) (name, body, tag, draft status) match the values the bot submitted at evaluation time | Release field(s) were reverted by a visible non-bot actor, or the release was deleted within the evaluation window |
 | `noop` | `noop` | Evaluation is skipped; no outcome is computed | N/A — `noop` always results in `ignored` |
 | `missing_tool` | `missing_tool` | Evaluation is skipped; no outcome is computed | N/A — `missing_tool` always results in `ignored` |
+| `replace_label` | `replace_label` | `label_to_add` is present on the target item AND `label_to_remove` is absent at evaluation time | `label_to_add` is absent, or `label_to_remove` is still present, or the item was deleted within the evaluation window |
+
+### Sync Follow-ups: Safe-Output Section-to-Test Mapping
+
+| Section | Output type | Compliance test file(s) | Coverage status |
+|---|---|---|---|
+| §1 | `create_pull_request` | `pkg/cli/outcome_eval_formal_test.go` | covered |
+| §2 | `create_issue` | `pkg/cli/outcome_eval_formal_test.go` | covered |
+| §3 | `add_comment` | `pkg/cli/outcome_eval_formal_test.go` | covered |
+| §4 | `add_labels` | `pkg/cli/outcome_eval_formal_test.go`, `pkg/cli/outcome_eval_test.go` | covered |
+| §5 | `add_reviewer` | `pkg/cli/outcome_eval_test.go` | covered |
+| §6 | `update_issue` | `pkg/cli/outcome_eval_update_test.go` | covered |
+| §7 | `update_pull_request` | `pkg/cli/outcome_eval_update_test.go` | covered |
+| §8 | `close_issue` | `pkg/cli/outcome_eval_formal_test.go` | covered |
+| §9 | `close_pull_request` | `pkg/cli/outcome_eval_formal_test.go` | covered |
+| §10 | `close_discussion` | not-started | not-started |
+| §11 | `create_discussion` | not-started | not-started |
+| §12 | `update_discussion` | `pkg/cli/outcome_eval_workflow_test.go` | covered |
+| §13 | `create_pull_request_review_comment` | not-started | not-started |
+| §14 | `submit_pull_request_review` | `pkg/cli/outcome_eval_test.go` | covered |
+| §15 | `reply_to_pull_request_review_comment` | not-started | not-started |
+| §16 | `resolve_pull_request_review_thread` | not-started | not-started |
+| §17 | `push_to_pull_request_branch` | not-started | not-started |
+| §18 | `mark_pull_request_as_ready_for_review` | not-started | not-started |
+| §19 | `assign_to_agent` | not-started | not-started |
+| §20 | `dispatch_workflow` | `pkg/cli/outcome_eval_workflow_test.go` | covered |
+| §21 | `autofix_code_scanning_alert` | not-started | not-started |
+| §22 | `create_code_scanning_alert` | not-started | not-started |
+| §23 | `link_sub_issue` | not-started | not-started |
+| §24 | `hide_comment` | not-started | not-started |
+| §25 | `assign_milestone` | not-started | not-started |
+| §26 | `update_project` | not-started | not-started |
+| §27 | `update_release` | not-started | not-started |
+| §28 | `noop` | `pkg/cli/outcome_eval_test.go` | covered |
+| §29 | `missing_tool` | `pkg/cli/outcome_eval_test.go` | covered |
+| §30 | `replace_label` | `pkg/cli/outcome_eval_update_test.go`, `pkg/workflow/replace_label_formal_test.go` | covered |
+
+### Structure: Safe-Output Section-to-Implementation Mapping
+
+Each numbered safe-output-type section above corresponds to a dedicated configuration/compilation implementation file under `pkg/workflow/`. This mapping is distinct from the Compliance test mapping above; it maps specification sections to the Go source that defines and compiles the output type (shared cross-cutting logic such as `safe_output_handlers.go` and `compiler_safe_outputs_job.go` is omitted for brevity since it applies to all types).
+
+| Section | Output type | Implementation file(s) |
+|---|---|---|
+| §1 | `create_pull_request` | `pkg/workflow/create_pull_request.go` |
+| §2 | `create_issue` | `pkg/workflow/create_issue.go` |
+| §3 | `add_comment` | `pkg/workflow/add_comment.go` |
+| §4 | `add_labels` | `pkg/workflow/add_labels.go` |
+| §5 | `add_reviewer` | `pkg/workflow/add_reviewer.go` |
+| §6 | `update_issue` | `pkg/workflow/update_issue.go` |
+| §7 | `update_pull_request` | `pkg/workflow/update_pull_request.go` |
+| §8 | `close_issue` | `pkg/workflow/close_entity_helpers.go` |
+| §9 | `close_pull_request` | `pkg/workflow/close_entity_helpers.go` |
+| §10 | `close_discussion` | `pkg/workflow/close_entity_helpers.go` |
+| §11 | `create_discussion` | `pkg/workflow/create_discussion.go` |
+| §12 | `update_discussion` | `pkg/workflow/update_discussion.go` |
+| §13 | `create_pull_request_review_comment` | `pkg/workflow/create_pr_review_comment.go` |
+| §14 | `submit_pull_request_review` | `pkg/workflow/submit_pr_review.go` |
+| §15 | `reply_to_pull_request_review_comment` | `pkg/workflow/reply_to_pr_review_comment.go` |
+| §16 | `resolve_pull_request_review_thread` | `pkg/workflow/resolve_pr_review_thread.go` |
+| §17 | `push_to_pull_request_branch` | `pkg/workflow/push_to_pull_request_branch.go`, `pkg/workflow/push_to_pull_request_branch_validation.go` |
+| §18 | `mark_pull_request_as_ready_for_review` | `pkg/workflow/mark_pull_request_as_ready_for_review.go` |
+| §19 | `assign_to_agent` | `pkg/workflow/assign_to_agent.go` |
+| §20 | `dispatch_workflow` | `pkg/workflow/dispatch_workflow.go`, `pkg/workflow/dispatch_workflow_validation.go`, `pkg/workflow/dispatch_workflow_file_resolver.go` |
+| §21 | `autofix_code_scanning_alert` | `pkg/workflow/autofix_code_scanning_alert.go` |
+| §22 | `create_code_scanning_alert` | `pkg/workflow/create_code_scanning_alert.go` |
+| §23 | `link_sub_issue` | `pkg/workflow/link_sub_issue.go` |
+| §24 | `hide_comment` | `pkg/workflow/hide_comment.go` |
+| §25 | `assign_milestone` | `pkg/workflow/assign_milestone.go` |
+| §26 | `update_project` | `pkg/workflow/update_project.go` |
+| §27 | `update_release` | `pkg/workflow/update_release.go` |
+| §28 | `noop` | `pkg/workflow/noop.go` |
+| §29 | `missing_tool` | `pkg/workflow/missing_issue_reporting.go` |
+| §30 | `replace_label` | `pkg/workflow/replace_label.go` |
+
+Sync procedure: when a safe-output type's implementation file is renamed, split, or removed, update the corresponding row in this table in the same change that moves the code.
 
 ### OTel Backend Unavailability
 
@@ -753,3 +871,188 @@ Conformance suites **MUST** include explicit safeguard coverage classes in addit
 3. **Class C (API degradation):** validates `404`, `5xx`, timeout, and rate-limit behaviors, including retry metadata and non-terminal handling.
 
 Every safe-output type **MUST** have at least one Class A test. Types that query GitHub APIs for evaluation **MUST** also include at least one Class C test case.
+
+---
+
+## Formal Model
+
+The outcome evaluation engine is encoded as a state machine with invariants using TLA+, F* pre/post contracts, and Z3/SMT-LIB arithmetic bounds.
+
+**State space** (`OutcomeState`):
+
+```
+OutcomeState ≜ [
+  type       : SafeOutputType,
+  result     : OutcomeResult,
+  evalError  : String ∪ {nil},
+  detail     : String,
+  apiStatus  : Int ∪ {nil},
+  actor      : ActorIdentity,
+  checkTime  : Timestamp
+]
+```
+
+**TLA+ invariants** (one per state-machine guarantee):
+
+```tla
+OutcomeDomain ≜
+  ∀ s ∈ OutcomeState :
+    s.result ∈ {"accepted","rejected","ignored","pending","lifecycle","lifecycle_close"}
+    ∨ s.result ∈ {"unknown","error"}
+
+APIFailureNeverTerminal ≜
+  ∀ s ∈ OutcomeState :
+    (s.apiStatus ∈ {500,502,503,429} ∨ s.apiStatus = 403 ∧ RateLimited(s)) ⟹
+      s.result ≠ "accepted" ∧ s.result ≠ "rejected"
+
+NotFoundClassification ≜
+  ∀ s ∈ OutcomeState :
+    s.apiStatus = 404 ∧ persistent(s.type) ⟹ s.result = "rejected" ∧
+    s.apiStatus = 404 ∧ transient(s.type) ⟹ s.result = "ignored"
+
+BotActorProvenance ≜
+  ∀ actor : ActorIdentity :
+    isBotActor(actor) ↔ HasSuffix(actor.login, "[bot]") ∨ actor.login ∈ KnownBotLogins
+
+PRMergeAcceptance ≜
+  ∀ pr : PullRequest :
+    pr.merged = true                   ⟹ outcome = "accepted" ∧
+    pr.state = "closed" ∧ ¬pr.merged  ⟹ outcome = "rejected" ∧
+    pr.state = "open"                  ⟹ outcome = "pending"
+
+IssueBotCloseLifecycle ≜
+  ∀ issue : Issue :
+    issue.state = "closed" ∧ issue.stateReason = "not_planned" ∧ closedByBot  ⟹ result = "lifecycle" ∧
+    issue.state = "closed" ∧ issue.stateReason = "not_planned" ∧ ¬closedByBot ⟹ result = "rejected" ∧
+    issue.state = "closed" ∧ issue.stateReason = "completed"                   ⟹ result = "accepted"
+
+CloseStickyReopenRejection ≜
+  ∀ item : close_issue ∪ close_pull_request :
+    current.state = "closed" ⟹ result = "accepted" ∧
+    current.state = "open"   ⟹ result = "rejected"
+
+APIErrorNotTerminal ≜
+  ∀ pr : PullRequest, err : APIError :
+    fetch(pr) = err ⟹ outcome = "error"
+
+ZeroTouchRequiresNoReviews ≜
+  ∀ pr : PullRequest :
+    pr.zeroTouch ⟹ pr.outcome = "accepted" ∧
+      pr.humanComments = 0 ∧ pr.humanReviews = 0
+```
+
+**F* pre/post contracts** (selected):
+
+```fstar
+val evaluateWithAPIError :
+  item:CreatedItemReport → err:APIError →
+  Tot OutcomeReport
+  (requires err.status ∈ {500, 502, 503, 429} ∨ RateLimited err)
+  (ensures fun r → r.Result ≠ OutcomeAccepted ∧ r.Result ≠ OutcomeRejected)
+
+val labelRetentionMonotonicity :
+  before:list string → after:list string → current:list string →
+  Tot retainedStateComparison
+  (requires Subset before after)
+  (ensures fun c →
+    Subset after current ⟹ c.Retained ≠ [] ∧
+    ¬Subset after current ⟹ c.Reverted ≠ [] ∨ c.Replaced ≠ [])
+
+val compareUpdateSnapshot :
+  before:state → after:state → current:state → fields:list string →
+  Tot retainedStateComparison
+  (ensures fun c →
+    current = after  ⟹ c.Retained = c.Changed ∧
+    current = before ⟹ c.Reverted = c.Changed ∧
+    current ≠ before ∧ current ≠ after ⟹ c.Replaced = c.Changed)
+
+val evaluateOutcome :
+  item:CreatedItemReport → transportOK:bool →
+  Tot OutcomeReport
+  (requires True)
+  (ensures fun r →
+    r.Type ≠ "" ∧ r.Result ∈ KnownOutcomeResults ∧
+    normalizeOutcomeEvaluation(r).OutcomeStatus ≠ "" ∧
+    normalizeOutcomeEvaluation(r).EvidenceStrength ≠ "")
+```
+
+**Z3/SMT-LIB bounds** (derived metrics zero-safety):
+
+```smt2
+(declare-const accepted Int)
+(declare-const rejected Int)
+(declare-const total    Int)
+(assert (>= accepted 0))
+(assert (>= rejected 0))
+(assert (>= total (+ accepted rejected)))
+(assert (=> (> (+ accepted rejected) 0)
+            (= acceptance_rate (/ accepted (+ accepted rejected)))))
+(assert (=> (> total 0)
+            (= waste_rate (/ rejected total))))
+(assert (=> (= (+ accepted rejected) 0) (= acceptance_rate 0.0)))
+(assert (=> (= total 0) (= waste_rate 0.0)))
+(check-sat) ; sat — formulas are consistent and division-by-zero safe
+```
+
+---
+
+## Behavioral Coverage Map
+
+| Predicate / Invariant | Test Function | Description |
+|---|---|---|
+| `P1` OutcomeDomain | `TestFormalOutcomeDomainInvariant` | All OutcomeResult values are within the six defined strings |
+| `P2` No-Terminal-Under-API-Failure | `TestFormalAPIFailurePending` | 5xx and rate-limit responses yield `pending`/`error`, never `accepted`/`rejected` |
+| `P3` 404-Terminal-Classification | `TestFormal404Classification` | 404 on persistent object → `rejected`; on transient → `ignored` |
+| `P4` Bot-Actor-Provenance | `TestFormalBotActorProvenance` | Bot identity → bot action; user identity → non-bot action |
+| `P5` PR-Merge-Acceptance | `TestFormalPRMergeAcceptance` | merged=true→accepted; closed+!merged→rejected; open→pending |
+| `P6` Issue-Bot-Close-Lifecycle | `TestFormalIssueBotCloseLifecycle` | Bot closes not_planned→lifecycle; human→rejected; completed→accepted |
+| `P7` Label-Stickiness-Monotonicity | `TestFormalLabelStickiness` | All labels retained→accepted; any removal→rejected |
+| `P8` Update-Snapshot-Comparison | `TestFormalUpdateSnapshotComparison` | current=after→accepted; current=before or diverged→rejected |
+| `P9` CloseSticky-Reopen-Rejection | `TestFormalCloseStickyReopenRejection` | Reopened object→rejected; lifecycle bot closed→lifecycle_close |
+| `P10` Derived-Metrics-Consistency | `TestFormalDerivedMetricsConsistency` | acceptance_rate and waste_rate formulas; division-by-zero safety |
+| `P11` OTel-Graceful-Degradation | `TestFormalOTelGracefulDegradation` | OTLP failure still writes audit log; outcome not discarded |
+| `P12` Conformance-Class-Coverage | `TestFormalConformanceClassCoverage` | Class A/C test existence invariant structure |
+| `P14` API-Error-Not-Terminal | `TestFormalAPIErrorNotTerminal` | An authoritative PR fetch error produces `error`, never a terminal outcome |
+| `P15` Zero-Touch-Requires-No-Reviews | `TestFormalZeroTouchRequiresNoReviews` | `zero_touch` requires zero non-bot comments and zero reviews |
+
+`P13` covers the worker's configurable evaluation delay and is intentionally outside this in-process evaluator suite.
+
+---
+
+## Generated Test Suite
+
+The 14 test functions above are implemented in
+`pkg/cli/outcome_eval_formal_test.go` using the Go `testify` library.
+All tests carry the `//go:build !integration` tag so they run in the default
+unit-test suite without any special flags.
+
+Each test function:
+
+- maps to exactly one predicate/invariant in the coverage map above;
+- calls production code directly (no stubs beyond the established `*GHAPIGet` variable pattern);
+- uses `assert`/`require` calls whose failure messages quote the predicate identifier and the violated invariant clause;
+- is independently runnable with `go test -run <TestFunctionName>`.
+
+Run the full formal suite:
+
+```sh
+go test ./pkg/cli/ -run 'TestFormalOutcomeDomainInvariant|TestFormalAPIFailurePending|TestFormal404Classification|TestFormalBotActorProvenance|TestFormalPRMergeAcceptance|TestFormalIssueBotCloseLifecycle|TestFormalLabelStickiness|TestFormalUpdateSnapshotComparison|TestFormalCloseStickyReopenRejection|TestFormalDerivedMetricsConsistency|TestFormalOTelGracefulDegradation|TestFormalConformanceClassCoverage|TestFormalAPIErrorNotTerminal|TestFormalZeroTouchRequiresNoReviews' -v
+```
+
+### Formal Notation Cross-References
+
+| Notation | Predicates | Purpose |
+|---|---|---|
+| TLA+ state-machine invariants | P1, P4, P5, P6, P9 | State transition correctness |
+| F* pre/post contracts | P2, P3, P7, P8, P11, P12 | Function-level contracts |
+| Z3/SMT-LIB arithmetic bounds | P10 | Division-by-zero safety for derived metrics |
+
+---
+
+## Change Log
+
+### Version 1.0.1 (Working Draft, 2026-08-01)
+
+- Clarified provenance-resolution rules for `human_*` metrics when GitHub Apps act on behalf of humans.
+- Added a section-to-test cross-reference table for all 30 safe-output types, marking uncovered rows as `not-started`.
+- See also: `specs/otel-observability-spec.md` §13 (Outcome Evaluation) and §19 (Change Log).

@@ -162,6 +162,13 @@ This section maps individual tools to their respective toolsets to help with mig
 - `create_pull_request` - Create a new pull request
 - `search_pull_requests` - Search pull requests across repositories
 
+When invoking `list_pull_requests` from workflow prompts/templates:
+- Default to a small page size (`perPage: 10` unless a smaller/larger value is justified).
+- On GitHub MCP server ≥ 1.6.0 with the `fields_param` feature (enabled automatically in Insiders mode), pass `fields: [number, title, state, html_url]` (or whichever top-level fields you need) to reduce response size. The same `fields` parameter is available on `list_issues`, `search_issues`, `search_pull_requests`, `list_commits`, `list_releases`, and `search_code`. For `get_file_contents`, `fields` only reduces directory listings; use `fields: [name, type, size, path]` to check file metadata before deciding whether to read a file.
+- Before using `get_file_contents` on a file, list its parent directory with `fields: [name, type, size, path]`. If the file is large or you only need a header/section, use a bounded excerpt such as a raw file URL with an HTTP range or another available ranged-read tool instead of fetching the whole file.
+- On older servers, request `minimal_output: true` when the installed MCP server exposes that input (minimal output trims non-essential nested fields such as large `head`/`base` payloads).
+- Confirm parameter support in the method schema from `mcp list-tools` or the tool docs for your server version.
+
 ### Actions Toolset
 - `list_workflows` - List GitHub Actions workflows
 - `list_workflow_runs` - List workflow runs
@@ -173,7 +180,7 @@ This section maps individual tools to their respective toolsets to help with mig
 - `get_code_scanning_alert` - Get details of a specific alert
 - `create_code_scanning_alert` - Create a code scanning alert
 
-When invoking `list_code_scanning_alerts` from workflow prompts/templates, always include `state: open` and `severity: critical,high`.
+When invoking `list_code_scanning_alerts` from workflow prompts/templates, always include `state: open` and `severity: critical,high` to bound the response size and avoid oversized payloads.
 
 ### Discussions Toolset
 - `list_discussions` - List discussions in a repository

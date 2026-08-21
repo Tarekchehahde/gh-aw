@@ -27,23 +27,21 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: claude
 imports:
   - shared/reporting.md
-  - shared/mcp/arxiv.md
+  # Note: arxiv.md excluded — docker.io/mcp/arxiv-mcp-server has Critical/High CVEs (see #51713)
   - shared/mcp/tavily.md
-  - shared/mcp/microsoft-docs.md
   - shared/mcp/deepwiki.md
-  - shared/mcp/markitdown.md
+  - shared/mcp/microsoft-docs.md
+  # Note: markitdown.md excluded — docker.io/mcp/markitdown has Critical/High CVEs (see #49515)
   - shared/otlp.md
 tools:
   cli-proxy: true
   edit:
   cache-memory: true
+  bash: ["cat", "ls", "find", "grep", "head", "tail", "wc"]
   github:
     mode: gh-proxy
     allowed-repos: all

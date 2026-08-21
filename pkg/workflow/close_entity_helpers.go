@@ -82,8 +82,9 @@ type CloseEntityConfig struct {
 	SafeOutputTargetConfig           `yaml:",inline"`
 	SafeOutputFilterConfig           `yaml:",inline"`
 	SafeOutputDiscussionFilterConfig `yaml:",inline"` // Only used for discussions
-	StateReason                      string           `yaml:"state-reason,omitempty"` // Only used for issues
-	AllowBody                        *bool            `yaml:"allow-body,omitempty"`   // If false, any body provided by the agent is dropped with a warning; close proceeds without a comment
+	StateReason                      string           `yaml:"state-reason,omitempty"`         // Only used for issues. Scalar: fixed reason. Mutually exclusive with AllowedStateReason.
+	AllowedStateReason               []string         `yaml:"allowed-state-reason,omitempty"` // Only used for issues. List: agent selects from this subset.
+	AllowBody                        *bool            `yaml:"allow-body,omitempty"`           // If false, any body provided by the agent is dropped with a warning; close proceeds without a comment
 }
 
 // CloseEntityJobParams holds the parameters needed to build a close entity job
@@ -116,29 +117,84 @@ func (c *Compiler) parseCloseEntityConfig(outputMap map[string]any, params Close
 		return nil
 	}
 
-	config := parseConfigScaffold(outputMap, params.ConfigKey, logger, func(err error) *CloseEntityConfig {
-		logger.Printf("Failed to unmarshal config: %v", err)
-		// For backward compatibility, handle nil/empty config
-		return &CloseEntityConfig{}
-	})
-	if config == nil {
-		return nil
+	// Pre-process state-reason: when the value is a sequence (list) rather than a scalar,
+	// move it to "allowed-state-reason" so it unmarshals into AllowedStateReason []string
+	// instead of the scalar StateReason string field. This supports the list form:
+	//   state-reason: [not_planned, duplicate]
+	if configData != nil {
+		if raw, exists := configData["state-reason"]; exists {
+			if preprocessStateReasonList(configData, raw, logger) {
+				logger.Printf("state-reason list form detected for %s; moved to allowed-state-reason", params.ConfigKey)
+			}
+		}
 	}
 
-	// Set default max if not specified
-	if config.Max == nil {
-		config.Max = defaultIntStr(1)
-		logger.Printf("Set default max to 1 for %s", params.ConfigKey)
-	}
+	config := parseConfigScaffoldWithPostProcess(outputMap, params.ConfigKey, logger,
+		func(err error) *CloseEntityConfig {
+			logger.Printf("Failed to unmarshal config: %v", err)
+			// For backward compatibility, handle nil/empty config
+			return &CloseEntityConfig{}
+		},
+		func(config *CloseEntityConfig) {
+			// Set default max if not specified
+			if config.Max == nil {
+				config.Max = defaultIntStr(1)
+				logger.Printf("Set default max to 1 for %s", params.ConfigKey)
+			}
 
-	// Backward compatibility: map deprecated title-prefix to required-title-prefix.
-	if config.RequiredTitlePrefix == "" && config.TitlePrefix != "" {
-		config.RequiredTitlePrefix = config.TitlePrefix
-	}
+			// Backward compatibility: map deprecated title-prefix to required-title-prefix.
+			if config.RequiredTitlePrefix == "" && config.TitlePrefix != "" {
+				config.RequiredTitlePrefix = config.TitlePrefix
+			}
 
-	logger.Printf("Parsed %s configuration: max=%s, target=%s", params.ConfigKey, *config.Max, config.Target)
+			logger.Printf("Parsed %s configuration: max=%s, target=%s", params.ConfigKey, *config.Max, config.Target)
+		})
 
 	return config
+}
+
+// preprocessStateReasonList converts a list-form state-reason value into the allowed-state-reason key.
+// Returns true if the value was a non-empty list and was successfully converted.
+// Returns false and leaves configData unchanged when the value is not a list or when no valid
+// string elements are found — the latter prevents a silent escalation to unrestricted (omitted) mode.
+func preprocessStateReasonList(configData map[string]any, raw any, logger *logger.Logger) bool {
+	switch v := raw.(type) {
+	case []any:
+		reasons := make([]string, 0, len(v))
+		for _, elem := range v {
+			s, ok := elem.(string)
+			if !ok {
+				if logger != nil {
+					logger.Printf("state-reason list contains non-string element %T; ignoring", elem)
+				}
+				continue
+			}
+			reasons = append(reasons, s)
+		}
+		if len(reasons) == 0 {
+			// No usable strings found; leave configData unchanged so downstream validation
+			// reports an error rather than silently granting unrestricted reason selection.
+			if logger != nil {
+				logger.Printf("state-reason list has no valid string elements; treating as invalid")
+			}
+			return false
+		}
+		configData["allowed-state-reason"] = reasons
+		delete(configData, "state-reason")
+		return true
+	case []string:
+		if len(v) == 0 {
+			// Empty explicit slice; leave configData unchanged for the same reason as above.
+			if logger != nil {
+				logger.Printf("state-reason list is empty; treating as invalid")
+			}
+			return false
+		}
+		configData["allowed-state-reason"] = v
+		delete(configData, "state-reason")
+		return true
+	}
+	return false
 }
 
 // closeEntityDefinition holds all parameters for a close entity type
@@ -156,6 +212,10 @@ type closeEntityDefinition struct {
 	Logger           *logger.Logger
 }
 
+var logCloseIssue = logger.New("workflow:close_issue")
+var logClosePullRequest = logger.New("workflow:close_pull_request")
+var logCloseDiscussion = logger.New("workflow:close_discussion")
+
 // closeEntityRegistry holds all close entity definitions
 var closeEntityRegistry = []closeEntityDefinition{
 	{
@@ -169,7 +229,7 @@ var closeEntityRegistry = []closeEntityDefinition{
 		EventNumberPath1: "github.event.issue.number",
 		EventNumberPath2: "github.event.comment.issue.number",
 		PermissionsFunc:  NewPermissionsContentsReadIssuesWrite,
-		Logger:           logger.New("workflow:close_issue"),
+		Logger:           logCloseIssue,
 	},
 	{
 		EntityType:       CloseEntityPullRequest,
@@ -182,7 +242,7 @@ var closeEntityRegistry = []closeEntityDefinition{
 		EventNumberPath1: "github.event.pull_request.number",
 		EventNumberPath2: "github.event.comment.pull_request.number",
 		PermissionsFunc:  NewPermissionsContentsReadPRWrite,
-		Logger:           logger.New("workflow:close_pull_request"),
+		Logger:           logClosePullRequest,
 	},
 	{
 		EntityType:       CloseEntityDiscussion,
@@ -195,7 +255,7 @@ var closeEntityRegistry = []closeEntityDefinition{
 		EventNumberPath1: "github.event.discussion.number",
 		EventNumberPath2: "github.event.comment.discussion.number",
 		PermissionsFunc:  NewPermissionsContentsReadDiscussionsWrite,
-		Logger:           logger.New("workflow:close_discussion"),
+		Logger:           logCloseDiscussion,
 	},
 }
 

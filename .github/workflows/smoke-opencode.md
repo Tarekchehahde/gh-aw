@@ -18,15 +18,17 @@ permissions:
   issues: read
   pull-requests: read
 name: Smoke OpenCode
+model: copilot/claude-sonnet-4.5
 engine:
   id: opencode
-  model: copilot/gpt-5
 strict: true
 imports:
+  - shared/opencode.md
   - shared/gh.md
   - shared/reporting-otlp.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
 network:
   allowed:
     - defaults
@@ -59,14 +61,12 @@ safe-outputs:
 timeout-minutes: 10
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    id: awf
 ---
 
 # Smoke Test: OpenCode Engine Validation
-
-**CRITICAL EFFICIENCY REQUIREMENTS:**
-- Keep ALL outputs extremely short and concise. Use single-line responses.
-- NO verbose explanations or unnecessary context.
-- Minimize file reading - only read what is absolutely necessary for the task.
 
 ## Test Requirements
 

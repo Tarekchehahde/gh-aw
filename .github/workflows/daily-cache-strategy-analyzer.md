@@ -14,9 +14,9 @@ permissions:
   pull-requests: read
   discussions: read
 tracker-id: daily-cache-strategy-analyzer
+model: "${{ needs.activation.outputs.model_size }}"
 engine:
   id: codex
-  model: "${{ needs.activation.outputs.model_size }}"
 strict: true
 experiments:
   model_size:
@@ -39,9 +39,13 @@ network:
     - "api.github.com"
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cache-memory: true
+  cli-proxy: true
+  github:
+    mode: gh-proxy
 safe-outputs:
   create-issue:
     expires: 7d
@@ -57,6 +61,7 @@ safe-outputs:
     close-older-discussions: true
 timeout-minutes: 60
 imports:
+  - uses: shared/aw-logs-24h-fetch-setup.md
   - uses: shared/meta-analysis-base.md
     with:
       toolsets: [default, actions]
@@ -64,7 +69,13 @@ imports:
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: cache_logs_analyzed
+    question: Did the agent analyze agentic workflow logs for cache misses and misconfigured caches?
+  - id: issue_created_or_noop
+    question: Was an issue created for cache problems or improvements, or was noop used when no problems were found?
 ---
+
 {{#runtime-import? .github/shared-instructions.md}}
 
 # Daily Cache Strategy Analyzer
@@ -123,19 +134,9 @@ fi
 
 ## Phase 1: Download Recent Workflow Logs
 
-Use the `agentic-workflows` MCP `logs` tool to fetch logs from the last 24 hours.
+{{#runtime-import? shared/aw-logs-24h-fetch-prompt.md}}
 
-**Tool**: `logs`
-**Parameters**:
-```json
-{
-  "count": 200,
-  "start_date": "-1d",
-  "parse": true
-}
-```
-
-Logs are saved to `/tmp/gh-aw/aw-mcp/logs/`. Each run directory contains:
+Logs are available in `/tmp/gh-aw/aw-mcp/logs/`. Each run directory contains:
 
 ```
 /tmp/gh-aw/aw-mcp/logs/run-<id>/
@@ -146,44 +147,20 @@ Logs are saved to `/tmp/gh-aw/aw-mcp/logs/`. Each run directory contains:
 
 ---
 
-## Phase 2: Detect Cache Miss Signals
+## Phase 2: Detect Cache Issues
 
 **Only process runs where `uses_cache_memory` is `true`.** Skip any run whose `aw_info.json` does not declare `cache-memory`.
 
-### 2.1 Check Whether the Workflow Uses cache-memory
-
-Read `aw_info.json` and filter to cache-memory workflows only:
+For each run directory, read `aw_info.json` to filter to cache-memory workflows, then scan agent logs for issues:
 
 ```bash
 for run_dir in /tmp/gh-aw/aw-mcp/logs/run-*/; do
   info="$run_dir/aw_info.json"
   [ -f "$info" ] || continue
   workflow=$(jq -r '.workflow_name // .workflow // "unknown"' "$info")
-  uses_cache=$(jq -r 'if .tools.cache_memory or (.tools | to_entries[] | select(.key | test("cache.memory"; "i"))) then "yes" else "no" end' "$info" 2>/dev/null || echo "no")
-  # Skip workflows that do not use cache-memory
+  uses_cache=$(jq -r 'if .cache_memory then "yes" else "no" end' "$info" 2>/dev/null || echo "no")
   [ "$uses_cache" = "yes" ] || continue
-  echo "$workflow uses_cache=$uses_cache run=$(basename $run_dir)"
-done
-```
-
-### 2.2 Detect Cache Miss Patterns
-
-A **cache miss** is indicated by any of the following signals found in the agent logs:
-
-| Signal | Log Pattern |
-|--------|-------------|
-| Cache directory created fresh | `mkdir -p.*cache-memory` followed by no subsequent `ls` showing existing files |
-| Explicit miss log | `Cache miss`, `cache not found`, `Initializing new cache`, `no cache found` |
-| Full re-computation | Workflow re-runs identical expensive operations (API calls, builds, heavy analysis) without referencing cached results |
-| Cache key mismatch | Log lines mentioning stale or incompatible cache keys |
-| Empty cache hit | Cache directory exists but all files are `{}` or `[]` on read |
-
-Scan agent logs:
-
-```bash
-for run_dir in /tmp/gh-aw/aw-mcp/logs/run-*/; do
-  workflow=$(jq -r '.workflow_name // .workflow // "unknown"' "$run_dir/aw_info.json" 2>/dev/null)
-  # Search agent logs for cache miss signals
+  # Scan for cache miss signals
   grep -ri --include="*.log" --include="*.txt" \
     -e "cache miss" -e "cache not found" -e "Initializing new cache" \
     -e "no cache found" -e "mkdir -p.*cache-memory" \
@@ -191,17 +168,25 @@ for run_dir in /tmp/gh-aw/aw-mcp/logs/run-*/; do
 done
 ```
 
-### 2.3 Detect Misconfigured Caches
+**Cache miss signals** (any of these in agent logs):
 
-A **misconfigured cache** occurs when a workflow declares `cache-memory: true` but:
+| Signal | Log Pattern |
+|--------|-------------|
+| Cache directory created fresh | `mkdir -p.*cache-memory` followed by no `ls` showing existing files |
+| Explicit miss log | `Cache miss`, `cache not found`, `Initializing new cache`, `no cache found` |
+| Full re-computation | Workflow re-runs identical expensive operations without referencing cached results |
+| Cache key mismatch | Log lines mentioning stale or incompatible cache keys |
+| Empty cache hit | Cache directory exists but all files are `{}` or `[]` on read |
 
-- Uses a volatile or run-specific cache key (e.g., includes `${{ github.run_id }}`) **without any restore-key fallbacks**, making each run start cold with no way to retrieve prior state
-  > **Note — "last one wins" pattern**: A cache key of `<prefix>-${{ github.run_id }}` combined with a restore key of `<prefix>-` is a **valid and intentional** design. Each run saves its state under a unique key to avoid collisions, while the restore key falls back to the most recent previous entry — achieving "last write wins" without stale data. Only flag `run_id` keys as misconfigured when there are **no restore-key fallbacks**.
-- Never actually writes to `/tmp/gh-aw/cache-memory/` (writes nothing useful to persist)
-- Reads stale data (cache was last updated more than N days ago based on timestamps in the JSON files)
-- Overwrites its own history on every run (no incremental append, just full replace of the same small payload)
+**Misconfigured cache** — workflow declares `cache-memory: true` but:
 
-Check for these in `aw_info.json` cache-memory configuration and in the agent output logs.
+- Uses a volatile cache key with `${{ github.run_id }}` **and no restore-key fallbacks** (guaranteed cold start every run)
+  > **Note — "last one wins" pattern**: `<prefix>-${{ github.run_id }}` + restore key `<prefix>-` is valid. Only flag `run_id` keys as misconfigured when there are **no restore-key fallbacks**.
+- Never writes to `/tmp/gh-aw/cache-memory/` (tool does nothing useful)
+- Reads stale data without checking timestamps
+- Overwrites history on every run (full replace instead of incremental append)
+
+Check `aw_info.json` cache-memory configuration and agent output logs for these patterns.
 
 ---
 
@@ -267,55 +252,7 @@ For each finding that meets the threshold AND for which no open issue already ex
 
 ### Issue Template
 
-**Title**: `[cache-strategy] Fix cache miss in <workflow-name>`
-
-**Body**:
-
-```markdown
-### Cache Strategy Problem: <workflow-name>
-
-**Severity**: 🔴 Critical / 🟠 High / 🟡 Medium
-
-**Workflow**: `<workflow-name>`  
-**Analysis Date**: YYYY-MM-DD  
-**Issue Type**: Cache miss / Misconfigured cache
-
----
-
-### Problem Description
-
-<2-3 sentences describing the specific cache issue observed, with evidence from logs>
-
-### Evidence
-
-- **Miss streak**: N consecutive days
-- **Miss rate (14d)**: X%
-- **Last cache hit**: YYYY-MM-DD (or "never")
-- **Log signals**: `<example log line>`
-
-### Recommended Fix
-
-<Specific, actionable recommendation. For example:>
-
-1. **Add restore-key fallback or use a stable key** — The workflow uses `${{ github.run_id }}` in the cache key without restore-keys, so every run starts cold. Either add a restore-key (e.g., `<prefix>-`) so the most recent prior state is always retrieved, or replace the key with a stable identifier such as the workflow name or a hash of relevant input files.
-2. **Persist meaningful state** — Ensure the workflow writes structured data to `/tmp/gh-aw/cache-memory/<workflow>/` that the next run can actually reuse.
-3. **Add hash-based invalidation** — Compare git commit hashes or file modification timestamps before re-running expensive operations.
-
-### Expected Impact
-
-If fixed, this workflow should avoid re-running expensive operations on N% of future runs, reducing agent time and token usage.
-
----
-*Detected by the [Daily Cache Strategy Analyzer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*
-```
-
-After creating each issue, record it in `known-issues.json`:
-
-```json
-{
-  "[cache-strategy] Fix cache miss in my-workflow": 1234
-}
-```
+Use the `cache-strategy-issue-template` skill for the issue title, body structure, and `known-issues.json` recording format. After creating each issue, record it in `known-issues.json` with the title as key and issue number as value.
 
 ---
 
@@ -323,85 +260,7 @@ After creating each issue, record it in `known-issues.json`:
 
 Create a discussion summarizing today's analysis. Use the `create-discussion` safe-output tool.
 
-**Title**: `[cache-strategy] Cache Strategy Analysis - YYYY-MM-DD`
-
-**Body**:
-
-```markdown
-### Cache Strategy Analysis Report
-
-**Date**: YYYY-MM-DD  
-**Runs Analyzed**: N  
-**Workflows with cache-memory**: N
-
----
-
-### Executive Summary
-
-<2–3 paragraph summary of overall cache health, key findings, and any issues created.>
-
----
-
-### Findings
-
-<details>
-<summary>🔴 Critical Issues</summary>
-
-| Workflow | Miss Streak | Miss Rate (14d) | Root Cause | Issue |
-|----------|------------|-----------------|------------|-------|
-| ... | N days | X% | ... | #N |
-
-</details>
-
-<details>
-<summary>🟠 High Priority</summary>
-
-| Workflow | Miss Streak | Miss Rate (14d) | Root Cause | Issue |
-|----------|------------|-----------------|------------|-------|
-| ... | N days | X% | ... | #N |
-
-</details>
-
-<details>
-<summary>🟡 Medium Priority</summary>
-
-| Workflow | Miss Streak | Miss Rate (14d) | Root Cause |
-|----------|------------|-----------------|------------|
-| ... | N days | X% | ... |
-
-</details>
-
----
-
-### Healthy Workflows
-
-These workflows use cache-memory correctly and had consistent cache hits:
-
-| Workflow | Cache Hit Rate (14d) | Last Miss |
-|----------|---------------------|-----------|
-| ... | X% | YYYY-MM-DD |
-
----
-
-### Issues Created Today
-
-<List of issues created, with links. If none: "No new issues created — all problems are already tracked or below threshold.">
-
----
-
-<details>
-<summary>💾 Cache Memory Summary</summary>
-
-- **Total workflows tracked**: N
-- **Runs recorded (last 30d)**: N
-- **Cache memory location**: `/tmp/gh-aw/cache-memory/cache-strategy/`
-- **Next pruning date**: YYYY-MM-DD (records older than 30d removed)
-
-</details>
-
----
-*Report generated by the [Daily Cache Strategy Analyzer](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
-```
+Use the `cache-strategy-discussion-template` skill for the discussion title and body format when generating the report.
 
 ---
 
@@ -457,3 +316,143 @@ A successful run:
 - ✅ Creates up to 5 GitHub issues for Critical/High findings not already tracked
 - ✅ Creates a discussion summarizing all findings
 - ✅ Avoids duplicate issues by checking `known-issues.json`
+
+## skill: `cache-strategy-issue-template`
+---
+description: Issue title, body structure, and known-issues recording format for cache-strategy findings.
+---
+
+**Title**: `[cache-strategy] Fix cache miss in <workflow-name>`
+
+**Body**:
+
+```markdown
+### Cache Strategy Problem: <workflow-name>
+
+**Severity**: 🔴 Critical / 🟠 High / 🟡 Medium
+
+**Workflow**: `<workflow-name>`  
+**Analysis Date**: YYYY-MM-DD  
+**Issue Type**: Cache miss / Misconfigured cache
+
+---
+
+### Problem Description
+
+<2-3 sentences describing the specific cache issue observed, with evidence from logs>
+
+### Evidence
+
+- **Miss streak**: N consecutive days
+- **Miss rate (14d)**: X%
+- **Last cache hit**: YYYY-MM-DD (or "never")
+- **Log signals**: `<example log line>`
+
+### Recommended Fix
+
+<Specific, actionable recommendation. For example:>
+
+1. **Add restore-key fallback or use a stable key** — The workflow uses `${{ github.run_id }}` in the cache key without restore-keys, so every run starts cold. Either add a restore-key (e.g., `<prefix>-`) so the most recent prior state is always retrieved, or replace the key with a stable identifier such as the workflow name or a hash of relevant input files.
+2. **Persist meaningful state** — Ensure the workflow writes structured data to `/tmp/gh-aw/cache-memory/<workflow>/` that the next run can actually reuse.
+3. **Add hash-based invalidation** — Compare git commit hashes or file modification timestamps before re-running expensive operations.
+
+### Expected Impact
+
+If fixed, this workflow should avoid re-running expensive operations on N% of future runs, reducing agent time and token usage.
+
+---
+*Detected by the [Daily Cache Strategy Analyzer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+```
+
+After creating each issue, record it in `known-issues.json`:
+
+```json
+{
+  "[cache-strategy] Fix cache miss in my-workflow": 1234
+}
+```
+
+## skill: `cache-strategy-discussion-template`
+---
+description: Discussion title and body structure for the daily cache strategy analysis report.
+---
+
+**Title**: `[cache-strategy] Cache Strategy Analysis - YYYY-MM-DD`
+
+**Body**:
+
+```markdown
+### Cache Strategy Analysis Report
+
+**Date**: YYYY-MM-DD  
+**Runs Analyzed**: N  
+**Workflows with cache-memory**: N
+
+---
+
+### Executive Summary
+
+<2–3 paragraph summary of overall cache health, key findings, and any issues created.>
+
+---
+
+### Findings
+
+Use the table format below for each severity group:
+
+| Severity | Workflow | Miss Streak | Miss Rate (14d) | Root Cause | Issue |
+|----------|----------|------------:|----------------:|------------|-------|
+| 🔴/🟠/🟡 | ... | N days | X% | ... | #N or n/a |
+
+<details>
+<summary>🔴 Critical Issues</summary>
+
+<List critical rows only>
+
+</details>
+
+<details>
+<summary>🟠 High Priority</summary>
+
+<List high-priority rows only>
+
+</details>
+
+<details>
+<summary>🟡 Medium Priority</summary>
+
+<List medium-priority rows only>
+
+</details>
+
+---
+
+### Healthy Workflows
+
+These workflows use cache-memory correctly and had consistent cache hits:
+
+| Workflow | Cache Hit Rate (14d) | Last Miss |
+|----------|---------------------|-----------|
+| ... | X% | YYYY-MM-DD |
+
+---
+
+### Issues Created Today
+
+<List of issues created, with links. If none: "No new issues created — all problems are already tracked or below threshold.">
+
+---
+
+<details>
+<summary>💾 Cache Memory Summary</summary>
+
+- **Total workflows tracked**: N
+- **Runs recorded (last 30d)**: N
+- **Cache memory location**: `/tmp/gh-aw/cache-memory/cache-strategy/`
+- **Next pruning date**: YYYY-MM-DD (records older than 30d removed)
+
+</details>
+
+---
+*Report generated by the [Daily Cache Strategy Analyzer](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+```

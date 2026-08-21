@@ -15,6 +15,7 @@ network:
   - github
 imports:
 - shared/github-guard-policy.md
+- shared/ai-coding-dictionary.md
 - shared/otlp.md
 safe-outputs:
   create-pull-request:
@@ -31,9 +32,9 @@ safe-outputs:
   noop: null
 description: Automatically reviews and updates documentation to ensure accuracy and completeness
 emoji: 📝
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 name: Daily Documentation Updater
 strict: true
 experiments:
@@ -54,16 +55,11 @@ experiments:
 timeout-minutes: 45
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   bash:
-  - find docs -name "*.md" -o -name "*.mdx"
-  - find docs -maxdepth 1 -ls
-  - find docs -name "*.md" -exec cat {} +
-  - grep -r "*" docs
-  - git
-  - find pkg/parser/schemas -name "*.json"
-  - cat pkg/parser/schemas/*.json
+  - "*"
   cache-memory: true
   cli-proxy: true
   edit: null
@@ -75,7 +71,13 @@ tools:
 tracker-id: daily-doc-updater
 features:
   gh-aw-detection: true
+evals:
+  - id: docs_reviewed
+    question: Did the agent review documentation and identify whether updates are needed based on recent code changes?
+  - id: pr_created_or_noop
+    question: Was a documentation pull request created with updates, or was noop used when no documentation changes were required?
 ---
+
 {{#runtime-import? .github/shared-instructions.md}}
 
 # Daily Documentation Updater
@@ -92,6 +94,7 @@ Scan the repository for merged pull requests and code changes from the last 24 h
 - **GitHub data (detailed reads)**: use GitHub MCP tools (`search_pull_requests`, `pull_request_read`, `list_commits`, `get_commit`) for per-item detail lookups in Task Steps
 - **Do NOT** use `mcpscripts` for any GitHub reads — use `gh` CLI or GitHub MCP tools directly
 - **Documentation editing**: use the `Edit` tool, not bash `sed`
+- **AI terminology normalization**: use the shared AI Coding Dictionary reference to keep AI-coding terms consistent
 
 ## Pre-flight: Batch Data Fetch (do this first, before any analysis)
 
@@ -366,6 +369,7 @@ When calling `noop`, use this format:
 - **Validate Examples**: YAML frontmatter examples in docs must be structurally valid. When in doubt, test with `gh aw compile`.
 - **Default-value awareness for engine examples**: `engine: copilot` is the default and is redundant when `copilot` is the intended engine (omitting it produces identical behaviour). When normalizing engine examples, prefer *removing* the redundant `engine: copilot` line over duplicating workflow blocks with alternative engine values. This keeps examples engine-agnostic by default, reduces unnecessary doc size, and aligns with the `unbloat-docs` effort.
 - **`unbloat-docs` guardrail**: Example-coverage fixes **must not** duplicate large workflow blocks. Prefer `<Tabs>` for multi-engine illustration only where the engine choice is genuinely instructive to the reader; otherwise omit the redundant `engine:` line rather than adding parallel copies.
+- **Experimental engine exemption for `engines.md`**: The `docs/src/content/docs/reference/engines.md` table is a curated GA reference. An engine registered in `pkg/workflow/` (e.g., `NewXxxEngine()` wired into `NewEngineRegistry()`) but absent from `engines.md` is **not automatically a documentation gap** if that engine has `experimental: true` in its `BaseEngine` initializer. Before creating a PR to add an engine to `engines.md`, verify with `grep -n "experimental" pkg/workflow/<engine>_engine.go`. If the engine is experimental and not yet listed, omit it — the absence is intentional. Only add an engine to `engines.md` if it is explicitly GA (non-experimental) or if a maintainer has requested its inclusion.
 
 ## Important Notes
 

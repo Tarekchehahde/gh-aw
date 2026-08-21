@@ -37,9 +37,9 @@ safe-outputs:
   noop: null
 description: Self-healing companion to the Daily Documentation Updater that detects documentation gaps missed by DDUw and proposes corrections
 emoji: 📝
+model: "${{ needs.activation.outputs.model_size }}"
 engine:
   id: claude
-  model: "${{ needs.activation.outputs.model_size }}"
 name: Daily Documentation Healer
 strict: true
 experiments:
@@ -78,8 +78,15 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
+evals:
+  - id: gaps-confirmed
+    question: Did the workflow identify at least one confirmed documentation gap to fix, or correctly conclude that no actionable gap remained?
+  - id: pr-issue-or-noop
+    question: Was a documentation pull request or issue created for confirmed gaps, or was noop used appropriately when nothing required action?
 ---
+
 {{#runtime-import? .github/shared-instructions.md}}
 
 # Daily Documentation Healer
@@ -171,6 +178,14 @@ b. **Also check that the corresponding job builder is not a no-op stub**. If the
 c. If the constant exists but the artifact is **not** produced by any workflow (no match in lock.yml files or JS helpers, or the job builder is a no-op stub), **skip it** — it is a forward-declared constant for an unimplemented feature, not a documentation gap.
 
 d. Only if the artifact **is** produced, verify that the artifact name value is listed in `docs/src/content/docs/reference/artifacts.md`. If a confirmed-produced artifact is missing from the reference page, treat it as a documentation gap and add it.
+
+6. **Experimental engine exemption**: If the issue concerns a registered engine that is absent from `docs/src/content/docs/reference/engines.md`, verify whether that engine is experimental before treating it as a documentation gap:
+
+```bash
+grep -n "experimental\s*:" pkg/workflow/<engine>_engine.go
+```
+
+If the engine's Go source sets `experimental: true` (in its `BaseEngine` initializer) **and** the engine does not already appear in `engines.md`, the omission is **intentional** — experimental engines may be deliberately held back from the curated reference table until they reach GA. Do **not** create or re-file documentation drift issues for such engines; treat this as a resolved exemption and skip the issue.
 
 Only proceed with issues where you can confirm the documentation gap still exists.
 
@@ -311,5 +326,7 @@ Call `noop` with a summary:
 - **Exit cleanly**: Always call exactly one safe-output tool before finishing (`create_pull_request`, `create_issue`, or `noop`).
 
 ### Output Format
+
+Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body. Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks for progressive disclosure.
 
 Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

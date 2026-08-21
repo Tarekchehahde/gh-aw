@@ -7,6 +7,7 @@ import * as path from "path";
 import * as os from "os";
 
 const require = createRequire(import.meta.url);
+const promptsSourceDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md");
 
 const { getPatchPathForBranch, getPatchPathForBranchInRepo } = require("./git_patch_utils.cjs");
 const { getBundlePathForBranch, getBundlePathForBranchInRepo } = require("./generate_git_bundle.cjs");
@@ -41,8 +42,20 @@ function cleanupCanonicalTransports() {
   createdTransportPaths.clear();
 }
 
+function copyPromptTemplate(promptsDir, templateName) {
+  fs.copyFileSync(path.join(promptsSourceDir, templateName), path.join(promptsDir, templateName));
+}
+
+function ensureDefaultDisclosureHeaderPrompt() {
+  const promptsDir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), "gh-aw", "prompts");
+  fs.mkdirSync(promptsDir, { recursive: true });
+  copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
+}
+
 beforeEach(() => {
   cleanupCanonicalTransports();
+  ensureDefaultDisclosureHeaderPrompt();
+  process.env.GH_AW_PROMPTS_DIR = promptsSourceDir;
 });
 afterEach(() => {
   cleanupCanonicalTransports();
@@ -172,6 +185,194 @@ describe("create_pull_request - draft policy enforcement", () => {
     await handler({ title: "Test PR", body: "Test body" }, {});
 
     expect(getDraftOverrideWarnings()).toHaveLength(0);
+  });
+});
+
+describe("parseAutoMergeConfig unit tests", () => {
+  let warnSpy;
+
+  beforeEach(() => {
+    global.core = {
+      warning: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+    warnSpy = global.core.warning;
+  });
+
+  afterEach(() => {
+    delete global.core;
+    vi.clearAllMocks();
+    delete require.cache[require.resolve("./create_pull_request.cjs")];
+  });
+
+  it("treats boolean true as enabled with SQUASH method", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig(true)).toEqual({ enabled: true, mergeMethod: "SQUASH" });
+  });
+
+  it('treats string "true" as enabled with SQUASH method', () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("true")).toEqual({ enabled: true, mergeMethod: "SQUASH" });
+  });
+
+  it("treats boolean false as disabled", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig(false)).toEqual({ enabled: false });
+  });
+
+  it('treats string "false" as disabled', () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("false")).toEqual({ enabled: false });
+  });
+
+  it("treats null as disabled", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig(null)).toEqual({ enabled: false });
+  });
+
+  it("treats undefined as disabled", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig(undefined)).toEqual({ enabled: false });
+  });
+
+  it('treats "squash" as enabled with SQUASH method', () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("squash")).toEqual({ enabled: true, mergeMethod: "SQUASH" });
+  });
+
+  it('treats "merge" as enabled with MERGE method', () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("merge")).toEqual({ enabled: true, mergeMethod: "MERGE" });
+  });
+
+  it('treats "rebase" as enabled with REBASE method', () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("rebase")).toEqual({ enabled: true, mergeMethod: "REBASE" });
+  });
+
+  it("warns and disables auto-merge for an unrecognized string", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("sqaush")).toEqual({ enabled: false });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unrecognized auto-merge value"));
+  });
+
+  it("does not warn for empty string (treated as disabled)", () => {
+    const { parseAutoMergeConfig } = require("./create_pull_request.cjs");
+    expect(parseAutoMergeConfig("")).toEqual({ enabled: false });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("create_pull_request - auto-merge configuration", () => {
+  let originalEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    process.env.GH_AW_WORKFLOW_ID = "test-workflow";
+    process.env.GITHUB_REPOSITORY = "test-owner/test-repo";
+    process.env.GITHUB_BASE_REF = "main";
+
+    global.core = {
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      setFailed: vi.fn(),
+      setOutput: vi.fn(),
+      startGroup: vi.fn(),
+      endGroup: vi.fn(),
+      summary: {
+        addRaw: vi.fn().mockReturnThis(),
+        write: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    global.github = {
+      rest: {
+        pulls: {
+          create: vi.fn().mockResolvedValue({
+            data: {
+              number: 1,
+              node_id: "PR_node_id",
+              html_url: "https://github.com/test-owner/test-repo/pull/1",
+              head: { sha: "abc123" },
+            },
+          }),
+          createReview: vi.fn().mockResolvedValue({ data: { id: 77 } }),
+        },
+        repos: {
+          get: vi.fn().mockResolvedValue({ data: { default_branch: "main" } }),
+        },
+        issues: {
+          addLabels: vi.fn().mockResolvedValue({}),
+          addAssignees: vi.fn().mockResolvedValue({}),
+        },
+      },
+      graphql: vi.fn().mockResolvedValue({ enablePullRequestAutoMerge: { pullRequest: { id: "PR_node_id" } } }),
+    };
+    global.context = {
+      eventName: "workflow_dispatch",
+      repo: { owner: "test-owner", repo: "test-repo" },
+      payload: {},
+    };
+    global.exec = {
+      exec: vi.fn().mockResolvedValue(0),
+      getExecOutput: vi.fn().mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" }),
+    };
+
+    delete require.cache[require.resolve("./create_pull_request.cjs")];
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+
+    delete global.core;
+    delete global.github;
+    delete global.context;
+    delete global.exec;
+    vi.clearAllMocks();
+  });
+
+  it("passes an explicit auto-merge method to GraphQL", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ auto_merge: "rebase", allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(global.github.graphql).toHaveBeenCalledWith(expect.stringContaining("enablePullRequestAutoMerge"), {
+      prId: "PR_node_id",
+      mergeMethod: "REBASE",
+    });
+  });
+
+  it("defaults to SQUASH when auto-merge is boolean true", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ auto_merge: true, allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(global.github.graphql).toHaveBeenCalledWith(expect.stringContaining("enablePullRequestAutoMerge"), {
+      prId: "PR_node_id",
+      mergeMethod: "SQUASH",
+    });
+  });
+
+  it("warns and disables auto-merge for unrecognized values", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ auto_merge: "sqaush", allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Unrecognized auto-merge value"));
+    expect(global.github.graphql).not.toHaveBeenCalledWith(expect.stringContaining("enablePullRequestAutoMerge"), expect.anything());
   });
 });
 
@@ -1674,12 +1875,10 @@ describe("create_pull_request - allowed-files strict allowlist", () => {
     pushSignedSpy = vi.spyOn(pushSignedCommitsModule, "pushSignedCommits").mockResolvedValue("bundle-tip");
     const promptsDir = path.join(tempDir, "prompts");
     fs.mkdirSync(promptsDir, { recursive: true });
-    const requestReviewTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_request_review.md");
-    fs.copyFileSync(requestReviewTemplateSrc, path.join(promptsDir, "manifest_protection_request_review.md"));
-    const requestChangesTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_request_changes_review.md");
-    fs.copyFileSync(requestChangesTemplateSrc, path.join(promptsDir, "manifest_protection_request_changes_review.md"));
-    const threatWarningTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/threat_warning_request_changes_review.md");
-    fs.copyFileSync(threatWarningTemplateSrc, path.join(promptsDir, "threat_warning_request_changes_review.md"));
+    copyPromptTemplate(promptsDir, "manifest_protection_request_review.md");
+    copyPromptTemplate(promptsDir, "manifest_protection_request_changes_review.md");
+    copyPromptTemplate(promptsDir, "threat_warning_request_changes_review.md");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
 
     // Clear module cache so globals are picked up fresh
@@ -1882,10 +2081,9 @@ ${diffs}
     const patchPath = writePatch("feature/protected", createPatchWithFiles(".github/aw/instructions.md"));
     const promptsDir = path.join(tempDir, "prompts");
     fs.mkdirSync(promptsDir, { recursive: true });
-    const templateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_create_pr_fallback.md");
-    fs.copyFileSync(templateSrc, path.join(promptsDir, "manifest_protection_create_pr_fallback.md"));
-    const pushFailedTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_push_failed_fallback.md");
-    fs.copyFileSync(pushFailedTemplateSrc, path.join(promptsDir, "manifest_protection_push_failed_fallback.md"));
+    copyPromptTemplate(promptsDir, "manifest_protection_create_pr_fallback.md");
+    copyPromptTemplate(promptsDir, "manifest_protection_push_failed_fallback.md");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
 
     global.github.rest.issues = {
@@ -1922,10 +2120,9 @@ ${diffs}
     fs.writeFileSync(bundlePath, "bundle content");
     const promptsDir = path.join(tempDir, "prompts");
     fs.mkdirSync(promptsDir, { recursive: true });
-    const templateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_create_pr_fallback.md");
-    fs.copyFileSync(templateSrc, path.join(promptsDir, "manifest_protection_create_pr_fallback.md"));
-    const pushFailedTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_push_failed_fallback.md");
-    fs.copyFileSync(pushFailedTemplateSrc, path.join(promptsDir, "manifest_protection_push_failed_fallback.md"));
+    copyPromptTemplate(promptsDir, "manifest_protection_create_pr_fallback.md");
+    copyPromptTemplate(promptsDir, "manifest_protection_push_failed_fallback.md");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
 
     global.github.rest.issues = {
@@ -2652,6 +2849,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
   // Minimal valid format-patch output
   const PATCH_CONTENT =
     `From a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 Mon Sep 17 00:00:00 2001\n` +
+    `X-GH-AW-Base-Commit: ${MOCK_BASE_COMMIT_SHA}\n` +
     `From: Test Author <test@example.com>\n` +
     `Date: Wed, 26 Mar 2026 12:00:00 +0000\n` +
     `Subject: [PATCH] Test change\n\n` +
@@ -2672,7 +2870,6 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     process.env.GH_AW_WORKFLOW_ID = "test-workflow";
     process.env.GITHUB_REPOSITORY = "test-owner/test-repo";
     process.env.GITHUB_BASE_REF = "main";
-
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-pr-fallback-test-"));
     patchFilePath = path.join(tempDir, "test.patch");
     fs.writeFileSync(patchFilePath, PATCH_CONTENT, "utf8");
@@ -2767,7 +2964,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     return false;
   }
 
-  it("should create the PR branch from normalized base_commit before applying the patch when available", async () => {
+  it("should create the PR branch from the patch-embedded base commit when available", async () => {
     global.exec = {
       exec: vi.fn().mockResolvedValue(0),
       getExecOutput: vi.fn().mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" }),
@@ -2783,7 +2980,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     expect(checkoutWithBaseCommit).toBeTruthy();
   });
 
-  it("should ignore invalid base_commit values when creating the branch", async () => {
+  it("should ignore agent-supplied base_commit values when creating the branch", async () => {
     global.exec = {
       exec: vi.fn().mockResolvedValue(0),
       getExecOutput: vi.fn().mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" }),
@@ -2795,7 +2992,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
 
     expect(result.success).toBe(true);
     expect(global.exec.exec).not.toHaveBeenCalledWith("git", ["cat-file", "-e", "not-a-sha --bad"]);
-    expect(global.core.warning).toHaveBeenCalledWith("Ignoring invalid base_commit value for patch apply: not-a-sha --bad");
+    expect(global.core.warning).not.toHaveBeenCalledWith(expect.stringContaining("base_commit"));
   });
 
   it("should fall back to base branch when base_commit is unavailable", async () => {
@@ -2851,6 +3048,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     fs.mkdirSync(promptsDir, { recursive: true });
     fs.writeFileSync(path.join(promptsDir, "manifest_protection_request_review.md"), "Protected files: {{files}}", "utf8");
     fs.writeFileSync(path.join(promptsDir, "manifest_protection_request_changes_review.md"), "Protected files: {{files}}", "utf8");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
     global.exec = {
       exec: vi.fn().mockImplementation((cmd, args) => {
@@ -3024,6 +3222,8 @@ describe("create_pull_request - patch apply fallback to original base commit", (
   });
 
   it("should return error when no base_commit is provided and git am --3way fails", async () => {
+    const patchWithoutBaseCommit = PATCH_CONTENT.replace(`X-GH-AW-Base-Commit: ${MOCK_BASE_COMMIT_SHA}\n`, "");
+    fs.writeFileSync(canonicalPatchPath("test-branch"), patchWithoutBaseCommit, "utf8");
     global.exec = {
       exec: vi.fn().mockImplementation((cmd, args) => {
         if (isGitAm3Way(cmd, args)) {
@@ -3044,7 +3244,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("Failed to apply patch");
-    expect(global.core.warning).toHaveBeenCalledWith("No base_commit recorded in safe output entry - fallback not possible");
+    expect(global.core.warning).toHaveBeenCalledWith("No base_commit embedded in patch - fallback not possible");
   });
 
   it("should reuse existing remote branch when preserve-branch-name and recreate-ref are true (force-delete then recreate)", async () => {
@@ -3052,14 +3252,14 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     let renameCalled = false;
     global.exec = {
       exec: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("git branch -m")) {
           renameCalled = true;
         }
         return Promise.resolve(0);
       }),
       getExecOutput: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("ls-remote --heads origin")) {
           return Promise.resolve({ exitCode: 0, stdout: "abc123\trefs/heads/preserve-me\n", stderr: "" });
         }
@@ -3092,7 +3292,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     global.exec = {
       exec: vi.fn().mockResolvedValue(0),
       getExecOutput: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("ls-remote --heads origin")) {
           return Promise.resolve({ exitCode: 0, stdout: "abc123\trefs/heads/preserve-me\n", stderr: "" });
         }
@@ -3117,7 +3317,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     global.exec = {
       exec: vi.fn().mockResolvedValue(0),
       getExecOutput: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("ls-remote --heads origin")) {
           return Promise.resolve({ exitCode: 0, stdout: "abc123\trefs/heads/preserve-me\n", stderr: "" });
         }
@@ -3138,10 +3338,11 @@ describe("create_pull_request - patch apply fallback to original base commit", (
   });
 
   it("should rename with random suffix when deleteRef is blocked by branch protection rules (recreate-ref fallback)", async () => {
+    /** @type {any} */
     let capturedRenamedBranch = null;
     global.exec = {
       exec: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         // Capture the new branch name from: git branch -m <old> <new>
         const renameMatch = cmdStr.match(/git branch -m \S+ (\S+)/);
         if (renameMatch) {
@@ -3150,7 +3351,7 @@ describe("create_pull_request - patch apply fallback to original base commit", (
         return Promise.resolve(0);
       }),
       getExecOutput: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("ls-remote --heads origin")) {
           return Promise.resolve({ exitCode: 0, stdout: "abc123\trefs/heads/chaos/preserve-me\n", stderr: "" });
         }
@@ -3195,14 +3396,14 @@ describe("create_pull_request - patch apply fallback to original base commit", (
     let renameCalled = false;
     global.exec = {
       exec: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("git branch -m")) {
           renameCalled = true;
         }
         return Promise.resolve(0);
       }),
       getExecOutput: vi.fn().mockImplementation((cmd, args) => {
-        const cmdStr = typeof cmd === "string" ? cmd : `${cmd} ${(args || []).join(" ")}`;
+        const cmdStr = `${cmd} ${(args || []).join(" ")}`;
         if (cmdStr.includes("ls-remote --heads origin")) {
           return Promise.resolve({ exitCode: 0, stdout: "abc123\trefs/heads/some-branch\n", stderr: "" });
         }
@@ -3392,12 +3593,12 @@ describe("create_pull_request - threat detection caution", () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-pr-threat-test-"));
     const promptsDir = path.join(tempDir, "prompts");
     fs.mkdirSync(promptsDir, { recursive: true });
-    const requestReviewTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_request_review.md");
-    fs.copyFileSync(requestReviewTemplateSrc, path.join(promptsDir, "manifest_protection_request_review.md"));
-    const requestChangesTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/manifest_protection_request_changes_review.md");
-    fs.copyFileSync(requestChangesTemplateSrc, path.join(promptsDir, "manifest_protection_request_changes_review.md"));
-    const threatWarningTemplateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/threat_warning_request_changes_review.md");
-    fs.copyFileSync(threatWarningTemplateSrc, path.join(promptsDir, "threat_warning_request_changes_review.md"));
+    copyPromptTemplate(promptsDir, "manifest_protection_request_review.md");
+    copyPromptTemplate(promptsDir, "manifest_protection_request_changes_review.md");
+    copyPromptTemplate(promptsDir, "threat_warning_request_changes_review.md");
+    copyPromptTemplate(promptsDir, "threat_detection_caution.md");
+    copyPromptTemplate(promptsDir, "threat_detection_engine_error.md");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
 
     global.core = {
@@ -3763,6 +3964,266 @@ describe("create_pull_request - rate-limit retry", () => {
   });
 });
 
+describe("create_pull_request - fallback issue issues-disabled (410)", () => {
+  let originalEnv;
+  let tempDir;
+
+  function createIssuesDisabledError() {
+    return Object.assign(new Error("Issues are disabled for this repository"), {
+      status: 410,
+      response: { status: 410 },
+    });
+  }
+
+  function createAssigneeError(message = "assignee is invalid") {
+    return Object.assign(new Error(message), {
+      status: 422,
+      response: { status: 422 },
+    });
+  }
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    process.env.GH_AW_WORKFLOW_ID = "test-workflow";
+    process.env.GITHUB_REPOSITORY = "test-owner/test-repo";
+    process.env.GITHUB_BASE_REF = "main";
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-pr-issues-disabled-test-"));
+
+    global.core = {
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      setFailed: vi.fn(),
+      setOutput: vi.fn(),
+      startGroup: vi.fn(),
+      endGroup: vi.fn(),
+      summary: {
+        addRaw: vi.fn().mockReturnThis(),
+        write: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    global.github = {
+      rest: {
+        pulls: {
+          create: vi.fn().mockResolvedValue({ data: { number: 42, html_url: "https://github.com/test/pull/42" } }),
+          requestReviewers: vi.fn().mockResolvedValue({}),
+        },
+        repos: {
+          get: vi.fn().mockResolvedValue({ data: { default_branch: "main" } }),
+        },
+        issues: {
+          create: vi.fn().mockResolvedValue({ data: { number: 99, html_url: "https://github.com/test/issues/99" } }),
+          addLabels: vi.fn().mockResolvedValue({}),
+        },
+      },
+      graphql: vi.fn(),
+    };
+
+    global.context = {
+      eventName: "issues",
+      repo: { owner: "test-owner", repo: "test-repo" },
+      payload: {},
+      runId: "12345",
+    };
+
+    global.exec = {
+      exec: vi.fn().mockResolvedValue(0),
+      getExecOutput: vi.fn().mockImplementation(async (program, args) => {
+        if (program === "git" && args[0] === "rev-list") {
+          return { exitCode: 0, stdout: "1", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "main", stderr: "" };
+      }),
+    };
+
+    delete require.cache[require.resolve("./create_pull_request.cjs")];
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+
+    delete global.core;
+    delete global.github;
+    delete global.context;
+    delete global.exec;
+    vi.clearAllMocks();
+  });
+
+  it("should fall back to workflow repo when target repo has issues disabled (410)", async () => {
+    // Scenario: workflow runs in workflow-owner/workflow-repo but the PR targets
+    // the context repo (test-owner/test-repo). Issues are disabled in test-owner/test-repo.
+    // The fallback issue should be created in workflow-owner/workflow-repo instead.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    // Issue creation in PR target (test-owner/test-repo) fails with 410; succeeds in workflow repo
+    global.github.rest.issues.create.mockRejectedValueOnce(createIssuesDisabledError()).mockResolvedValue({ data: { number: 55, html_url: "https://github.com/workflow-owner/workflow-repo/issues/55" } });
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    // Message targets context repo (test-owner/test-repo); workflow repo is workflow-owner/workflow-repo
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.fallback_used).toBe(true);
+    expect(result.issue_number).toBe(55);
+    // First call targets the PR repo (issues disabled), second targets the workflow repo
+    expect(global.github.rest.issues.create).toHaveBeenCalledTimes(2);
+    const secondCall = global.github.rest.issues.create.mock.calls[1][0];
+    expect(secondCall.owner).toBe("workflow-owner");
+    expect(secondCall.repo).toBe("workflow-repo");
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Issues are disabled"));
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("workflow-owner/workflow-repo"));
+  });
+
+  it("should use GH_AW_FAILURE_ISSUE_REPO over workflow repo when issues are disabled (410)", async () => {
+    // Scenario: issues are disabled in the PR target repo; GH_AW_FAILURE_ISSUE_REPO is configured.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    process.env.GH_AW_FAILURE_ISSUE_REPO = "failure-owner/failure-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    // Issue creation in target repo fails with 410; succeeds in failure-issue repo
+    global.github.rest.issues.create.mockRejectedValueOnce(createIssuesDisabledError()).mockResolvedValue({ data: { number: 66, html_url: "https://github.com/failure-owner/failure-repo/issues/66" } });
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.fallback_used).toBe(true);
+    expect(result.issue_number).toBe(66);
+    expect(global.github.rest.issues.create).toHaveBeenCalledTimes(2);
+    const secondCall = global.github.rest.issues.create.mock.calls[1][0];
+    expect(secondCall.owner).toBe("failure-owner");
+    expect(secondCall.repo).toBe("failure-repo");
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("failure-owner/failure-repo"));
+  });
+
+  it("should skip GH_AW_FAILURE_ISSUE_REPO when it matches the disabled repo and fall back to GITHUB_REPOSITORY", async () => {
+    // Scenario: GH_AW_FAILURE_ISSUE_REPO is set but equals the disabled PR-target repo.
+    // The fallback should skip it and use GITHUB_REPOSITORY instead.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    // GH_AW_FAILURE_ISSUE_REPO points to the same repo the workflow is running against
+    // (test-owner/test-repo), which is the repo that has issues disabled.
+    process.env.GH_AW_FAILURE_ISSUE_REPO = "test-owner/test-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    // Issue creation in test-owner/test-repo fails with 410; succeeds in workflow repo
+    global.github.rest.issues.create.mockRejectedValueOnce(createIssuesDisabledError()).mockResolvedValue({ data: { number: 77, html_url: "https://github.com/workflow-owner/workflow-repo/issues/77" } });
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.fallback_used).toBe(true);
+    expect(result.issue_number).toBe(77);
+    // The second call should target the workflow repo, not GH_AW_FAILURE_ISSUE_REPO
+    const secondCall = global.github.rest.issues.create.mock.calls[1][0];
+    expect(secondCall.owner).toBe("workflow-owner");
+    expect(secondCall.repo).toBe("workflow-repo");
+  });
+
+  it("should handle 422 assignee error in the alternate repo after a 410 redirect", async () => {
+    // Scenario: 410 from original repo redirects to alternate. The alternate repo
+    // then returns a 422 assignee error. The recovery should remove assignees and retry.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+
+    global.github.rest.issues.create
+      .mockRejectedValueOnce(createIssuesDisabledError()) // 410 in original repo
+      .mockRejectedValueOnce(createAssigneeError()) // 422 in alternate repo
+      .mockResolvedValue({ data: { number: 88, html_url: "https://github.com/workflow-owner/workflow-repo/issues/88" } });
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, assignees: ["invalid-user"] });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.fallback_used).toBe(true);
+    expect(result.issue_number).toBe(88);
+    // Three calls: (1) 410 original, (2) 422 alternate, (3) success alternate without assignees
+    expect(global.github.rest.issues.create).toHaveBeenCalledTimes(3);
+    const thirdCall = global.github.rest.issues.create.mock.calls[2][0];
+    expect(thirdCall.owner).toBe("workflow-owner");
+    expect(thirdCall.repo).toBe("workflow-repo");
+    expect(thirdCall.assignees).toBeUndefined();
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("assignee error"));
+  });
+
+  it("should return success:false when issues are disabled (410) and no alternate repo is available", async () => {
+    // Workflow repo same as target repo — no alternate available
+    process.env.GITHUB_REPOSITORY = "test-owner/test-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    global.github.rest.issues.create.mockRejectedValue(createIssuesDisabledError());
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    // No cross-repo target: itemRepo defaults to workflow repo, so payload matches GITHUB_REPOSITORY
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+    // Should warn about issues being disabled but not crash the whole step
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Issues are disabled"));
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("no alternate repo"));
+  });
+
+  it("should trim whitespace from GH_AW_FAILURE_ISSUE_REPO env var", async () => {
+    // Env vars set via YAML multiline scalars can carry leading/trailing whitespace.
+    // parseRepo must trim before splitting to avoid a malformed owner slug.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    process.env.GH_AW_FAILURE_ISSUE_REPO = "  failure-owner/failure-repo  ";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    global.github.rest.issues.create.mockRejectedValueOnce(createIssuesDisabledError()).mockResolvedValue({ data: { number: 11, html_url: "https://github.com/failure-owner/failure-repo/issues/11" } });
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(true);
+    // The trimmed failure repo should be used, not a malformed slug with spaces
+    const secondCall = global.github.rest.issues.create.mock.calls[1][0];
+    expect(secondCall.owner).toBe("failure-owner");
+    expect(secondCall.repo).toBe("failure-repo");
+  });
+
+  it("should not loop infinitely when all candidate repos also have issues disabled", async () => {
+    // Scenario: original target, GH_AW_FAILURE_ISSUE_REPO, and GITHUB_REPOSITORY all
+    // have issues disabled. The triedOwnerRepos Set must prevent the back-and-forth
+    // bounce and terminate gracefully with success:false.
+    process.env.GITHUB_REPOSITORY = "workflow-owner/workflow-repo";
+    process.env.GH_AW_FAILURE_ISSUE_REPO = "failure-owner/failure-repo";
+    global.github.rest.pulls.create.mockRejectedValue(new Error("Some PR creation error"));
+    // All repos return 410
+    global.github.rest.issues.create.mockRejectedValue(createIssuesDisabledError());
+
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true });
+
+    const result = await handler({ title: "Test PR", body: "Test body" }, {});
+
+    expect(result.success).toBe(false);
+    // Should have tried original + failure + workflow repos (3 total), then stopped
+    expect(global.github.rest.issues.create.mock.calls.length).toBe(3);
+    expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("no alternate repo"));
+  });
+});
+
 describe("create_pull_request - branch-prefix config", () => {
   let originalEnv;
   let tempDir;
@@ -3861,6 +4322,22 @@ describe("create_pull_request - branch-prefix config", () => {
     expect(branchArg).not.toContain("signed/");
   });
 
+  it("should use an owner-qualified PR head when head-repo differs from target-repo", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({
+      allow_empty: true,
+      "head-repo": "fork-owner/test-repo",
+      allowed_repos: ["test-owner/test-repo", "fork-owner/test-repo"],
+    });
+
+    await handler({ title: "Test PR", body: "body", branch: "my-feature" }, {});
+
+    const createCall = global.github.rest.pulls.create.mock.calls[0][0];
+    expect(createCall.owner).toBe("test-owner");
+    expect(createCall.repo).toBe("test-repo");
+    expect(createCall.head).toMatch(/^fork-owner:my-feature(?:-[0-9a-f]+)?$/);
+  });
+
   it("should normalize an invalid branch-prefix and emit a warning", async () => {
     const { main } = require("./create_pull_request.cjs");
     const handler = await main({ branch_prefix: "bad prefix: ", allow_empty: true });
@@ -3888,8 +4365,8 @@ describe("create_pull_request - E003 file-limit fallback-to-issue", () => {
     // Set up prompts directory with the E003 template so getPromptPath resolves
     const promptsDir = path.join(tempDir, "prompts");
     fs.mkdirSync(promptsDir, { recursive: true });
-    const templateSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../md/e003_file_limit_fallback.md");
-    fs.copyFileSync(templateSrc, path.join(promptsDir, "e003_file_limit_fallback.md"));
+    copyPromptTemplate(promptsDir, "e003_file_limit_fallback.md");
+    copyPromptTemplate(promptsDir, "safe_outputs_disclosure_header.md");
     process.env.GH_AW_PROMPTS_DIR = promptsDir;
 
     global.core = {
@@ -4065,5 +4542,197 @@ describe("create_pull_request - E003 file-limit fallback-to-issue", () => {
     expect(result.fallback_used).toBeUndefined();
     expect(global.github.rest.pulls.create).toHaveBeenCalledTimes(1);
     expect(global.github.rest.issues.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("create_pull_request - stacked pull requests", () => {
+  let tempDir;
+  let originalEnv;
+  let createdPrNumber;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    process.env.GH_AW_WORKFLOW_ID = "test-workflow";
+    process.env.GITHUB_REPOSITORY = "test-owner/test-repo";
+    process.env.GITHUB_BASE_REF = "main";
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-pr-stacked-test-"));
+
+    createdPrNumber = 100;
+
+    global.core = {
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      setFailed: vi.fn(),
+      setOutput: vi.fn(),
+      startGroup: vi.fn(),
+      endGroup: vi.fn(),
+      summary: {
+        addRaw: vi.fn().mockReturnThis(),
+        write: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    global.github = {
+      rest: {
+        pulls: {
+          create: vi.fn().mockImplementation(async () => {
+            const number = createdPrNumber++;
+            return { data: { number, html_url: `https://github.com/test-owner/test-repo/pull/${number}`, node_id: `PR_${number}` } };
+          }),
+          requestReviewers: vi.fn().mockResolvedValue({}),
+        },
+        repos: {
+          get: vi.fn().mockResolvedValue({ data: { default_branch: "main" } }),
+          getBranch: vi.fn().mockResolvedValue({ data: { name: "release/1.0" } }),
+        },
+        issues: {
+          addLabels: vi.fn().mockResolvedValue({}),
+        },
+      },
+      graphql: vi.fn(),
+    };
+    global.context = {
+      eventName: "workflow_dispatch",
+      repo: { owner: "test-owner", repo: "test-repo" },
+      payload: {},
+    };
+    global.exec = {
+      exec: vi.fn().mockResolvedValue(0),
+      getExecOutput: vi.fn().mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" }),
+    };
+
+    delete require.cache[require.resolve("./create_pull_request.cjs")];
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
+
+    if (tempDir && fs.existsSync(tempDir)) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+
+    delete global.core;
+    delete global.github;
+    delete global.context;
+    delete global.exec;
+    vi.clearAllMocks();
+  });
+
+  it("stacks a pull request on a branch created earlier in the same run", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, max: 2, preserve_branch_name: true });
+
+    const first = await handler({ title: "First", body: "First body", branch: "feature-1" }, {});
+    expect(first.success).toBe(true);
+
+    const second = await handler({ title: "Second", body: "Second body", branch: "feature-2", base: "feature-1", stack_position: 2, stack_root: "main" }, {});
+
+    expect(second.success).toBe(true);
+    expect(global.github.rest.pulls.create).toHaveBeenLastCalledWith(expect.objectContaining({ base: "feature-1", head: "feature-2" }));
+    const secondBody = global.github.rest.pulls.create.mock.calls[1][0].body;
+    expect(first.number).toBe(100);
+    expect(secondBody).toContain(`Depends on #${first.number}`);
+    expect(secondBody).toContain("<!-- gh-aw-stack:");
+    expect(secondBody).toContain('"position":2');
+  });
+
+  it("resolves salted branch names when stacking on an earlier pull request", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, max: 2 });
+
+    const first = await handler({ title: "First", body: "First body", branch: "feature-1" }, {});
+    expect(first.success).toBe(true);
+    const firstBranch = global.github.rest.pulls.create.mock.calls[0][0].head;
+    expect(firstBranch).not.toBe("feature-1");
+
+    const second = await handler({ title: "Second", body: "Second body", branch: "feature-2", base: "feature-1" }, {});
+
+    expect(second.success).toBe(true);
+    expect(global.github.rest.pulls.create).toHaveBeenLastCalledWith(expect.objectContaining({ base: firstBranch }));
+  });
+
+  it("rejects a stacked pull request when stacked pull requests are disabled", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, max: 2, preserve_branch_name: true, stacked: false });
+
+    const first = await handler({ title: "First", body: "First body", branch: "feature-1" }, {});
+    expect(first.success).toBe(true);
+
+    const second = await handler({ title: "Second", body: "Second body", branch: "feature-2", base: "feature-1" }, {});
+
+    expect(second.success).toBe(false);
+    expect(second.error).toContain("Stacked pull requests are disabled");
+    expect(second.error).toContain("main");
+    expect(global.github.rest.pulls.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("still allows the default base branch when stacked pull requests are disabled", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, stacked: false });
+
+    const result = await handler({ title: "Test PR", body: "Test body", base: "main", stack_position: 1 }, {});
+
+    expect(result.success).toBe(true);
+    const body = global.github.rest.pulls.create.mock.calls[0][0].body;
+    expect(body).toContain("<!-- gh-aw-stack:");
+  });
+
+  it("rejects a stacked pull request when the base branch does not exist", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const notFound = Object.assign(new Error("Branch not found"), { status: 404 });
+    global.github.rest.repos.getBranch = vi.fn().mockRejectedValue(notFound);
+
+    const handler = await main({ allow_empty: true, allowed_base_branches: ["release/*"] });
+
+    const result = await handler({ title: "Test PR", body: "Test body", base: "release/1.0" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("does not exist");
+    expect(result.error).toContain("dependency order");
+    expect(global.github.rest.pulls.create).not.toHaveBeenCalled();
+  });
+
+  it("creates a stacked pull request when the allowed base branch exists", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, allowed_base_branches: ["release/*"] });
+
+    const result = await handler({ title: "Test PR", body: "Test body", base: "release/1.0" }, {});
+
+    expect(result.success).toBe(true);
+    expect(global.github.rest.repos.getBranch).toHaveBeenCalledWith(expect.objectContaining({ branch: "release/1.0" }));
+    expect(global.github.rest.pulls.create).toHaveBeenCalledWith(expect.objectContaining({ base: "release/1.0" }));
+  });
+
+  it("rejects a stacked pull request targeting a repo outside the allowlist before checking the base branch", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, allowed_repos: ["test-owner/test-repo"] });
+
+    const result = await handler({ title: "Test PR", body: "Test body", repo: "other-owner/other-repo", base: "release/1.0" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("is not in the allowed-repos list");
+    // The base-branch existence check must never run against an unvalidated repo.
+    expect(global.github.rest.repos.getBranch).not.toHaveBeenCalled();
+    expect(global.github.rest.pulls.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a circular stacked pull request dependency", async () => {
+    const { main } = require("./create_pull_request.cjs");
+    const handler = await main({ allow_empty: true, max: 3, preserve_branch_name: true });
+
+    expect((await handler({ title: "First", body: "First body", branch: "feature-1" }, {})).success).toBe(true);
+    expect((await handler({ title: "Second", body: "Second body", branch: "feature-2", base: "feature-1" }, {})).success).toBe(true);
+
+    // feature-1 already stacks below feature-2, so basing feature-1 on feature-2 closes the loop.
+    const third = await handler({ title: "Third", body: "Third body", branch: "feature-1", base: "feature-2" }, {});
+
+    expect(third.success).toBe(false);
+    expect(third.error).toContain("Circular stacked pull request dependency detected");
   });
 });

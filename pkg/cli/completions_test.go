@@ -15,6 +15,7 @@ import (
 )
 
 func TestGetWorkflowDescription(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory structure
 	tmpDir := t.TempDir()
 	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
@@ -217,19 +218,21 @@ No description workflow
 }
 
 func TestValidEngineNames(t *testing.T) {
+	t.Parallel()
 	engines := ValidEngineNames()
 
 	// Verify the list is not empty
 	assert.NotEmpty(t, engines, "Engine names list should not be empty")
 
 	// Verify expected engines are present
-	expectedEngines := []string{"copilot", "claude", "codex", "gemini", "antigravity", "opencode", "crush"}
+	expectedEngines := []string{"copilot", "claude", "codex", "gemini"}
 	for _, expected := range expectedEngines {
 		assert.Contains(t, engines, expected, "Expected engine '%s' to be in the list", expected)
 	}
 }
 
 func TestCompleteEngineNames(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 
 	tests := []struct {
@@ -240,12 +243,12 @@ func TestCompleteEngineNames(t *testing.T) {
 		{
 			name:       "empty prefix returns all engines",
 			toComplete: "",
-			wantLen:    8, // antigravity, copilot, claude, codex, gemini, opencode, crush, pi
+			wantLen:    5, // copilot, claude, codex, gemini, pi
 		},
 		{
-			name:       "c prefix returns claude, codex, copilot, crush",
+			name:       "c prefix returns claude, codex, copilot",
 			toComplete: "c",
-			wantLen:    4,
+			wantLen:    3,
 		},
 		{
 			name:       "co prefix returns copilot, codex",
@@ -266,6 +269,7 @@ func TestCompleteEngineNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			completions, directive := CompleteEngineNames(cmd, nil, tt.toComplete)
 			assert.Len(t, completions, tt.wantLen)
 			assert.Equal(t, cobra.ShellCompDirectiveNoFileComp, directive)
@@ -353,6 +357,7 @@ func TestCompleteWorkflowNamesNoWorkflowsDir(t *testing.T) {
 }
 
 func TestCompleteDirectories(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 
 	completions, directive := CompleteDirectories(cmd, nil, "")
@@ -361,6 +366,7 @@ func TestCompleteDirectories(t *testing.T) {
 }
 
 func TestRegisterEngineFlagCompletion(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	cmd.Flags().StringP("engine", "e", "", "AI engine")
 
@@ -369,6 +375,7 @@ func TestRegisterEngineFlagCompletion(t *testing.T) {
 }
 
 func TestRegisterDirFlagCompletion(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	cmd.Flags().StringP("dir", "d", "", "Directory")
 
@@ -692,6 +699,7 @@ func TestCompleteWorkflowNamesLongNames(t *testing.T) {
 
 // TestCompleteEngineNamesExactMatch tests when toComplete exactly matches an engine name
 func TestCompleteEngineNamesExactMatch(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 
 	// Test exact match - should still return the matching engine
@@ -703,6 +711,7 @@ func TestCompleteEngineNamesExactMatch(t *testing.T) {
 
 // TestCompleteEngineNamesCaseSensitivity tests engine name completion is case-sensitive
 func TestCompleteEngineNamesCaseSensitivity(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 
 	tests := []struct {
@@ -729,6 +738,7 @@ func TestCompleteEngineNamesCaseSensitivity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			completions, directive := CompleteEngineNames(cmd, nil, tt.toComplete)
 			assert.Len(t, completions, tt.wantLen, "Expected %d completions", tt.wantLen)
 			assert.Equal(t, cobra.ShellCompDirectiveNoFileComp, directive)
@@ -738,6 +748,7 @@ func TestCompleteEngineNamesCaseSensitivity(t *testing.T) {
 
 // TestValidEngineNamesConsistency tests that ValidEngineNames returns consistent results
 func TestValidEngineNamesConsistency(t *testing.T) {
+	t.Parallel()
 	// Call multiple times to ensure consistency
 	firstCall := ValidEngineNames()
 	secondCall := ValidEngineNames()

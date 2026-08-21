@@ -17,20 +17,22 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 name: Smoke Crush
+model: copilot/claude-sonnet-4.5
 engine:
   id: crush
-  model: anthropic/claude-sonnet-4-20250514
+max-turn-cache-misses: 15
 strict: true
 imports:
+  - shared/crush.md
   - shared/gh.md
-  - shared/reporting.md
+  - shared/reporting-otlp.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
 network:
-  allowed:
-    - defaults
-    - github
+  allowed: []
 tools:
   cache-memory: true
   github:
@@ -40,31 +42,31 @@ tools:
     - "*"
   web-fetch:
 safe-outputs:
-    add-comment:
-      hide-older-comments: true
-      max: 2
-    create-issue:
-      expires: 2h
-      close-older-issues: true
-      labels: [automation, testing]
-    add-labels:
-      allowed: [smoke-crush]
-    messages:
-      footer: "> ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*"
-      run-started: "⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}..."
-      run-success: "🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡"
-      run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges..."
+  allowed-domains: [default-safe-outputs]
+  add-comment:
+    hide-older-comments: true
+    max: 2
+  create-issue:
+    expires: 2h
+    close-older-issues: true
+    close-older-key: "smoke-crush"
+    labels: [automation, testing]
+  add-labels:
+    allowed: [smoke-crush]
+  messages:
+    footer: "> ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*{ai_credits_suffix}{history_link}"
+    run-started: "⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}..."
+    run-success: "🎯 [{workflow_name}]({run_url}) Crush delivered."
+    run-failure: "⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges..."
 timeout-minutes: 15
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    id: awf
 ---
 
 # Smoke Test: Crush Engine Validation
-
-**CRITICAL EFFICIENCY REQUIREMENTS:**
-- Keep ALL outputs extremely short and concise. Use single-line responses.
-- NO verbose explanations or unnecessary context.
-- Minimize file reading - only read what is absolutely necessary for the task.
 
 ## Test Requirements
 
@@ -76,8 +78,16 @@ features:
 
 ## Output
 
-Add a **very brief** comment (max 5-10 lines) to the current pull request with:
+**ALWAYS create an issue** with a summary of the smoke test run:
+- Title: "Smoke Test: Crush - ${{ github.run_id }}"
+- Body should include:
+  - Test results (✅ or ❌ for each test)
+  - Overall status: PASS or FAIL
+  - Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  - Timestamp
+
+**Only if this workflow was triggered by a pull_request event**: Use the `add_comment` tool to add a **very brief** comment (max 5-10 lines) to the triggering pull request (omit the `item_number` parameter to auto-target the triggering PR) with:
 - ✅ or ❌ for each test result
 - Overall status: PASS or FAIL
 
-If all tests pass, use the `add_labels` safe-output tool to add the label `smoke-crush` to the pull request.
+If all tests pass and this workflow was triggered by a pull_request event, use the `add_labels` safe-output tool to add the label `smoke-crush` to the pull request (omit the `item_number` parameter to auto-target the triggering PR).

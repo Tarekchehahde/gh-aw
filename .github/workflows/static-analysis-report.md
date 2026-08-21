@@ -1,6 +1,8 @@
 ---
 emoji: "📊"
-description: Scans agentic workflows daily for security vulnerabilities using zizmor, poutine, actionlint, and runner-guard
+description: Scans agentic workflows daily with zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, and shellcheck
+features:
+  gh-aw-detection: true
 on:
   schedule: daily
   workflow_dispatch:
@@ -19,7 +21,7 @@ safe-outputs:
   create-issue:
     expires: 7d
     title-prefix: "[static-analysis] "
-    labels: [security, automation]
+    labels: [security, automation, cookie]
     max: 4
     close-older-issues: true
   add-comment:
@@ -54,6 +56,22 @@ steps:
       # Pull runner-guard Docker image
       echo "Pulling runner-guard image..."
       docker pull ghcr.io/vigilant-llc/runner-guard:latest
+
+      # Pull grype Docker image
+      echo "Pulling grype image..."
+      docker pull anchore/grype:latest
+
+      # Pull syft Docker image
+      echo "Pulling syft image..."
+      docker pull anchore/syft:latest
+      
+      # Pull yamllint Docker image
+      echo "Pulling yamllint image..."
+      docker pull pipelinecomponents/yamllint:latest
+
+      # Pull shellcheck Docker image
+      echo "Pulling shellcheck image..."
+      docker pull koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
       
       echo "All static analysis Docker images pulled successfully"
   - name: Verify static analysis tools
@@ -72,6 +90,22 @@ steps:
       # Verify runner-guard
       echo "Testing runner-guard..."
       docker run --rm ghcr.io/vigilant-llc/runner-guard:latest --version || echo "Warning: runner-guard version check failed"
+
+      # Verify grype
+      echo "Testing grype..."
+      docker run --rm anchore/grype:latest version || echo "Warning: grype version check failed"
+
+      # Verify syft
+      echo "Testing syft..."
+      docker run --rm anchore/syft:latest version || echo "Warning: syft version check failed"
+      
+      # Verify yamllint
+      echo "Testing yamllint..."
+      docker run --rm pipelinecomponents/yamllint:latest --version || echo "Warning: yamllint version check failed"
+
+      # Verify shellcheck
+      echo "Testing shellcheck..."
+      docker run --rm koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d --version || echo "Warning: shellcheck version check failed"
       
       echo "Static analysis tools verification complete"
   - name: Run compile with security tools
@@ -81,19 +115,16 @@ steps:
       
       # Run compile with all security scanner flags to download Docker images
       # Store the output in a file for inspection
-      "$GITHUB_WORKSPACE/gh-aw" compile --zizmor --poutine --actionlint --runner-guard 2>&1 | tee /tmp/gh-aw/agent/compile-output.txt
+      "$GITHUB_WORKSPACE/gh-aw" compile --zizmor --poutine --actionlint --runner-guard --syft --grype --yamllint --shellcheck 2>&1 | tee /tmp/gh-aw/agent/compile-output.txt
       
       echo "Compile with security tools completed"
       echo "Output saved to /tmp/gh-aw/agent/compile-output.txt"
 
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # Static Analysis Report
 
-You are the Static Analysis Report Agent - an expert system that scans agentic workflows for security vulnerabilities and code quality issues using multiple static analysis tools: zizmor, poutine, and actionlint.
+You are the Static Analysis Report Agent - an expert system that scans agentic workflows for security vulnerabilities, SBOM inventory data, and code quality issues using multiple static analysis tools: zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, and shellcheck.
 
 ## Mission
 
@@ -113,21 +144,19 @@ Daily scan all agentic workflow files with static analysis tools to identify sec
 
 ### Phase 1: Analyze Static Analysis Output
 
-The workflow has already compiled all workflows with static analysis tools (zizmor, poutine, actionlint) and saved the output to `/tmp/gh-aw/agent/compile-output.txt`.
+The workflow has already compiled all workflows with static analysis tools (zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, shellcheck) and saved the output to `/tmp/gh-aw/agent/compile-output.txt`.
 
 1. **Read Compilation Output**:
-   Read and parse the file `/tmp/gh-aw/agent/compile-output.txt` which contains the JSON output from the compilation with all three static analysis tools.
+   Read the file `/tmp/gh-aw/agent/compile-output.txt`, which contains the human-readable compilation and static analysis output from all eight tools.
    
-   The output is JSON format with validation results for each workflow:
-   - workflow: Name of the workflow file
-   - valid: Boolean indicating if compilation was successful
-   - errors: Array of error objects with type, message, and optional line number
-   - warnings: Array of warning objects
-   - compiled_file: Path to the generated .lock.yml file
-   - security findings from zizmor, poutine, and actionlint (if any)
+   The file includes:
+   - workflow compilation success/failure lines
+   - compiler validation errors and warnings
+   - findings emitted by zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, and shellcheck
+   - tool-specific messages, locations, remediation hints, and SBOM inventory details when available
 
 2. **Parse and Extract Findings**:
-   - Parse the JSON output to extract findings from all three tools
+   - Parse the saved compile output to extract findings from all eight tools
    - Note which workflows have findings from each tool
    - Identify total number of issues by tool and severity
    - Extract specific error messages, locations, and recommendations
@@ -139,7 +168,7 @@ The workflow has already compiled all workflows with static analysis tools (zizm
 
 ### Phase 2: Analyze and Cluster Findings
 
-Review the output from all three tools and cluster findings:
+Review the output from all eight tools and cluster findings:
 
 #### 2.1 Parse Tool Outputs
 
@@ -169,9 +198,40 @@ Review the output from all three tools and cluster findings:
   - Location (file, line, column)
   - Suggestions for fixes
 
+**Yamllint Output**:
+- Extract YAML linting issues
+- Parse finding details:
+  - Error/warning message
+  - Rule name
+  - Location (file, line, column)
+
+**Shellcheck Output**:
+- Extract shell script linting issues
+- Parse finding details:
+  - Shellcheck code
+  - Error/warning message
+  - Affected workflow step and location
+
+**Syft Output**:
+- Extract SBOM inventory data from syft
+- Parse inventory details:
+  - Container image reference
+  - Total package count
+  - Notable package names or ecosystems if surfaced
+  - Workflows that reference each image
+
+**Grype Output**:
+- Extract container vulnerability findings from grype
+- Parse finding details:
+  - Package name
+  - Vulnerability ID
+  - Severity
+  - Affected image and workflow
+  - Fixed version when available
 #### 2.2 Cluster by Issue Type and Tool
 Group findings by:
-- Tool (zizmor, poutine, actionlint)
+Group findings by:
+- Tool (zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, shellcheck)
 - Issue identifier/rule code
 - Severity level
 - Count occurrences of each issue type
@@ -191,7 +251,7 @@ Use the cache memory folder `/tmp/gh-aw/cache-memory/` to build persistent knowl
 
 1. **Create Security Scan Index**:
    - Save scan results to `/tmp/gh-aw/cache-memory/security-scans/<date>.json`
-   - Include findings from all three tools (zizmor, poutine, actionlint)
+   - Include findings from all eight tools (zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, shellcheck)
    - Maintain an index of all scans in `/tmp/gh-aw/cache-memory/security-scans/index.json`
 
 2. **Update Vulnerability Database**:
@@ -264,7 +324,7 @@ Use the cache memory folder `/tmp/gh-aw/cache-memory/` to build persistent knowl
 **ALWAYS create a comprehensive issue report** with your static analysis findings, regardless of whether issues were found or not.
 
 Create an issue with:
-- **Summary**: Overview of static analysis findings from all three tools
+- **Summary**: Overview of static analysis findings from all eight tools
 - **Statistics**: Total findings by tool, by severity, by type
 - **Clustered Findings**: Issues grouped by tool and type with counts
 - **Affected Workflows**: Which workflows have issues
@@ -283,7 +343,7 @@ Wrap long sections (>5 items, detailed lists, raw data) in `<details><summary><b
 
 ### Analysis Summary
 
-- **Tools Used**: zizmor, poutine, actionlint, runner-guard
+- **Tools Used**: zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, shellcheck
 - **Total Findings**: [NUMBER]
 - **Workflows Scanned**: [NUMBER]
 - **Workflows Affected**: [NUMBER]
@@ -296,6 +356,10 @@ Wrap long sections (>5 items, detailed lists, raw data) in `<details><summary><b
 | poutine (supply chain) | [NUM] | [NUM] | [NUM] | [NUM] | [NUM] |
 | actionlint (linting) | [NUM] | - | - | - | - |
 | runner-guard (taint analysis) | [NUM] | [NUM] | [NUM] | [NUM] | [NUM] |
+| syft (SBOM inventory) | [NUM] | - | - | - | - |
+| grype (container CVEs) | [NUM] | [NUM] | [NUM] | [NUM] | [NUM] |
+| yamllint (yaml linting) | [NUM] | - | - | - | - |
+| shellcheck (shell linting) | [NUM] | - | - | - | - |
 
 ### Clustered Findings by Tool and Type
 
@@ -319,6 +383,12 @@ Wrap long sections (>5 items, detailed lists, raw data) in `<details><summary><b
 |------------|-------|-------------------|
 | [rule]     | [num] | [workflow names]  |
 
+#### Syft SBOM Inventory
+
+| Image | Packages | Affected Workflows |
+|-------|----------|--------------------|
+| [image] | [num] | [workflow names] |
+
 #### Runner-Guard Taint Analysis Findings
 
 Runner-Guard Score: [SCORE]/100 (Grade: [LETTER])
@@ -329,10 +399,28 @@ Runner-Guard Score: [SCORE]/100 (Grade: [LETTER])
 
 Issues created: [list of issue links for Critical/High findings, or "none"]
 
+#### Grype Container Vulnerability Findings
+
+| Package | Severity | Count | Affected Workflows |
+|---------|----------|-------|--------------------|
+| [package] | [level] | [num] | [workflow names] |
+
+#### Yamllint YAML Linting Findings
+
+| Issue Type | Count | Affected Workflows |
+|------------|-------|-------------------|
+| [rule]     | [num] | [workflow names]  |
+
+#### Shellcheck Shell Linting Findings
+
+| Code | Count | Affected Workflows |
+|------|-------|-------------------|
+| [SCXXXX] | [num] | [workflow names] |
+
 ### Top Priority Issues
 
 #### 1. [Most Common/Severe Issue]
-- **Tool**: [zizmor/poutine/actionlint/runner-guard]
+- **Tool**: [zizmor/poutine/actionlint/runner-guard/syft/grype/yamllint/shellcheck]
 - **Count**: [NUMBER]
 - **Severity**: [LEVEL]
 - **Affected**: [WORKFLOW NAMES]
@@ -386,9 +474,9 @@ Issues created: [list of issue links for Critical/High findings, or "none"]
 ### Recommendations
 
 1. **Immediate**: Fix all Critical and High severity security issues (zizmor, poutine, runner-guard)
-2. **Short-term**: Address Medium severity issues and critical linting problems (actionlint)
+2. **Short-term**: Address Medium severity issues and critical linting problems (actionlint, yamllint, shellcheck)
 3. **Long-term**: Establish automated static analysis in CI/CD
-4. **Prevention**: Update workflow templates to avoid common patterns
+4. **Prevention**: Update workflow templates to avoid common patterns and use syft inventory data to review unexpected container packages
 
 ### Next Steps
 
@@ -397,7 +485,7 @@ Issues created: [list of issue links for Critical/High findings, or "none"]
 - [ ] Address supply chain security findings
 - [ ] Fix actionlint errors in workflows
 - [ ] Update workflow creation guidelines
-- [ ] Consider adding all three tools to pre-commit hooks
+- [ ] Consider adding all eight tools to pre-commit hooks
 ```
 
 Use the title `[static-analysis] Report - [DATE]` for the issue.
@@ -407,7 +495,7 @@ Use the title `[static-analysis] Report - [DATE]` for the issue.
 Runner-guard has performed source-to-sink vulnerability scanning as part of the compile step. The results are included in the compilation output at `/tmp/gh-aw/agent/compile-output.txt`.
 
 1. **Read Runner-Guard Output**:
-   Parse the runner-guard findings from `/tmp/gh-aw/agent/compile-output.txt` — runner-guard findings are included alongside zizmor, poutine, and actionlint results (detection rules covering fork checkout exploits, expression injection, secret exfiltration, unpinned actions, AI config injection, and supply chain steganography).
+   Parse the runner-guard findings from `/tmp/gh-aw/agent/compile-output.txt` — runner-guard findings are included alongside zizmor, poutine, actionlint, syft, and grype results (detection rules covering fork checkout exploits, expression injection, secret exfiltration, unpinned actions, AI config injection, and supply chain steganography).
 
 2. **Analyze Findings**:
    - Parse the JSON to extract findings
@@ -518,14 +606,14 @@ Organize your persistent data in `/tmp/gh-aw/cache-memory/`:
 
 ## Output Requirements
 
-Your output must be well-structured and actionable. **You must create an issue** for every scan with the findings from all three tools.
+Your output must be well-structured and actionable. **You must create an issue** for every scan with the findings from all eight tools.
 
 Update cache memory with today's scan data for future reference and trend analysis.
 
 ## Success Criteria
 
 A successful static analysis scan:
-- ✅ Compiles all workflows with zizmor, poutine, and actionlint enabled
+- ✅ Compiles all workflows with zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, and shellcheck enabled
 - ✅ Clusters findings by tool and issue type
 - ✅ Generates a detailed fix prompt for at least one issue type
 - ✅ Updates cache memory with findings from all tools
@@ -535,4 +623,4 @@ A successful static analysis scan:
 - ✅ Reads and analyzes runner-guard source-to-sink findings
 - ✅ Creates up to 3 GitHub issues for Critical/High runner-guard findings (avoiding duplicates)
 
-Begin your static analysis scan now. Read and parse the compilation output from `/tmp/gh-aw/agent/compile-output.txt`, analyze the findings from all four tools (zizmor, poutine, actionlint, runner-guard), cluster them, generate fix suggestions, create up to 3 issues for critical runner-guard findings, and create an issue with your complete analysis.
+Begin your static analysis scan now. Read and parse the compilation output from `/tmp/gh-aw/agent/compile-output.txt`, analyze the findings from all eight tools (zizmor, poutine, actionlint, runner-guard, syft, grype, yamllint, shellcheck), cluster them, generate fix suggestions, create up to 3 issues for critical runner-guard findings, and create an issue with your complete analysis.

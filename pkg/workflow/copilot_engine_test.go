@@ -4,6 +4,7 @@ package workflow
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -92,9 +93,9 @@ func TestCopilotEngineInstallationSteps(t *testing.T) {
 	// Test with no version (firewall feature disabled by default)
 	workflowData := &WorkflowData{}
 	steps := engine.GetInstallationSteps(workflowData)
-	// Secret validation is now in the activation job; installation only has the install step = 1 step
+	// Secret validation is now in the activation job; installation only installs Copilot CLI.
 	if len(steps) != 1 {
-		t.Errorf("Expected 1 installation step (install), got %d", len(steps))
+		t.Errorf("Expected 1 installation step, got %d", len(steps))
 	}
 
 	// Test with version (firewall feature disabled by default)
@@ -102,9 +103,8 @@ func TestCopilotEngineInstallationSteps(t *testing.T) {
 		EngineConfig: &EngineConfig{Version: "1.0.0"},
 	}
 	stepsWithVersion := engine.GetInstallationSteps(workflowDataWithVersion)
-	// Secret validation is now in the activation job; installation only has the install step = 1 step
 	if len(stepsWithVersion) != 1 {
-		t.Errorf("Expected 1 installation step with version (install), got %d", len(stepsWithVersion))
+		t.Errorf("Expected 1 installation step with version, got %d", len(stepsWithVersion))
 	}
 
 	workflowDataWithSDK := &WorkflowData{
@@ -401,6 +401,9 @@ func TestCopilotEngineExecutionStepsWithCopilotSDK(t *testing.T) {
 	if !strings.Contains(stepContent, `"--port"`) {
 		t.Fatalf("Expected GH_AW_COPILOT_SDK_SERVER_ARGS to include --port, got:\n%s", stepContent)
 	}
+	if strings.Contains(stepContent, `"--host"`) {
+		t.Fatalf("Expected default SDK server args to omit --host, got:\n%s", stepContent)
+	}
 	if !strings.Contains(stepContent, `"--disable-builtin-mcps"`) {
 		t.Fatalf("Expected GH_AW_COPILOT_SDK_SERVER_ARGS to include --disable-builtin-mcps, got:\n%s", stepContent)
 	}
@@ -432,11 +435,39 @@ func TestCopilotEngineExecutionStepsWithCopilotSDK(t *testing.T) {
 	}
 }
 
-func TestCopilotEngineExecutionStepsWithCopilotSDKTimeoutExpression(t *testing.T) {
+func TestCopilotEngineExecutionStepsWithCopilotSDKCloudHypervisorBindHost(t *testing.T) {
 	engine := NewCopilotEngine()
 	workflowData := &WorkflowData{
-		Name:           "test-workflow",
-		TimeoutMinutes: "timeout-minutes: ${{ inputs.timeout }}",
+		Name: "test-workflow",
+		EngineConfig: &EngineConfig{
+			CopilotSDK: true,
+		},
+		SandboxConfig: &SandboxConfig{Agent: &AgentSandboxConfig{Runtime: AgentRuntimeCloudHypervisor}},
+	}
+
+	steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/test.log")
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 execution step, got %d", len(steps))
+	}
+
+	stepContent := strings.Join([]string(steps[0]), "\n")
+	if !strings.Contains(stepContent, `"--host","0.0.0.0","--port","`+strconv.Itoa(constants.DefaultCopilotSDKPort)+`"`) {
+		t.Fatalf("Expected Cloud Hypervisor SDK server args to bind on all guest interfaces before port, got:\n%s", stepContent)
+	}
+	expectedURI := constants.CopilotSDKURIEnvVar + ": http://127.0.0.1:" + strconv.Itoa(constants.DefaultCopilotSDKPort)
+	if !strings.Contains(stepContent, expectedURI) {
+		t.Fatalf("Expected SDK client URI to remain loopback (%s), got:\n%s", expectedURI, stepContent)
+	}
+}
+
+func TestCopilotEngineExecutionStepsWithCopilotSDKTimeoutExpression(t *testing.T) {
+	engine := NewCopilotEngine()
+	timeoutExpr := TemplatableInt32("${{ inputs.timeout }}")
+	workflowData := &WorkflowData{
+		Name: "test-workflow",
+		ParsedFrontmatter: &FrontmatterConfig{
+			TimeoutMinutes: &timeoutExpr,
+		},
 		EngineConfig: &EngineConfig{
 			CopilotSDK: true,
 		},
@@ -545,11 +576,51 @@ func TestCopilotEngineExecutionStepsWithCopilotSDKTypeScriptDriver(t *testing.T)
 	}
 
 	stepContent := strings.Join([]string(steps[0]), "\n")
-	if !strings.Contains(stepContent, "ts-node") {
-		t.Fatalf("Expected TypeScript SDK driver mode to use ts-node runtime, got:\n%s", stepContent)
+	// The harness is invoked as: <outer-node> copilot_harness.cjs <runtime-cmd> <driver> <copilot-binary>
+	// Verify the runtime argument passed to the harness is GH_AW_NODE_EXEC (native Node, not ts-node).
+	if !strings.Contains(stepContent, `copilot_harness.cjs" "$GH_AW_NODE_EXEC"`) {
+		t.Fatalf("Expected TypeScript SDK driver to pass GH_AW_NODE_EXEC as runtime to harness, got:\n%s", stepContent)
+	}
+	if strings.Contains(stepContent, "ts-node") {
+		t.Fatalf("Expected TypeScript SDK driver to NOT use ts-node (Node 24 runs TS natively), got:\n%s", stepContent)
 	}
 	if !strings.Contains(stepContent, "my_driver.ts") {
 		t.Fatalf("Expected SDK driver mode to include my_driver.ts, got:\n%s", stepContent)
+	}
+}
+
+// TestCopilotSDKDriverExecArgs directly verifies the runtime command returned for each
+// driver file extension, ensuring TypeScript uses native Node.js (not ts-node).
+func TestCopilotSDKDriverExecArgs(t *testing.T) {
+	tests := []struct {
+		driver         string
+		wantRuntime    string
+		wantDriverArg  string
+		wantNotRuntime string
+	}{
+		{driver: "agent.js", wantRuntime: `"$GH_AW_NODE_EXEC"`, wantDriverArg: "agent.js"},
+		{driver: "agent.cjs", wantRuntime: `"$GH_AW_NODE_EXEC"`, wantDriverArg: "agent.cjs"},
+		{driver: "agent.mjs", wantRuntime: `"$GH_AW_NODE_EXEC"`, wantDriverArg: "agent.mjs"},
+		{driver: "agent.ts", wantRuntime: `"$GH_AW_NODE_EXEC"`, wantDriverArg: "agent.ts", wantNotRuntime: "ts-node"},
+		{driver: "agent.mts", wantRuntime: `"$GH_AW_NODE_EXEC"`, wantDriverArg: "agent.mts", wantNotRuntime: "ts-node"},
+		{driver: "agent.py", wantRuntime: "python3", wantDriverArg: "agent.py"},
+		{driver: "agent.rb", wantRuntime: "ruby", wantDriverArg: "agent.rb"},
+		{driver: "my-driver", wantRuntime: "my-driver", wantDriverArg: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.driver, func(t *testing.T) {
+			runtime, driverArg := copilotSDKDriverExecArgs(tt.driver)
+			if runtime != tt.wantRuntime {
+				t.Errorf("copilotSDKDriverExecArgs(%q) runtime = %q, want %q", tt.driver, runtime, tt.wantRuntime)
+			}
+			if driverArg != tt.wantDriverArg {
+				t.Errorf("copilotSDKDriverExecArgs(%q) driverArg = %q, want %q", tt.driver, driverArg, tt.wantDriverArg)
+			}
+			if tt.wantNotRuntime != "" && runtime == tt.wantNotRuntime {
+				t.Errorf("copilotSDKDriverExecArgs(%q) runtime = %q, must NOT be %q", tt.driver, runtime, tt.wantNotRuntime)
+			}
+		})
 	}
 }
 
@@ -2191,7 +2262,7 @@ func TestCopilotEngineInstallationWithCommandAndCopilotSDK(t *testing.T) {
 			name:          "python command uses pip sdk install",
 			command:       "python3 main.py",
 			expectedName:  "name: Install GitHub Copilot SDK (Python)",
-			expectedRun:   "python3 -m pip install --disable-pip-version-check github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
+			expectedRun:   "python3 -m pip install --disable-pip-version-check --target \"${GITHUB_WORKSPACE}/.gh-aw/copilot-sdk/python\" github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
 			expectedSteps: 1,
 		},
 		{
@@ -2237,17 +2308,24 @@ func TestCopilotEngineInstallationWithCommandAndCopilotSDK(t *testing.T) {
 			expectedSteps: 1,
 		},
 		{
+			name:          "ts-node command installs ts-node and typescript alongside sdk",
+			command:       "ts-node driver.ts",
+			expectedName:  "name: Install GitHub Copilot SDK (TypeScript)",
+			expectedRun:   "npm install --ignore-scripts --no-save @github/copilot-sdk@" + string(constants.DefaultCopilotSDKVersion) + " ts-node typescript",
+			expectedSteps: 1,
+		},
+		{
 			name:          "env wrapper command is detected",
 			command:       "env FOO=bar python script.py",
 			expectedName:  "name: Install GitHub Copilot SDK (Python)",
-			expectedRun:   "python3 -m pip install --disable-pip-version-check github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
+			expectedRun:   "python3 -m pip install --disable-pip-version-check --target \"${GITHUB_WORKSPACE}/.gh-aw/copilot-sdk/python\" github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
 			expectedSteps: 1,
 		},
 		{
 			name:          "custom command with firewall keeps awf and sdk installs",
 			command:       "python script.py",
 			expectedName:  "name: Install GitHub Copilot SDK (Python)",
-			expectedRun:   "python3 -m pip install --disable-pip-version-check github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
+			expectedRun:   "python3 -m pip install --disable-pip-version-check --target \"${GITHUB_WORKSPACE}/.gh-aw/copilot-sdk/python\" github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
 			withFirewall:  true,
 			expectedSteps: 2,
 		},
@@ -2311,13 +2389,13 @@ func TestCopilotEngineInstallationWithCopilotSDKDriver(t *testing.T) {
 			name:         "python driver uses pip sdk install",
 			driver:       "my_driver.py",
 			expectedName: "name: Install GitHub Copilot SDK (Python)",
-			expectedRun:  "python3 -m pip install --disable-pip-version-check github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
+			expectedRun:  "python3 -m pip install --disable-pip-version-check --target \"${GITHUB_WORKSPACE}/.gh-aw/copilot-sdk/python\" github-copilot-sdk==" + string(constants.DefaultCopilotSDKVersion),
 		},
 		{
-			name:         "typescript driver installs ts-node toolchain and sdk",
+			name:         "typescript driver uses node sdk install (node 24 native ts support)",
 			driver:       "my_driver.ts",
-			expectedName: "name: Install GitHub Copilot SDK (TypeScript)",
-			expectedRun:  "npm install --ignore-scripts --no-save @github/copilot-sdk@" + string(constants.DefaultCopilotSDKVersion) + " ts-node typescript",
+			expectedName: "name: Install GitHub Copilot SDK (Node.js)",
+			expectedRun:  "npm install --ignore-scripts --no-save @github/copilot-sdk@" + string(constants.DefaultCopilotSDKVersion),
 		},
 		{
 			name:         "ruby driver uses npm sdk install fallback",
@@ -2356,6 +2434,48 @@ func TestCopilotEngineInstallationWithCopilotSDKDriver(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopilotEngineCopilotSDKPythonDriverSetsPythonPath(t *testing.T) {
+	engine := NewCopilotEngine()
+
+	t.Run("python driver sets PYTHONPATH", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			EngineConfig: &EngineConfig{
+				CopilotSDK: true,
+				Driver:     ".github/drivers/copilot_sdk_driver_sample_python.py",
+			},
+		}
+
+		steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/test.log")
+		if len(steps) != 1 {
+			t.Fatalf("Expected 1 execution step, got %d", len(steps))
+		}
+
+		stepContent := strings.Join(steps[0], "\n")
+		if !strings.Contains(stepContent, "PYTHONPATH: ${{ github.workspace }}/.gh-aw/copilot-sdk/python") {
+			t.Fatalf("Expected PYTHONPATH to include python Copilot SDK target path, got:\n%s", stepContent)
+		}
+	})
+
+	t.Run("node driver does not set PYTHONPATH", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			EngineConfig: &EngineConfig{
+				CopilotSDK: true,
+				Driver:     ".github/drivers/copilot_sdk_driver_sample_node.cjs",
+			},
+		}
+
+		steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/test.log")
+		if len(steps) != 1 {
+			t.Fatalf("Expected 1 execution step, got %d", len(steps))
+		}
+
+		stepContent := strings.Join(steps[0], "\n")
+		if strings.Contains(stepContent, "PYTHONPATH: ${{ github.workspace }}/.gh-aw/copilot-sdk/python") {
+			t.Fatalf("Did not expect PYTHONPATH override for node driver, got:\n%s", stepContent)
+		}
+	})
 }
 
 // TestGenerateCopilotSessionFileCopyStep verifies the generated step copies session state files.
@@ -2641,6 +2761,74 @@ func TestCopilotEngineHarnessScript(t *testing.T) {
 		}
 	})
 
+	for _, tt := range []struct {
+		name    string
+		runtime AgentRuntime
+	}{
+		{name: "Docker"},
+		{name: "gVisor", runtime: AgentRuntimeGVisor},
+		{name: "docker-sbx", runtime: AgentRuntimeDockerSbx},
+	} {
+		t.Run("AWF execution stages activated Copilot CLI binary for "+tt.name, func(t *testing.T) {
+			workflowData := &WorkflowData{
+				Name: "test-workflow",
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						ID:      "awf",
+						Runtime: tt.runtime,
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			}
+
+			steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/agent-stdio.log")
+			stepContent := strings.Join([]string(steps[0]), "\n")
+
+			if !strings.Contains(stepContent, `GH_AW_COPILOT_SRC="$(command -v copilot 2>/dev/null || true)"`) {
+				t.Fatalf("Expected AWF setup to resolve the activated Copilot CLI binary, got:\n%s", stepContent)
+			}
+			if !strings.Contains(stepContent, `cp "$GH_AW_COPILOT_SRC" "$GH_AW_COPILOT_BIN"`) {
+				t.Fatalf("Expected AWF setup to stage the Copilot CLI binary in its mounted directory, got:\n%s", stepContent)
+			}
+			mountedCopilotPath := `"` + constants.GhAwRootDirShell + `/bin/copilot"`
+			if !strings.Contains(stepContent, `copilot_harness.cjs" `+mountedCopilotPath) {
+				t.Fatalf("Expected harness to use mounted Copilot CLI path %q, got:\n%s", mountedCopilotPath, stepContent)
+			}
+			mount := `--mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro"`
+			if !strings.Contains(stepContent, mount) {
+				t.Fatalf("Expected AWF to mount the staged Copilot CLI directory, got:\n%s", stepContent)
+			}
+			if strings.Contains(stepContent, `copilot_harness.cjs" `+constants.CopilotBinaryPath) {
+				t.Fatalf("Expected harness to avoid the fixed Copilot CLI path %q, got:\n%s", constants.CopilotBinaryPath, stepContent)
+			}
+		})
+	}
+
+	t.Run("AWF custom command does not require installed Copilot CLI binary", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name: "test-workflow",
+			EngineConfig: &EngineConfig{
+				ID:      "copilot",
+				Command: "custom-copilot",
+			},
+			NetworkPermissions: &NetworkPermissions{
+				Firewall: &FirewallConfig{Enabled: true},
+			},
+		}
+
+		steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/agent-stdio.log")
+		stepContent := strings.Join([]string(steps[0]), "\n")
+
+		if strings.Contains(stepContent, "GH_AW_COPILOT_BIN") {
+			t.Fatalf("Expected custom command to avoid resolving the installed Copilot CLI binary, got:\n%s", stepContent)
+		}
+	})
+
 	t.Run("Execution step uses configured custom driver instead of built-in", func(t *testing.T) {
 		workflowData := &WorkflowData{
 			Name: "test-workflow",
@@ -2687,7 +2875,7 @@ func TestCopilotEngineHarnessScript(t *testing.T) {
 
 		stepContent := strings.Join([]string(steps[0]), "\n")
 
-		if !strings.Contains(stepContent, "copilot_harness.cjs /tmp/gh-aw/engine-command.sh") {
+		if !strings.Contains(stepContent, `copilot_harness.cjs" /tmp/gh-aw/engine-command.sh`) {
 			t.Errorf("Expected driver to run serialized engine command script, got:\n%s", stepContent)
 		}
 		if !strings.Contains(stepContent, "cat > /tmp/gh-aw/engine-command.sh <<'GH_AW_ENGINE_COMMAND_EOF'") {
@@ -2700,6 +2888,83 @@ func TestCopilotEngineHarnessScript(t *testing.T) {
 			t.Errorf("Expected step to fix ownership for $HOME/.copilot in custom engine.command mode, got:\n%s", stepContent)
 		}
 	})
+}
+
+func TestCopilotGeneratedHarnessCommandSupportsSpacedRunnerPaths(t *testing.T) {
+	engine := NewCopilotEngine()
+	runnerTemp := filepath.Join(t.TempDir(), "self hosted runner temp")
+	toolcacheBin := filepath.Join(t.TempDir(), "custom toolcache", "copilot-cli", "1.2.3", "x64", "bin")
+	if err := os.MkdirAll(toolcacheBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cachedCopilot := filepath.Join(toolcacheBin, "copilot")
+	if err := os.WriteFile(cachedCopilot, []byte("#!/usr/bin/env bash\nprintf 'copilot %s\\n' \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	nodeDir := filepath.Join(t.TempDir(), "custom node runtime")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodePath := filepath.Join(nodeDir, "node")
+	if err := os.WriteFile(nodePath, []byte("#!/usr/bin/env bash\nprintf '<%s>\\n' \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	harnessPath := filepath.Join(runnerTemp, "gh-aw", "actions", "copilot_harness.cjs")
+	mountedCopilotPath := filepath.Join(runnerTemp, "gh-aw", "bin", "copilot")
+	sdkDriverPath := filepath.Join(runnerTemp, "gh-aw", "actions", "copilot_sdk_driver.cjs")
+
+	testCases := []struct {
+		name         string
+		workflowData *WorkflowData
+		wantArgs     []string
+	}{
+		{
+			name:         "CLI",
+			workflowData: &WorkflowData{EngineConfig: &EngineConfig{ID: "copilot"}},
+			wantArgs:     []string{harnessPath, mountedCopilotPath},
+		},
+		{
+			name:         "SDK",
+			workflowData: &WorkflowData{EngineConfig: &EngineConfig{ID: "copilot", CopilotSDK: true}},
+			wantArgs:     []string{harnessPath, nodePath, sdkDriverPath, mountedCopilotPath},
+		},
+		{
+			name:         "SDK arbitrary driver",
+			workflowData: &WorkflowData{EngineConfig: &EngineConfig{ID: "copilot", CopilotSDK: true, Driver: "custom-driver"}},
+			wantArgs:     []string{harnessPath, "custom-driver", mountedCopilotPath},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			commandName, _ := engine.resolveCopilotCommand(tc.workflowData, true)
+			command := copilotBinaryPathSetup + "\n" + engine.buildCopilotExecPrefix(tc.workflowData, commandName)
+			cmd := exec.Command("bash", "-c", command)
+			cmd.Env = append(os.Environ(),
+				"GH_AW_NODE_BIN="+nodePath,
+				"RUNNER_TEMP="+runnerTemp,
+				"PATH="+toolcacheBin+":"+os.Getenv("PATH"),
+			)
+
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Expected generated harness command to preserve spaced paths: %v\n%s", err, output)
+			}
+			var wantOutput strings.Builder
+			for _, arg := range tc.wantArgs {
+				wantOutput.WriteString("<" + arg + ">\n")
+			}
+			if got := string(output); got != wantOutput.String() {
+				t.Fatalf("Expected generated harness arguments:\n%s\ngot:\n%s", wantOutput.String(), got)
+			}
+			if _, err := os.Stat(mountedCopilotPath); err != nil {
+				t.Fatalf("Expected Copilot CLI at mounted runner path: %v", err)
+			}
+		})
+	}
 }
 
 func TestCopilotEngineNoAskUser(t *testing.T) {
@@ -2802,6 +3067,12 @@ func TestBuildEngineCommandScriptSetup(t *testing.T) {
 	if !strings.Contains(setup, "umask 0177") {
 		t.Fatalf("Expected restrictive umask in script setup, got:\n%s", setup)
 	}
+	if !strings.Contains(setup, `GH_AW_PREV_UMASK="$(umask)"`) {
+		t.Fatalf("Expected script setup to preserve original umask, got:\n%s", setup)
+	}
+	if !strings.Contains(setup, `umask "$GH_AW_PREV_UMASK"`) {
+		t.Fatalf("Expected script setup to restore original umask, got:\n%s", setup)
+	}
 	if !strings.Contains(setup, "chmod 700 /tmp/gh-aw/engine-command.sh") {
 		t.Fatalf("Expected owner-only execute permissions, got:\n%s", setup)
 	}
@@ -2882,6 +3153,16 @@ func TestCopilotSupportsNoAskUser(t *testing.T) {
 			name:         "non-semver branch name returns false (conservative)",
 			engineConfig: &EngineConfig{Version: "main"},
 			expected:     false,
+		},
+		{
+			name:         "expression version is treated as supported",
+			engineConfig: &EngineConfig{Version: "${{ inputs.engine-version }}"},
+			expected:     true,
+		},
+		{
+			name:         "github event input expression is treated as supported",
+			engineConfig: &EngineConfig{Version: "${{ github.event.inputs.engine-version }}"},
+			expected:     true,
 		},
 	}
 
@@ -2964,7 +3245,7 @@ func TestCopilotEngineLLMProviderAnthropicAutoBYOK(t *testing.T) {
 	workflowData := &WorkflowData{
 		Name: "test-workflow",
 		EngineConfig: &EngineConfig{
-			LLMProvider: "anthropic",
+			LLMProvider: LLMProviderAnthropic,
 		},
 		NetworkPermissions: &NetworkPermissions{
 			Firewall: &FirewallConfig{Enabled: true},
@@ -2989,5 +3270,42 @@ func TestCopilotEngineLLMProviderAnthropicAutoBYOK(t *testing.T) {
 	}
 	if strings.Contains(stepContent, "COPILOT_GITHUB_TOKEN:") {
 		t.Errorf("COPILOT_GITHUB_TOKEN should be omitted in auto-BYOK mode, got:\n%s", stepContent)
+	}
+}
+
+// TestCopilotEngineForwardsSafeOutputsInputEnvVars verifies that GH_AW_INPUT_* variables
+// extracted from the safe-outputs config are included in the Copilot execution step env.
+// These vars must reach the agent step so that the TOML env_vars forwarding chain
+// (runner step → AWF sandbox → Copilot CLI → safe-outputs container) can resolve
+// ${GH_AW_INPUT_…} placeholders in config.json. Without this, a dynamic target-repo
+// like "${{ inputs.owner }}/${{ inputs.repo }}" stays unexpanded in the patch filename,
+// causing a mismatch with the consumer's lookup and silently dropping the PR.
+func TestCopilotEngineForwardsSafeOutputsInputEnvVars(t *testing.T) {
+	engine := NewCopilotEngine()
+	workflowData := &WorkflowData{
+		Name: "test-workflow",
+		SafeOutputs: &SafeOutputsConfig{
+			CreatePullRequests: &CreatePullRequestsConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+				TargetRepoSlug:       "${{ inputs.owner }}/${{ inputs.repo }}",
+			},
+		},
+		SafeOutputsInputEnvVars: map[string]string{
+			"GH_AW_INPUT_OWNER": "${{ inputs.owner }}",
+			"GH_AW_INPUT_REPO":  "${{ inputs.repo }}",
+		},
+	}
+
+	steps := engine.GetExecutionSteps(workflowData, "/tmp/gh-aw/test.log")
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 execution step, got %d", len(steps))
+	}
+	stepContent := strings.Join([]string(steps[0]), "\n")
+
+	if !strings.Contains(stepContent, "GH_AW_INPUT_OWNER: ${{ inputs.owner }}") {
+		t.Errorf("Expected GH_AW_INPUT_OWNER in step env for TOML env_vars forwarding, got:\n%s", stepContent)
+	}
+	if !strings.Contains(stepContent, "GH_AW_INPUT_REPO: ${{ inputs.repo }}") {
+		t.Errorf("Expected GH_AW_INPUT_REPO in step env for TOML env_vars forwarding, got:\n%s", stepContent)
 	}
 }

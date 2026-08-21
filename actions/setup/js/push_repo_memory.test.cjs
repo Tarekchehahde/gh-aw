@@ -1008,8 +1008,9 @@ describe("push_repo_memory.cjs - shell injection security tests", () => {
       const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
       const scriptContent = fs.readFileSync(scriptPath, "utf8");
 
-      // Should import execGitSync (and getGitAuthEnv) from git_helpers, not use execSync or spawnSync directly
+      // Should import execGitSync from git_helpers, not use execSync or spawnSync directly
       expect(scriptContent).toContain('require("./git_helpers.cjs")');
+      expect(scriptContent).toContain('require("./git_auth_helpers.cjs")');
       expect(scriptContent).not.toContain('const { execSync } = require("child_process")');
       expect(scriptContent).not.toContain('const { spawnSync } = require("child_process")');
 
@@ -1073,11 +1074,34 @@ describe("push_repo_memory.cjs - shell injection security tests", () => {
       const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
       const scriptContent = fs.readFileSync(scriptPath, "utf8");
 
-      // Must use "git add --sparse ." to stage files regardless of sparse-checkout state.
-      expect(scriptContent).toContain('"add", "--sparse", "."');
+      // Must use git add --sparse with literal pathspec staging so only managed memory paths are included.
+      expect(scriptContent).toContain('"add", "--sparse"');
+      expect(scriptContent).toContain('addArgs.push("--", ...literalPathspecs)');
 
       // Must NOT use plain "git add ." which breaks under sparse-checkout.
       expect(scriptContent).not.toContain('"add", "."');
+    });
+
+    it("should encode pathspecs as :(literal) to prevent Git glob/magic interpretation (source check)", () => {
+      // Regression test for: filenames with glob metacharacters or pathspec-magic prefixes
+      // (e.g. ":(top)foo", "metrics/*.json") being interpreted as Git pathspecs rather
+      // than literal paths, which could cause git status/add to match files outside the
+      // managed memory scope.
+      //
+      // Fix: all artifact-derived paths are wrapped with the :(literal) magic prefix so
+      // Git treats them as plain strings regardless of their content.
+
+      const fs = require("fs");
+      const path = require("path");
+
+      const scriptPath = path.join(import.meta.dirname, "push_repo_memory.cjs");
+      const scriptContent = fs.readFileSync(scriptPath, "utf8");
+
+      // Must build literalPathspecs using the :(literal) magic prefix.
+      expect(scriptContent).toContain("`:(literal)${");
+      // Must pass literalPathspecs (not raw paths) to git status and git add.
+      expect(scriptContent).toContain("literalPathspecs");
+      expect(scriptContent).not.toContain("changedPathspecs");
     });
 
     it("should safely handle malicious branch names", () => {
@@ -1562,7 +1586,8 @@ describe("push_repo_memory.cjs - changed-file limit checks", () => {
     const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
 
     expect(scriptContent).toContain("changedFileCount");
-    expect(scriptContent).toContain('execGitSync(["status", "--porcelain"])');
+    expect(scriptContent).toContain('["status", "--porcelain"]');
+    expect(scriptContent).toContain('statusArgs.push("--", ...literalPathspecs)');
     expect(scriptContent).toContain("Too many changed files");
     expect(scriptContent).not.toContain("if (filesToCopy.length > maxFileCount)");
     expect(scriptContent).toContain("if (changedFileCount > maxFileCount)");
@@ -1572,11 +1597,13 @@ describe("push_repo_memory.cjs - changed-file limit checks", () => {
     const nodeFs = require("fs");
     const nodePath = require("path");
     const scriptPath = nodePath.join(import.meta.dirname, "push_repo_memory.cjs");
+    const helperPath = nodePath.join(import.meta.dirname, "memory_custom_validation.cjs");
     const scriptContent = nodeFs.readFileSync(scriptPath, "utf8");
+    const helperContent = nodeFs.readFileSync(helperPath, "utf8");
 
-    expect(scriptContent).toContain('Buffer.byteLength(formatted, "utf8")');
-    expect(scriptContent).toContain("Formatted JSON exceeds MAX_FILE_SIZE");
-    expect(scriptContent).toContain("FormatJSONSizeLimitError");
+    expect(scriptContent).toContain("formatJSONFiles(destMemoryPath, maxFileSize)");
+    expect(helperContent).toContain('Buffer.byteLength(formatted, "utf8")');
+    expect(helperContent).toContain("Formatted JSON exceeds max file size");
   });
 });
 

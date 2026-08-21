@@ -376,6 +376,12 @@ func TestExtractYAMLValueAtPath(t *testing.T) {
 			wantValue: "copilot",
 		},
 		{
+			name:      "top-level unquoted value with inline comment",
+			yaml:      "engine: coplit # typo\n",
+			path:      "/engine",
+			wantValue: "coplit",
+		},
+		{
 			name:      "nested path - child not in yaml returns empty",
 			yaml:      "engine: copilot\n",
 			path:      "/permissions/issues",
@@ -402,6 +408,12 @@ func TestExtractYAMLValueAtPath(t *testing.T) {
 		{
 			name:      "nested path - double-quoted value",
 			yaml:      "permissions:\n  contents: \"raed\"\n",
+			path:      "/permissions/contents",
+			wantValue: "raed",
+		},
+		{
+			name:      "nested path - unquoted value with inline comment",
+			yaml:      "permissions:\n    contents: raed # typo\n",
 			path:      "/permissions/contents",
 			wantValue: "raed",
 		},
@@ -443,6 +455,27 @@ func TestExtractYAMLValueAtPath(t *testing.T) {
 			yaml:      "permissions:\n  nested:\n    contents: grandchild\n  contents: direct\n",
 			path:      "/permissions/contents",
 			wantValue: "direct",
+		},
+		{
+			// Field name containing a dot (regex metacharacter); QuoteMeta escaping must handle it.
+			name:      "field name with dot (regex metacharacter)",
+			yaml:      "timeout.minutes: 30\n",
+			path:      "/timeout.minutes",
+			wantValue: "30",
+		},
+		{
+			// Field name with a plus sign (regex metacharacter).
+			name:      "field name with plus (regex metacharacter)",
+			yaml:      "score+bonus: 5\n",
+			path:      "/score+bonus",
+			wantValue: "5",
+		},
+		{
+			// Field name that looks like it could open a character class.
+			name:      "field name with brackets (regex metacharacter)",
+			yaml:      "items[0]: first\n",
+			path:      "/items[0]",
+			wantValue: "first",
 		},
 	}
 

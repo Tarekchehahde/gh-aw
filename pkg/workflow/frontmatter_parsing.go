@@ -13,6 +13,11 @@ func ParseFrontmatterConfig(frontmatter map[string]any) (*FrontmatterConfig, err
 	frontmatterTypesLog.Printf("Parsing frontmatter config with %d fields", len(frontmatter))
 	var config FrontmatterConfig
 
+	githubApp, err := extractTypedTopLevelGitHubApp(frontmatter)
+	if err != nil {
+		return nil, err
+	}
+
 	// Use JSON marshaling for the entire frontmatter conversion.
 	// TemplatableInt32.UnmarshalJSON transparently handles both integer literals
 	// (e.g. timeout-minutes: 30) and GitHub Actions expressions
@@ -26,6 +31,9 @@ func ParseFrontmatterConfig(frontmatter map[string]any) (*FrontmatterConfig, err
 	if err := json.Unmarshal(jsonBytes, &config); err != nil {
 		frontmatterTypesLog.Printf("Failed to unmarshal frontmatter: %v", err)
 		return nil, fmt.Errorf("failed to unmarshal frontmatter into config: %w", err)
+	}
+	if err := validateThreatDetectionSuppressions(config.ThreatDetectionSuppressions); err != nil {
+		return nil, err
 	}
 
 	if err := validateRunsOnValue(config.RunsOn); err != nil {
@@ -41,6 +49,15 @@ func ParseFrontmatterConfig(frontmatter map[string]any) (*FrontmatterConfig, err
 		if threatRaw, ok := safeOutputsRaw["threat-detection"].(map[string]any); ok {
 			if err := validateRunsOnValue(threatRaw["runs-on"]); err != nil {
 				return nil, err
+			}
+		}
+		if jobsRaw, ok := safeOutputsRaw["jobs"].(map[string]any); ok {
+			for _, jobRaw := range jobsRaw {
+				if job, ok := jobRaw.(map[string]any); ok {
+					if err := validateRunsOnValue(job["runs-on"]); err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 	}
@@ -67,6 +84,7 @@ func ParseFrontmatterConfig(frontmatter map[string]any) (*FrontmatterConfig, err
 	if config.Checkout != nil {
 		if checkoutValue, ok := config.Checkout.(bool); ok && !checkoutValue {
 			config.CheckoutDisabled = true
+			config.CheckoutExplicitlyDisabled = true
 			frontmatterTypesLog.Print("Checkout disabled via checkout: false")
 		} else {
 			checkoutConfigs, err := ParseCheckoutConfigs(config.Checkout)
@@ -94,6 +112,15 @@ func ParseFrontmatterConfig(frontmatter map[string]any) (*FrontmatterConfig, err
 	if rawSkills, ok := frontmatter["skills"].([]any); ok {
 		config.SkillReferences = parseRawSkillReferences(rawSkills)
 	}
+	if ambientFolders, err := extractAmbientFolders(frontmatter); err != nil {
+		return nil, err
+	} else if ambientFolders != nil {
+		config.AmbientFolders, err = normalizeAmbientFolders(ambientFolders)
+		if err != nil {
+			return nil, err
+		}
+	}
+	config.GitHubApp = githubApp
 
 	frontmatterTypesLog.Printf("Successfully parsed frontmatter config: name=%s, engine=%v", config.Name, config.Engine)
 	return &config, nil

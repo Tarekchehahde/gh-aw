@@ -43,10 +43,10 @@ This is a test workflow with anonymous bash syntax.
 
 	// Verify that compilation fails with the expected error
 	require.Error(t, err, "Compilation should fail for anonymous bash syntax")
-	assert.Contains(t, err.Error(), "anonymous syntax 'bash:' is not supported", "Error should mention anonymous syntax")
-	assert.Contains(t, err.Error(), "bash: true", "Error should suggest bash: true")
-	assert.Contains(t, err.Error(), "bash: false", "Error should suggest bash: false")
-	assert.Contains(t, err.Error(), "gh aw fix", "Error should suggest using gh aw fix")
+	require.ErrorContains(t, err, "anonymous syntax 'bash:' is not supported", "Error should mention anonymous syntax")
+	require.ErrorContains(t, err, "bash: true", "Error should suggest bash: true")
+	require.ErrorContains(t, err, "bash: false", "Error should suggest bash: false")
+	require.ErrorContains(t, err, "gh aw fix", "Error should suggest using gh aw fix")
 }
 
 func TestCompilerAcceptsExplicitBashSyntax(t *testing.T) {
@@ -61,8 +61,10 @@ func TestCompilerAcceptsExplicitBashSyntax(t *testing.T) {
 			bashConfig: "bash: true",
 		},
 		{
+			// cli-proxy must be explicitly disabled alongside bash: false in strict mode,
+			// since CLI-mounted MCP servers can only be invoked from a shell.
 			name:       "bash: false",
-			bashConfig: "bash: false",
+			bashConfig: "bash: false\n  cli-proxy: false",
 		},
 		{
 			name:       "bash with array",

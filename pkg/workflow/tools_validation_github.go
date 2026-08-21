@@ -22,7 +22,7 @@ func validateGitHubReadOnly(tools *Tools, workflowName string) error {
 
 	if !tools.GitHub.ReadOnly {
 		toolsValidationLog.Printf("Invalid read-only configuration in workflow: %s", workflowName)
-		return errors.New("invalid GitHub tool configuration: 'tools.github.read-only: false' is not allowed. The GitHub MCP server always operates in read-only mode. Remove the 'read-only' field or set it to 'true'")
+		return errors.New("'tools.github.read-only: false' is not supported because the GitHub MCP server always operates in read-only mode. Remove the 'read-only' field or set it to 'true'. Example:\ntools:\n  github:\n    read-only: true")
 	}
 
 	return nil
@@ -38,7 +38,7 @@ func validateGitHubToolConfig(tools *Tools, workflowName string) error {
 
 	if tools.GitHub.GitHubApp != nil && tools.GitHub.GitHubToken != "" {
 		toolsValidationLog.Printf("Invalid GitHub tool configuration in workflow: %s", workflowName)
-		return errors.New("invalid GitHub tool configuration: 'tools.github.github-app' and 'tools.github.github-token' cannot both be set. Use one authentication method: either 'github-app' (GitHub App) or 'github-token' (personal access token)")
+		return errors.New("'tools.github.github-app' and 'tools.github.github-token' cannot both be set. Use one authentication method: either 'github-app' (GitHub App) or 'github-token' (personal access token). Example:\ntools:\n  github:\n    github-token: \"${{ secrets.GITHUB_TOKEN }}\"")
 	}
 
 	return nil
@@ -54,8 +54,9 @@ func hasGitHubGuardPolicyFields(github *GitHubToolConfig) bool {
 
 	// This is a presence check, not a validity check. Explicit but invalid values
 	// (for example an empty string or wrong type injected programmatically) still
-	// count as configured guard-policy fields and are validated later.
-	hasRepos := github.AllowedRepos != nil
+	// count as configured guard-policy fields and are validated later. Include the
+	// deprecated Repos alias so lockdown conflict warnings also cover legacy input.
+	hasRepos := github.AllowedRepos != nil || github.Repos != nil
 	hasMinIntegrity := github.MinIntegrity != ""
 	hasBlockedUsers := len(github.BlockedUsers) > 0 || github.BlockedUsersExpr != ""
 	hasApprovalLabels := len(github.ApprovalLabels) > 0 || github.ApprovalLabelsExpr != ""
@@ -83,6 +84,33 @@ func emitGitHubLockdownGuardPolicyWarning(compiler *Compiler, tools *Tools, mark
 	fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", githubLockdownGuardPolicyWarningMessage))
 }
 
+const githubMinIntegrityNoneBashWarningMessage = `'tools.github.min-integrity' is set to 'none' without an explicit 'tools.bash' setting. ` +
+	`External users may execute arbitrary commands in the sandbox. ` +
+	`Set 'tools.bash' explicitly to acknowledge shell access (e.g. 'bash: ["cat", "ls", "grep"]' for read-only commands).`
+
+// emitMinIntegrityNoneBashWarning emits a warning when min-integrity is none and bash is not explicitly specified.
+// This is called in non-strict mode (strict mode rejects this combination as an error).
+func emitMinIntegrityNoneBashWarning(compiler *Compiler, tools *Tools, markdownPath string) {
+	if tools == nil || tools.GitHub == nil {
+		return
+	}
+	if tools.GitHub.MinIntegrity != GitHubIntegrityNone {
+		return
+	}
+	// Check if bash is explicitly specified (Bash field is non-nil)
+	if tools.Bash != nil {
+		return
+	}
+
+	if compiler == nil {
+		return
+	}
+
+	toolsValidationLog.Printf("Emitting min-integrity: none bash warning for workflow: %s", markdownPath)
+	compiler.IncrementWarningCount()
+	fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", githubMinIntegrityNoneBashWarningMessage))
+}
+
 // validateGitHubGuardPolicy validates the GitHub guard policy configuration.
 // Guard policy fields (allowed-repos, min-integrity) are specified flat under github:.
 // Note: 'repos' is a deprecated alias for 'allowed-repos'.
@@ -97,7 +125,14 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 		toolsValidationLog.Printf("lockdown enabled with guard policy fields in workflow: %s", workflowName)
 	}
 
-	// AllowedRepos is populated from either 'allowed-repos' (preferred) or deprecated 'repos' during parsing
+	// AllowedRepos is populated from either 'allowed-repos' (preferred) or deprecated
+	// 'repos' during parsing. Normalize the deprecated alias here as well so that
+	// configurations built programmatically (bypassing the parser) are validated
+	// identically to parsed frontmatter.
+	if github.AllowedRepos == nil && github.Repos != nil {
+		toolsValidationLog.Printf("Normalizing deprecated 'repos' alias to 'allowed-repos' in workflow: %s", workflowName)
+		github.AllowedRepos = github.Repos
+	}
 	hasRepos := github.AllowedRepos != nil
 	hasMinIntegrity := github.MinIntegrity != ""
 	// blocked-users / approval-labels / trusted-users can be an array or a
@@ -109,7 +144,7 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 	// blocked-users, trusted-users, and approval-labels require a guard policy (min-integrity)
 	if (hasBlockedUsers || hasApprovalLabels || hasTrustedUsers) && !hasMinIntegrity {
 		toolsValidationLog.Printf("blocked-users/trusted-users/approval-labels without guard policy in workflow: %s", workflowName)
-		return errors.New("invalid guard policy: 'github.blocked-users', 'github.trusted-users', and 'github.approval-labels' require 'github.min-integrity' to be set")
+		return errors.New("'github.blocked-users', 'github.trusted-users', and 'github.approval-labels' require 'github.min-integrity' to be set. Example:\ntools:\n  github:\n    min-integrity: approved\n    blocked-users: [\"spammer\"]")
 	}
 
 	// No guard policy fields present - nothing to validate
@@ -131,7 +166,7 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 	// Validate min-integrity field (required when repos is set)
 	if !hasMinIntegrity {
 		toolsValidationLog.Printf("Missing min-integrity in guard policy for workflow: %s", workflowName)
-		return errors.New("invalid guard policy: 'github.min-integrity' is required. Valid values: 'none', 'unapproved', 'approved', 'merged'")
+		return errors.New("'github.min-integrity' is required when 'github.allowed-repos' is set. Valid values: 'none', 'unapproved', 'approved', 'merged'. Example:\ntools:\n  github:\n    allowed-repos: all\n    min-integrity: approved")
 	}
 
 	// Validate min-integrity value
@@ -144,14 +179,14 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 
 	if !validIntegrityLevels[github.MinIntegrity] {
 		toolsValidationLog.Printf("Invalid min-integrity level '%s' in workflow: %s", github.MinIntegrity, workflowName)
-		return errors.New("invalid guard policy: 'github.min-integrity' must be one of: 'none', 'unapproved', 'approved', 'merged'. Got: '" + string(github.MinIntegrity) + "'")
+		return errors.New("'github.min-integrity' must be one of: 'none', 'unapproved', 'approved', 'merged'. Got: '" + string(github.MinIntegrity) + "'. Example:\ntools:\n  github:\n    min-integrity: approved")
 	}
 
 	// Validate blocked-users (must be non-empty strings; expressions are accepted as-is)
 	for i, user := range github.BlockedUsers {
 		if user == "" {
 			toolsValidationLog.Printf("Empty blocked-users entry at index %d in workflow: %s", i, workflowName)
-			return errors.New("invalid guard policy: 'github.blocked-users' entries must not be empty strings")
+			return errors.New("'github.blocked-users' entries must not be empty strings. Example:\ntools:\n  github:\n    blocked-users: [\"spammer\"]")
 		}
 	}
 
@@ -159,7 +194,7 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 	for i, label := range github.ApprovalLabels {
 		if label == "" {
 			toolsValidationLog.Printf("Empty approval-labels entry at index %d in workflow: %s", i, workflowName)
-			return errors.New("invalid guard policy: 'github.approval-labels' entries must not be empty strings")
+			return errors.New("'github.approval-labels' entries must not be empty strings. Example:\ntools:\n  github:\n    approval-labels: [\"approved\"]")
 		}
 	}
 
@@ -167,7 +202,7 @@ func validateGitHubGuardPolicy(tools *Tools, workflowName string) error {
 	for i, user := range github.TrustedUsers {
 		if user == "" {
 			toolsValidationLog.Printf("Empty trusted-users entry at index %d in workflow: %s", i, workflowName)
-			return errors.New("invalid guard policy: 'github.trusted-users' entries must not be empty strings")
+			return errors.New("'github.trusted-users' entries must not be empty strings. Example:\ntools:\n  github:\n    trusted-users: [\"octocat\"]")
 		}
 	}
 
@@ -180,7 +215,7 @@ func validateReposScope(repos any, workflowName string) error {
 	if reposStr, ok := repos.(string); ok {
 		if reposStr != "all" && reposStr != "public" && !isExactGitHubRepositoryExpression(reposStr) {
 			toolsValidationLog.Printf("Invalid repos string '%s' in workflow: %s", reposStr, workflowName)
-			return errors.New("invalid guard policy: 'github.allowed-repos' string must be 'all', 'public', or '${{ github.repository }}'. Got: '" + reposStr + "'")
+			return errors.New("'github.allowed-repos' string must be 'all', 'public', or '${{ github.repository }}'. Got: '" + reposStr + "'. Example:\ntools:\n  github:\n    allowed-repos: all")
 		}
 		return nil
 	}
@@ -189,14 +224,14 @@ func validateReposScope(repos any, workflowName string) error {
 	if reposArray, ok := repos.([]any); ok {
 		if len(reposArray) == 0 {
 			toolsValidationLog.Printf("Empty repos array in workflow: %s", workflowName)
-			return errors.New("invalid guard policy: 'github.allowed-repos' array cannot be empty. Provide at least one repository pattern")
+			return errors.New("'github.allowed-repos' array cannot be empty. Provide at least one repository pattern. Example:\ntools:\n  github:\n    allowed-repos: [\"owner/repo\"]")
 		}
 
 		for i, item := range reposArray {
 			pattern, ok := item.(string)
 			if !ok {
 				toolsValidationLog.Printf("Non-string item in repos array at index %d in workflow: %s", i, workflowName)
-				return errors.New("invalid guard policy: 'github.allowed-repos' array must contain only strings")
+				return errors.New("'github.allowed-repos' array must contain only strings. Example:\ntools:\n  github:\n    allowed-repos: [\"owner/repo\"]")
 			}
 
 			if err := validateRepoPattern(pattern, workflowName); err != nil {
@@ -211,7 +246,7 @@ func validateReposScope(repos any, workflowName string) error {
 	if reposArray, ok := repos.([]string); ok {
 		if len(reposArray) == 0 {
 			toolsValidationLog.Printf("Empty repos array in workflow: %s", workflowName)
-			return errors.New("invalid guard policy: 'github.allowed-repos' array cannot be empty. Provide at least one repository pattern")
+			return errors.New("'github.allowed-repos' array cannot be empty. Provide at least one repository pattern. Example:\ntools:\n  github:\n    allowed-repos: [\"owner/repo\"]")
 		}
 
 		for _, pattern := range reposArray {
@@ -225,7 +260,7 @@ func validateReposScope(repos any, workflowName string) error {
 
 	// Invalid type
 	toolsValidationLog.Printf("Invalid repos type in workflow: %s", workflowName)
-	return errors.New("invalid guard policy: 'github.allowed-repos' must be 'all', 'public', or an array of repository patterns")
+	return errors.New("'github.allowed-repos' has an unsupported type. Expected 'all', 'public', or an array of repository patterns. Example:\ntools:\n  github:\n    allowed-repos: [\"owner/repo\"]")
 }
 
 // validateRepoPattern validates a single repository pattern
@@ -237,7 +272,7 @@ func validateRepoPattern(pattern string, workflowName string) error {
 	// Pattern must be lowercase
 	if strings.ToLower(pattern) != pattern {
 		toolsValidationLog.Printf("Repository pattern '%s' is not lowercase in workflow: %s", pattern, workflowName)
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' must be lowercase")
+		return errors.New("repository pattern '" + pattern + "' must be lowercase. Example: 'owner/repo' instead of 'Owner/Repo'")
 	}
 
 	// Check for valid pattern formats:
@@ -247,7 +282,7 @@ func validateRepoPattern(pattern string, workflowName string) error {
 	parts := strings.Split(pattern, "/")
 	if len(parts) != 2 {
 		toolsValidationLog.Printf("Invalid repository pattern '%s' in workflow: %s", pattern, workflowName)
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' must be in format 'owner/repo', 'owner/*', or 'owner/prefix*'")
+		return errors.New("repository pattern '" + pattern + "' must be in format 'owner/repo', 'owner/*', or 'owner/prefix*'. Example: 'owner/repo'")
 	}
 
 	owner := parts[0]
@@ -255,26 +290,26 @@ func validateRepoPattern(pattern string, workflowName string) error {
 
 	// Validate owner part (must be non-empty and contain only valid characters)
 	if owner == "" {
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' has empty owner")
+		return errors.New("repository pattern '" + pattern + "' has an empty owner. Expected 'owner/repo' format. Example: 'owner/repo'")
 	}
 
 	if !isValidOwnerOrRepo(owner) {
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' has invalid owner. Must contain only lowercase letters, numbers, hyphens, and underscores")
+		return errors.New("repository pattern '" + pattern + "' has an unsupported owner. Expected only lowercase letters, numbers, hyphens, and underscores. Example: 'owner/repo'")
 	}
 
 	// Validate repo part
 	if repo == "" {
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' has empty repository name")
+		return errors.New("repository pattern '" + pattern + "' has an empty repository name. Expected 'owner/repo' format. Example: 'owner/repo'")
 	}
 
 	// Allow wildcard '*' or prefix with trailing '*'
 	if repo != "*" && !isValidOwnerOrRepo(strings.TrimSuffix(repo, "*")) {
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' has invalid repository name. Must contain only lowercase letters, numbers, hyphens, underscores, or be '*' or 'prefix*'")
+		return errors.New("repository pattern '" + pattern + "' has an unsupported repository name. Expected only lowercase letters, numbers, hyphens, underscores, or a wildcard like '*' or 'prefix*'. Example: 'owner/repo' or 'owner/prefix*'")
 	}
 
 	// Validate that wildcard is only at the end (not in the middle)
 	if strings.Contains(strings.TrimSuffix(repo, "*"), "*") {
-		return errors.New("invalid guard policy: repository pattern '" + pattern + "' has wildcard in the middle. Wildcards only allowed at the end (e.g., 'prefix*')")
+		return errors.New("repository pattern '" + pattern + "' has a wildcard in the middle. Wildcards are only allowed at the end. Example: 'owner/prefix*'")
 	}
 
 	return nil

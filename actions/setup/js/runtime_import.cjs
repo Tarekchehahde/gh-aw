@@ -9,11 +9,33 @@
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_API, ERR_CONFIG, ERR_PARSE, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
 const { isTruthy } = require("./is_truthy.cjs");
+const { closeUnterminatedSkillMarkers } = require("./extract_inline_skills.cjs");
+const { closeUnterminatedSubAgentMarkers } = require("./extract_inline_sub_agents.cjs");
 
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
+
+/**
+ * Makes any "## skill:"/"## agent:" block in a runtime-imported chunk of
+ * content self-terminating before it is spliced into the larger prompt.
+ *
+ * Runtime imports are resolved and spliced into the surrounding document
+ * before inline skill/sub-agent extraction runs (see interpolate_prompt.cjs).
+ * If an imported file relies on implicit closing (next H2 heading or EOF)
+ * for a skill/agent block, that block would expand past the imported file's
+ * own boundary once spliced in and swallow whatever follows it — content
+ * from the importing workflow's main body or from subsequent imports.
+ * Making the end marker explicit here keeps every runtime import
+ * self-contained regardless of where it ends up in the assembled document.
+ *
+ * @param {string} content - Resolved content of a single runtime import (file or URL).
+ * @returns {string} Content with implicit skill/agent end markers made explicit.
+ */
+function closeUnterminatedInlineMarkers(content) {
+  return closeUnterminatedSubAgentMarkers(closeUnterminatedSkillMarkers(content));
+}
 
 /**
  * Checks if a file starts with front matter (---\n)
@@ -665,7 +687,11 @@ function hasGitHubActionsMacros(content) {
 async function fetchUrlContent(url, cacheDir) {
   // Create cache directory if it doesn't exist
   if (!fs.existsSync(cacheDir)) {
-    fs.mkdirSync(cacheDir, { recursive: true });
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to create directory ${cacheDir}: ${getErrorMessage(err)}`, { cause: err });
+    }
   }
 
   // Generate cache filename from URL (hash it for safety)
@@ -675,13 +701,25 @@ async function fetchUrlContent(url, cacheDir) {
 
   // Check if cached version exists and is recent (less than 1 hour old)
   if (fs.existsSync(cacheFile)) {
-    const stats = fs.statSync(cacheFile);
-    const ageInMs = Date.now() - stats.mtimeMs;
-    const oneHourInMs = 60 * 60 * 1000;
+    let stats;
+    try {
+      stats = fs.statSync(cacheFile);
+    } catch (err) {
+      core.warning(`Failed to inspect cache file ${cacheFile}: ${getErrorMessage(err)}. Refetching URL content.`);
+      stats = null;
+    }
+    if (stats) {
+      const ageInMs = Date.now() - stats.mtimeMs;
+      const oneHourInMs = 60 * 60 * 1000;
 
-    if (ageInMs < oneHourInMs) {
-      core.info(`Using cached content for URL: ${url}`);
-      return fs.readFileSync(cacheFile, "utf8");
+      if (ageInMs < oneHourInMs) {
+        core.info(`Using cached content for URL: ${url}`);
+        try {
+          return fs.readFileSync(cacheFile, "utf8");
+        } catch (err) {
+          throw new Error(`${ERR_SYSTEM}: Failed to read file ${cacheFile}: ${getErrorMessage(err)}`, { cause: err });
+        }
+      }
     }
   }
 
@@ -705,7 +743,12 @@ async function fetchUrlContent(url, cacheDir) {
 
         res.on("end", () => {
           // Cache the content
-          fs.writeFileSync(cacheFile, data, "utf8");
+          try {
+            fs.writeFileSync(cacheFile, data, "utf8");
+          } catch (err) {
+            reject(new Error(`Failed to write file ${cacheFile}: ${getErrorMessage(err)}`, { cause: err }));
+            return;
+          }
           resolve(data);
         });
       })
@@ -797,6 +840,11 @@ async function processUrlImport(url, optional, startLine, endLine) {
   if (hasGitHubActionsMacros(content)) {
     content = processExpressions(content, `URL ${url}`);
   }
+
+  // Close any unterminated "## skill:"/"## agent:" block so this import
+  // cannot swallow content that gets spliced in after it (see
+  // closeUnterminatedInlineMarkers above).
+  content = closeUnterminatedInlineMarkers(content);
 
   return content;
 }
@@ -1036,7 +1084,12 @@ async function processRuntimeImport(filepathOrUrl, optional, workspaceDir, start
   }
 
   // Read the file
-  let content = fs.readFileSync(normalizedPath, "utf8");
+  let content;
+  try {
+    content = fs.readFileSync(normalizedPath, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${normalizedPath}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   // If line range is specified, extract those lines first (before other processing)
   if (startLine !== undefined || endLine !== undefined) {
@@ -1110,6 +1163,11 @@ async function processRuntimeImport(filepathOrUrl, optional, workspaceDir, start
   if (hasGitHubActionsMacros(content)) {
     content = processExpressions(content, `File ${filepath}`);
   }
+
+  // Close any unterminated "## skill:"/"## agent:" block so this import
+  // cannot swallow content that gets spliced in after it (see
+  // closeUnterminatedInlineMarkers above).
+  content = closeUnterminatedInlineMarkers(content);
 
   return content;
 }
@@ -1348,6 +1406,7 @@ async function processRuntimeImports(content, workspaceDir, importedFiles = new 
 module.exports = {
   processRuntimeImports,
   processRuntimeImport,
+  closeUnterminatedInlineMarkers,
   hasFrontMatter,
   removeXMLComments,
   neutralizeSystemTags,

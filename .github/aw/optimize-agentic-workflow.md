@@ -55,8 +55,12 @@ The workflow was stopped because it consumed more AI Credits than the configured
 Priority checks:
 1. Which tool calls dominated token usage? (`token-usage.jsonl`)
 2. Is the prompt front-loading large payloads that could be fetched on demand?
-3. Are there repetitive extraction steps that sub-agents could handle cheaply?
-4. Does the frontier model handle tasks that a small model could do?
+3. Are there large file reads (> 20 KB) via `get_file_contents` that could be replaced with `grep`/`glob`/`view_range`? These are the most common cause of late-session token spikes.
+4. Are there repetitive extraction steps that sub-agents could handle cheaply?
+5. Does the frontier model handle tasks that a small model could do?
+6. Can the workflow stay within its current budget after applying and measuring all applicable optimizations?
+
+Increasing `max-ai-credits` is the last resort. Recommend it only after the applicable optimizations below have been tried and measured, and the workflow still cannot complete with acceptable quality within the existing per-run budget.
 
 ### `max-daily-ai-credits` exceeded
 
@@ -86,19 +90,24 @@ Priority checks:
 1. Is the task decomposable into smaller, faster sub-tasks?
 2. Are there long-running tool calls that could be replaced with DataOps pre-steps?
 3. Is the prompt asking the agent to do too much in one run?
-4. Can `max-turns` or `timeout-minutes` be raised, or should the task be split?
+4. For a large repetitive backlog, can each run process a manageable subset selected with a cache cursor or deterministic round-robin heuristic?
+5. Can `max-turns` or `timeout-minutes` be raised, or should the task be split?
 
 ## Optimization Analysis Plan
 
 After measuring token usage, produce a prioritized plan:
 
 1. **Measure** — run `gh aw audit <run-id>` and summarize AI Credits and per-call token breakdown
-2. **Identify top cost drivers** — list the three most expensive phases/tool calls
-3. **Apply quick wins first** — DataOps pre-steps, `gh-proxy`, `cli-proxy`, prompt trimming
-4. **Sub-agent delegation** — identify repetitive per-item loops suitable for small-model workers
-5. **Prompt caching** — verify stable context appears before dynamic content
-6. **Experiment** — add an `experiments:` entry with `metric: "aic"` to measure the change
-7. **Validate quality** — confirm the optimized run produces equivalent safe outputs
+2. **Diagnose the harness** — classify failures across context assembly, tool interaction, generation control, orchestration, memory management, and output processing
+3. **Identify top cost drivers** — list the three most expensive phases/tool calls
+4. **Apply quick wins first** — DataOps pre-steps, `gh-proxy`, `cli-proxy`, prompt trimming
+5. **Sub-agent delegation** — identify repetitive per-item loops suitable for small-model workers
+6. **Bound repetitive work** — for very large backlogs, cap each run to a budget-safe subset and rotate through work with a persisted cache cursor or deterministic heuristic so items are not starved
+7. **Reuse execution experience** — preserve compact task features, configuration deltas, outcomes, costs, and diagnoses in `cache-memory` when cross-run reuse is useful; apply relevant recurring patterns to similar cases
+8. **Prompt caching** — verify stable instructions and reusable experience appear before dynamic content
+9. **Experiment correctness first** — add an `experiments:` entry, compare output quality first, and use `metric: "aic"` to choose among equivalent-quality variants
+10. **Validate quality** — confirm the optimized run produces equivalent safe outputs
+11. **Raise the per-run budget only if necessary** — consider increasing `max-ai-credits` only after all applicable optimizations have been exhausted and measured
 
 Present the plan clearly before making any edits. Confirm with the user before applying changes.
 

@@ -5,13 +5,22 @@ set +o histexpand
 # Used when `features: gh-aw-detection: true` is set in the workflow frontmatter to enable
 # the external threat-detect binary detection path instead of inline engine execution.
 #
-# Usage: install_threat_detect_binary.sh VERSION
+# Usage: install_threat_detect_binary.sh VERSION [--rootless]
 #
 # Arguments:
-#   VERSION - threat-detect version to install (e.g., v0.2.2)
+#   VERSION    - threat-detect version to install (e.g., v0.2.2) or "latest" to
+#                install the latest release via GitHub's latest-release download endpoint
+#   --rootless - Install to ~/.local/bin without sudo; appends that directory to
+#                $GITHUB_PATH so subsequent steps find the binary.  Use this on
+#                ARC/DinD runners that enforce allowPrivilegeEscalation: false.
 #
 # Platform support:
 #   - Linux (x64, arm64): Downloads pre-built binary
+#   - macOS: NOT supported. Agentic workflows require Linux container jobs, and the
+#     compiler rejects macOS runner labels (including
+#     safe-outputs.threat-detection.runs-on) before a workflow is generated. If this
+#     script is ever reached on Darwin it fails fast with an explicit message instead
+#     of attempting a download.
 #
 # Security features:
 #   - Downloads directly from GitHub releases
@@ -21,15 +30,54 @@ set +o histexpand
 set -euo pipefail
 
 # Configuration
-THREAT_DETECT_VERSION="${1:-}"
 THREAT_DETECT_REPO="github/gh-aw-threat-detection"
 THREAT_DETECT_INSTALL_DIR="/usr/local/bin"
 THREAT_DETECT_INSTALL_NAME="threat-detect"
+MACOS_FAQ_URL="https://github.github.com/gh-aw/reference/faq/#why-are-macos-runners-not-supported"
+
+# Parse arguments: treat the first non-flag argument as VERSION, all --<flag> arguments as flags.
+THREAT_DETECT_VERSION=""
+ROOTLESS=false
+for arg in "$@"; do
+  case "$arg" in
+    --rootless) ROOTLESS=true ;;
+    --*) echo "WARNING: Unknown flag: $arg" >&2 ;;
+    *)
+      if [ -z "$THREAT_DETECT_VERSION" ]; then
+        THREAT_DETECT_VERSION="$arg"
+      fi
+      ;;
+  esac
+done
 
 if [ -z "$THREAT_DETECT_VERSION" ]; then
   echo "ERROR: threat-detect version is required"
-  echo "Usage: $0 VERSION"
+  echo "Usage: $0 VERSION [--rootless]"
   exit 1
+fi
+
+# In rootless mode, install into the user's home directory instead of /usr/local/bin
+# so that ARC/DinD runners with allowPrivilegeEscalation: false can run without sudo.
+if [ "$ROOTLESS" = "true" ]; then
+  THREAT_DETECT_INSTALL_DIR="${HOME}/.local/bin"
+fi
+
+# maybe_sudo runs a command with sudo unless --rootless was specified.
+# In rootless mode, sudo is not available or needed.
+maybe_sudo() {
+  if [ "$ROOTLESS" = "true" ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# Rootless mode preflight: create and verify write access to the install directory.
+if [ "$ROOTLESS" = "true" ]; then
+  if ! { mkdir -p "${THREAT_DETECT_INSTALL_DIR}" && [ -w "${THREAT_DETECT_INSTALL_DIR}" ]; }; then
+    echo "ERROR: --rootless could not create a writable install directory at ${THREAT_DETECT_INSTALL_DIR}" >&2
+    exit 1
+  fi
 fi
 
 # Detect OS and architecture
@@ -38,8 +86,30 @@ ARCH="$(uname -m)"
 
 echo "Installing threat-detect with checksum verification (version: ${THREAT_DETECT_VERSION}, os: ${OS}, arch: ${ARCH})"
 
-# Download URLs
-BASE_URL="https://github.com/${THREAT_DETECT_REPO}/releases/download/${THREAT_DETECT_VERSION}"
+# Fail fast on unsupported platforms before any network access. Only Linux is supported:
+# agentic workflows require Linux container jobs, and the compiler rejects macOS runner
+# labels (including safe-outputs.threat-detection.runs-on) at compile time.
+case "$OS" in
+  Linux) ;;
+  Darwin)
+    echo "ERROR: macOS is not a supported platform for threat-detect."
+    echo "  Agentic workflows require Linux container jobs; use a Linux runner instead."
+    echo "  See ${MACOS_FAQ_URL} for details."
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Unsupported operating system: ${OS}"
+    echo "  threat-detect is only published for Linux (x64, arm64)."
+    exit 1
+    ;;
+esac
+
+# Download release assets directly rather than resolving a release through the GitHub API.
+if [ "$THREAT_DETECT_VERSION" = "latest" ]; then
+  BASE_URL="https://github.com/${THREAT_DETECT_REPO}/releases/latest/download"
+else
+  BASE_URL="https://github.com/${THREAT_DETECT_REPO}/releases/download/${THREAT_DETECT_VERSION}"
+fi
 CHECKSUMS_URL="${BASE_URL}/checksums.txt"
 
 # Platform-portable SHA256 function
@@ -61,7 +131,7 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 
 # Download checksums
 echo "Downloading checksums from \"${CHECKSUMS_URL}\"..."
-curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/checksums.txt" "${CHECKSUMS_URL}"
+curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/checksums.txt" "${CHECKSUMS_URL}"
 
 verify_checksum() {
   local file="$1"
@@ -99,49 +169,27 @@ install_linux_binary() {
 
   local binary_url="${BASE_URL}/${binary_name}"
   echo "Downloading binary from \"${binary_url}\"..."
-  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/${binary_name}" "${binary_url}"
+  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/${binary_name}" "${binary_url}"
 
   # Verify checksum
   verify_checksum "${TEMP_DIR}/${binary_name}" "${binary_name}"
 
   # Make binary executable and install
   chmod +x "${TEMP_DIR}/${binary_name}"
-  sudo mv "${TEMP_DIR}/${binary_name}" "${THREAT_DETECT_INSTALL_DIR}/${THREAT_DETECT_INSTALL_NAME}"
+  maybe_sudo mv "${TEMP_DIR}/${binary_name}" "${THREAT_DETECT_INSTALL_DIR}/${THREAT_DETECT_INSTALL_NAME}"
 }
 
-install_darwin_binary() {
-  # Determine binary name based on architecture
-  local binary_name
-  case "$ARCH" in
-    x86_64) binary_name="threat-detect-darwin-x64" ;;
-    arm64) binary_name="threat-detect-darwin-arm64" ;;
-    *) echo "ERROR: Unsupported macOS architecture: ${ARCH}"; exit 1 ;;
-  esac
+install_linux_binary
 
-  local binary_url="${BASE_URL}/${binary_name}"
-  echo "Downloading binary from \"${binary_url}\"..."
-  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/${binary_name}" "${binary_url}"
-
-  # Verify checksum
-  verify_checksum "${TEMP_DIR}/${binary_name}" "${binary_name}"
-
-  # Make binary executable and install
-  chmod +x "${TEMP_DIR}/${binary_name}"
-  sudo mv "${TEMP_DIR}/${binary_name}" "${THREAT_DETECT_INSTALL_DIR}/${THREAT_DETECT_INSTALL_NAME}"
-}
-
-case "$OS" in
-  Linux)
-    install_linux_binary
-    ;;
-  Darwin)
-    install_darwin_binary
-    ;;
-  *)
-    echo "ERROR: Unsupported operating system: ${OS}"
-    exit 1
-    ;;
-esac
+# In rootless mode, add the install dir to PATH for subsequent steps.
+if [ "$ROOTLESS" = "true" ]; then
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "${THREAT_DETECT_INSTALL_DIR}" >> "${GITHUB_PATH}"
+    echo "  Exported ${THREAT_DETECT_INSTALL_DIR} to GITHUB_PATH"
+  else
+    echo "  GITHUB_PATH not set — binary installed at ${THREAT_DETECT_INSTALL_DIR}/${THREAT_DETECT_INSTALL_NAME}"
+  fi
+fi
 
 # Verify installation
 "${THREAT_DETECT_INSTALL_DIR}/${THREAT_DETECT_INSTALL_NAME}" --version

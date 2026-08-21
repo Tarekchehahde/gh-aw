@@ -72,6 +72,30 @@ Can be imported
 	assert.True(t, result.isSharedWorkflow, "Should be detected as shared workflow")
 }
 
+func TestParseFrontmatterSection_RedirectOnlyWorkflow(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "frontmatter-redirect-only")
+
+	testContent := `---
+redirect: "  owner/repo/.github/workflows/new-location.md  "
+engine: copilot
+---
+
+# Redirect placeholder
+`
+
+	testFile := filepath.Join(tmpDir, "redirect-only.md")
+	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
+
+	compiler := NewCompiler()
+	result, err := compiler.parseFrontmatterSection(testFile)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.isRedirectOnly, "Should be detected as redirect-only workflow")
+	assert.Equal(t, "owner/repo/.github/workflows/new-location.md", result.redirectTarget)
+	assert.False(t, result.isSharedWorkflow, "Redirect-only workflow should not be marked as shared workflow")
+}
+
 // TestParseFrontmatterSection_TriggersInsteadOfOn tests that using "triggers:" gives a helpful error
 func TestParseFrontmatterSection_TriggersInsteadOfOn(t *testing.T) {
 	tmpDir := testutil.TempDir(t, "frontmatter-triggers")
@@ -98,8 +122,8 @@ Content here
 
 	require.Error(t, err, "Using 'triggers:' instead of 'on:' should cause error")
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "'triggers:'", "Error should mention the invalid key")
-	assert.Contains(t, err.Error(), "'on:'", "Error should mention the correct key")
+	require.ErrorContains(t, err, "'triggers:'", "Error should mention the invalid key")
+	require.ErrorContains(t, err, "'on:'", "Error should mention the correct key")
 }
 
 // TestParseFrontmatterSection_MissingFrontmatter tests error for no frontmatter
@@ -119,7 +143,7 @@ Just markdown content
 
 	require.Error(t, err, "Missing frontmatter should cause error")
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "frontmatter")
+	require.ErrorContains(t, err, "frontmatter")
 }
 
 // TestParseFrontmatterSection_InvalidYAML tests YAML parsing errors
@@ -163,7 +187,7 @@ engine: copilot
 
 	require.Error(t, err, "Main workflow needs markdown content")
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "markdown content")
+	require.ErrorContains(t, err, "markdown content")
 }
 
 // TestParseFrontmatterSection_PathTraversal tests path cleaning
@@ -273,7 +297,7 @@ func TestParseFrontmatterSection_InvalidSkillsRef(t *testing.T) {
 on: workflow_dispatch
 engine: copilot
 skills:
-  - githubnext/skills@main
+  - githubnext/skills@1f181b37d3fe5862ab590648f25a292e345b5de
 ---
 
 # Workflow
@@ -288,7 +312,7 @@ skills:
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.True(t,
-		strings.Contains(err.Error(), "40-char-sha") || strings.Contains(err.Error(), "does not match pattern"),
+		strings.Contains(err.Error(), "truncated or malformed") || strings.Contains(err.Error(), "does not match pattern"),
 		"expected skills validation error, got: %v", err,
 	)
 }
@@ -316,7 +340,7 @@ skills:
 	require.Error(t, err, "expected error: GitHub Actions expressions are not allowed in skills refs")
 	assert.Nil(t, result)
 	assert.True(t,
-		strings.Contains(err.Error(), "40-char-sha") || strings.Contains(err.Error(), "does not match pattern"),
+		strings.Contains(err.Error(), "does not support expressions") || strings.Contains(err.Error(), "does not match pattern"),
 		"expected skills validation error, got: %v", err,
 	)
 }
@@ -540,6 +564,55 @@ func TestParseFrontmatterSection_EmptyFrontmatter(t *testing.T) {
 
 	require.Error(t, err, "Empty frontmatter should cause error")
 	assert.Nil(t, result)
+}
+
+// TestParseFrontmatterSection_CommentOnlyFrontmatter tests shared workflow detection
+// when frontmatter contains only YAML comments.
+func TestParseFrontmatterSection_CommentOnlyFrontmatter(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "frontmatter-comment-only")
+
+	testContent := `---
+# Ollama Llama Guard 3 Threat Scanning
+# Instructions for adding Ollama-based threat scanning to agentic workflows
+---
+
+# Shared Workflow
+`
+
+	testFile := filepath.Join(tmpDir, "comment-only.md")
+	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
+
+	compiler := NewCompiler()
+	result, err := compiler.parseFrontmatterSection(testFile)
+
+	require.NoError(t, err, "Comment-only frontmatter should be treated as present")
+	require.NotNil(t, result)
+	assert.True(t, result.isSharedWorkflow, "Should be detected as shared workflow")
+	assert.Empty(t, result.frontmatterForValidation, "Comment-only frontmatter should parse to an empty map")
+}
+
+// TestParseFrontmatterSection_WhitespaceOnlyFrontmatter ensures blank frontmatter
+// blocks remain rejected as missing frontmatter.
+func TestParseFrontmatterSection_WhitespaceOnlyFrontmatter(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "frontmatter-whitespace-only")
+
+	testContent := `---
+   
+	
+---
+
+# Workflow
+`
+
+	testFile := filepath.Join(tmpDir, "whitespace-only.md")
+	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
+
+	compiler := NewCompiler()
+	result, err := compiler.parseFrontmatterSection(testFile)
+
+	require.Error(t, err, "Whitespace-only frontmatter should cause error")
+	assert.Nil(t, result)
+	require.ErrorContains(t, err, "no frontmatter found")
 }
 
 // TestParseFrontmatterSection_MarkdownDirectory tests directory extraction

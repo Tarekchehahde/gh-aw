@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/goccy/go-yaml"
 )
 
-var callWorkflowValidationLog = newValidationLogger("call_workflow")
+var callWorkflowValidationLog = logger.New("workflow:call_workflow_validation")
 
 // validateCallWorkflow validates that the call-workflow configuration is correct.
 // It checks that each workflow exists, declares a workflow_call trigger, and is not
@@ -92,7 +93,7 @@ func validateWorkflowFileExists(fileResult *findWorkflowFileResult, workflowName
 	githubDir := filepath.Dir(currentDir)
 	repoRoot := filepath.Dir(githubDir)
 	workflowsDir := filepath.Join(repoRoot, constants.GetWorkflowDir())
-	return fmt.Errorf("call-workflow: workflow '%s' not found in %s\n\nChecked for: %s.md, %s.lock.yml, %s.yml\n\nTo fix:\n1. Verify the workflow file exists in %s/\n2. Ensure the filename matches exactly (case-sensitive)\n3. Use the filename without extension in your configuration", workflowName, workflowsDir, workflowName, workflowName, workflowName, workflowsDir)
+	return fmt.Errorf("call-workflow: workflow '%s' not found in %s\n\nChecked for: %s.md, %s.lock.yml, %s.yml, %s.yaml\n\nTo fix:\n1. Verify the workflow file exists in %s/\n2. Ensure the filename matches exactly (case-sensitive)\n3. Use the filename without extension in your configuration", workflowName, workflowsDir, workflowName, workflowName, workflowName, workflowName, workflowsDir)
 }
 
 func validateWorkflowSupportsCallTrigger(workflowName string, fileResult *findWorkflowFileResult) error {
@@ -116,12 +117,12 @@ func validateYAMLWorkflowHasCallTrigger(path, workflowName string) error {
 	}
 	onSection, hasOn := workflow["on"]
 	if !hasOn {
-		return fmt.Errorf("call-workflow: workflow '%s' does not have an 'on' trigger section", workflowName)
+		return fmt.Errorf("call-workflow: workflow '%s' has no 'on' trigger section, expected an 'on' section with a 'workflow_call' trigger, for example:\non:\n  workflow_call: {}", workflowName)
 	}
 	if containsWorkflowCall(onSection) {
 		return nil
 	}
-	return fmt.Errorf("call-workflow: workflow '%s' does not support workflow_call trigger (must include 'workflow_call' in the 'on' section)", workflowName)
+	return fmt.Errorf("call-workflow: workflow '%s' does not support the workflow_call trigger, expected 'workflow_call' in the 'on' section, for example:\non:\n  workflow_call: {}", workflowName)
 }
 
 func validateMarkdownWorkflowHasCallTrigger(path, workflowName string) error {
@@ -130,7 +131,7 @@ func validateMarkdownWorkflowHasCallTrigger(path, workflowName string) error {
 		return fmt.Errorf("call-workflow: failed to read workflow source %s: %w", path, checkErr)
 	}
 	if !mdHasCall {
-		return fmt.Errorf("call-workflow: workflow '%s' does not support workflow_call trigger (must include 'workflow_call' in the 'on' section)", workflowName)
+		return fmt.Errorf("call-workflow: workflow '%s' does not support the workflow_call trigger, expected 'workflow_call' in the 'on' section, for example:\non:\n  workflow_call: {}", workflowName)
 	}
 	callWorkflowValidationLog.Printf("Workflow '%s' is valid for call-workflow (found .md source at %s with workflow_call trigger)", workflowName, path)
 	return nil

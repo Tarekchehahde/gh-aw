@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -23,13 +27,14 @@ var objectiveMappingGHAPIGraphQL = ghAPIGraphQL
 type OutcomeResult string
 
 const (
-	OutcomeAccepted  OutcomeResult = "accepted"
-	OutcomeRejected  OutcomeResult = "rejected"
-	OutcomeIgnored   OutcomeResult = "ignored"
-	OutcomePending   OutcomeResult = "pending"
-	OutcomeUnknown   OutcomeResult = "unknown"
-	OutcomeLifecycle OutcomeResult = "lifecycle"
-	OutcomeError     OutcomeResult = "error"
+	OutcomeAccepted       OutcomeResult = "accepted"
+	OutcomeRejected       OutcomeResult = "rejected"
+	OutcomeIgnored        OutcomeResult = "ignored"
+	OutcomePending        OutcomeResult = "pending"
+	OutcomeUnknown        OutcomeResult = "unknown"
+	OutcomeLifecycle      OutcomeResult = "lifecycle"
+	OutcomeLifecycleClose OutcomeResult = "lifecycle_close"
+	OutcomeError          OutcomeResult = "error"
 )
 
 // OutcomeReport is the result of evaluating one safe output item.
@@ -82,7 +87,7 @@ type OutcomeSummary struct {
 }
 
 // outcomeEvaluator is a function that evaluates one safe output item.
-type outcomeEvaluator func(item CreatedItemReport, repoOverride string) OutcomeReport
+type outcomeEvaluator func(ctx context.Context, item CreatedItemReport, repoOverride string) OutcomeReport
 
 // outcomeEvaluators maps safe output types to their evaluator functions.
 var outcomeEvaluators = map[string]outcomeEvaluator{
@@ -112,7 +117,7 @@ var outcomeEvaluators = map[string]outcomeEvaluator{
 
 // EvaluateOutcomes checks the current state of all safe output items from a run.
 // The mapping parameter is required and defines how labels map to objective values.
-func EvaluateOutcomes(items []CreatedItemReport, repoOverride string, mapping *github.ObjectiveMapping) []OutcomeReport {
+func EvaluateOutcomes(ctx context.Context, items []CreatedItemReport, repoOverride string, mapping *github.ObjectiveMapping) []OutcomeReport {
 	outcomeEvalLog.Printf("Evaluating outcomes: items=%d, repo_override=%q", len(items), repoOverride)
 	if repoOverride == "" {
 		slug, err := GetCurrentRepoSlug()
@@ -138,13 +143,13 @@ func EvaluateOutcomes(items []CreatedItemReport, repoOverride string, mapping *g
 			outcomeEvalLog.Printf("No evaluator registered for type %q, using generic sticky", item.Type)
 			eval = evalGenericSticky
 		}
-		report := eval(item, repo)
+		report := eval(ctx, item, repo)
 		report.CreatedAt = item.Timestamp
 		report.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 		report.OutcomeEvaluation = normalizeOutcomeEvaluation(report)
 
 		// Compute objective value from issue/PR labels
-		enrichOutcomeWithObjectiveValue(&report, repo, mapping)
+		enrichOutcomeWithObjectiveValue(ctx, &report, repo, mapping)
 
 		reports = append(reports, report)
 	}
@@ -184,7 +189,7 @@ func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMap
 			s.FallbackExistsOnlyCount++
 		}
 		switch r.Result {
-		case OutcomeLifecycle:
+		case OutcomeLifecycle, OutcomeLifecycleClose:
 			s.Lifecycle++
 		case OutcomeError:
 			s.Errors++
@@ -224,15 +229,48 @@ func ComputeOutcomeSummary(reports []OutcomeReport, mapping *github.ObjectiveMap
 	return s
 }
 
+// escapeOwnerRepo URL-path-encodes each component of an "owner/repo" string to
+// prevent path traversal when the value is interpolated into an API URL.
+func escapeOwnerRepo(ownerRepo string) string {
+	parts := strings.SplitN(ownerRepo, "/", 2)
+	if len(parts) == 2 {
+		return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
+	}
+	return url.PathEscape(ownerRepo)
+}
+
+func validateAPIEndpoint(endpoint string) error {
+	if strings.HasPrefix(endpoint, "/") {
+		return errors.New("endpoint must not start with '/'")
+	}
+	if slices.Contains(strings.Split(endpoint, "/"), "..") {
+		return errors.New("endpoint must not contain '..' path segments")
+	}
+	return nil
+}
+
+// escapeEndpoint URL-path-encodes each segment of an endpoint string to
+// prevent path injection when the value is interpolated into an API URL.
+func escapeEndpoint(endpoint string) string {
+	parts := strings.Split(endpoint, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
 // ghAPIGet calls the GitHub REST API via gh cli and returns the parsed JSON.
-func ghAPIGet(endpoint string, repo string) (map[string]any, error) {
+func ghAPIGet(ctx context.Context, endpoint string, repo string) (map[string]any, error) {
+	if err := validateAPIEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
+	}
 	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
 	outcomeEvalLog.Printf("gh api GET: repo=%s, endpoint=%s, host=%q", ownerRepo, endpoint, host)
-	args := []string{"api", fmt.Sprintf("repos/%s/%s", ownerRepo, endpoint)}
+	args := []string{"api", fmt.Sprintf("repos/%s/%s", escapeOwnerRepo(ownerRepo), escapeEndpoint(endpoint))}
 	var output []byte
 	var err error
 	if host != "" {
-		output, err = workflow.RunGHWithHost("Checking outcome...", host, args...)
+		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
 	} else {
 		output, err = workflow.RunGH("Checking outcome...", args...)
 	}
@@ -248,13 +286,16 @@ func ghAPIGet(endpoint string, repo string) (map[string]any, error) {
 }
 
 // ghAPIGetArray calls the GitHub REST API and returns a JSON array.
-func ghAPIGetArray(endpoint string, repo string) ([]map[string]any, error) {
+func ghAPIGetArray(ctx context.Context, endpoint string, repo string) ([]map[string]any, error) {
+	if err := validateAPIEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("invalid endpoint %q: %w", endpoint, err)
+	}
 	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
-	args := []string{"api", fmt.Sprintf("repos/%s/%s", ownerRepo, endpoint)}
+	args := []string{"api", fmt.Sprintf("repos/%s/%s", escapeOwnerRepo(ownerRepo), escapeEndpoint(endpoint))}
 	var output []byte
 	var err error
 	if host != "" {
-		output, err = workflow.RunGHWithHost("Checking outcome...", host, args...)
+		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
 	} else {
 		output, err = workflow.RunGH("Checking outcome...", args...)
 	}
@@ -268,14 +309,40 @@ func ghAPIGetArray(endpoint string, repo string) ([]map[string]any, error) {
 	return result, nil
 }
 
-// ghAPIGraphQL calls the GitHub GraphQL API via gh cli and returns the parsed JSON.
-func ghAPIGraphQL(query string, repo string) (map[string]any, error) {
-	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
+// buildGraphQLArgs builds the `gh api graphql` argument list for a query and its
+// variables. It is a pure function so the CLI encoding can be unit tested in
+// isolation from the actual `gh` invocation. Variable keys are emitted in sorted
+// order for deterministic argument lists. String values use `-f` (raw field) so
+// gh's `@file` / `{placeholder}` expansion can't be triggered by interpolated
+// values; int and bool values use `-F` for correct GraphQL typing. Any other
+// variable type is rejected explicitly rather than silently formatted.
+func buildGraphQLArgs(query string, variables map[string]any) ([]string, error) {
 	args := []string{"api", "graphql", "-f", "query=" + query}
+	for _, name := range slices.Sorted(maps.Keys(variables)) {
+		switch value := variables[name].(type) {
+		case string:
+			// -f sends the value literally, avoiding gh's @file / {placeholder} expansion.
+			args = append(args, "-f", name+"="+value)
+		case int, int32, int64, bool:
+			args = append(args, "-F", fmt.Sprintf("%s=%v", name, value))
+		default:
+			return nil, fmt.Errorf("buildGraphQLArgs: unsupported variable type %T for key %q", value, name)
+		}
+	}
+	return args, nil
+}
+
+// ghAPIGraphQL calls the GitHub GraphQL API via gh cli and returns the parsed JSON.
+// Values are passed as GraphQL variables rather than interpolated into the query text.
+func ghAPIGraphQL(ctx context.Context, query string, variables map[string]any, repo string) (map[string]any, error) {
+	ownerRepo, host := repoutil.NormalizeRepoForAPI(repo)
+	args, err := buildGraphQLArgs(query, variables)
+	if err != nil {
+		return nil, err
+	}
 	var output []byte
-	var err error
 	if host != "" {
-		output, err = workflow.RunGHWithHost("Checking outcome...", host, args...)
+		output, err = workflow.RunGHContextWithHost(ctx, "Checking outcome...", host, args...)
 	} else {
 		output, err = workflow.RunGH("Checking outcome...", args...)
 	}
@@ -297,27 +364,6 @@ func timeBetween(from, to string) float64 {
 		return 0
 	}
 	return t2.Sub(t1).Hours()
-}
-
-// medianFloat returns the median of a float slice.
-func medianFloat(vals []float64) float64 {
-	if len(vals) == 0 {
-		return 0
-	}
-	n := len(vals)
-	sorted := make([]float64, n)
-	copy(sorted, vals)
-	for i := range sorted {
-		for j := i + 1; j < n; j++ {
-			if sorted[j] < sorted[i] {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
-	if n%2 == 0 {
-		return (sorted[n/2-1] + sorted[n/2]) / 2
-	}
-	return sorted[n/2]
 }
 
 // parseNumberFromURL extracts a number from a GitHub URL like
@@ -379,7 +425,7 @@ func resolveItemNumber(item CreatedItemReport) int {
 
 // enrichOutcomeWithObjectiveValue computes the objective value for an outcome by fetching
 // its associated issue/PR labels and applying the label-to-value mapping.
-func enrichOutcomeWithObjectiveValue(report *OutcomeReport, repo string, mapping *github.ObjectiveMapping) {
+func enrichOutcomeWithObjectiveValue(ctx context.Context, report *OutcomeReport, repo string, mapping *github.ObjectiveMapping) {
 	if report == nil || mapping == nil {
 		return
 	}
@@ -397,7 +443,7 @@ func enrichOutcomeWithObjectiveValue(report *OutcomeReport, repo string, mapping
 
 	outcomeEvalLog.Printf("Computing objective value: type=%s, repo=%s, number=%d", report.Type, repo, num)
 
-	resolvedIntent, err := resolveOutcomeIntent(*report, repo, mapping)
+	resolvedIntent, err := resolveOutcomeIntent(ctx, *report, repo, mapping)
 	if err != nil {
 		outcomeEvalLog.Printf("Could not trace root for objective value computation: %v", err)
 		return
@@ -413,23 +459,23 @@ func enrichOutcomeWithObjectiveValue(report *OutcomeReport, repo string, mapping
 
 	// Compute objective value
 	objectiveValue := mapping.ComputeObjectiveValue(labelNames)
-	objectiveLabels := mapping.GetObjectiveLabels(labelNames)
+	objectiveLabels := mapping.FilterObjectiveLabels(labelNames)
 
 	report.ObjectiveValue = objectiveValue
 	report.ObjectiveLabels = objectiveLabels
 	outcomeEvalLog.Printf("Computed objective value for %s#%d: value=%d, labels=%v", repo, num, objectiveValue, objectiveLabels)
 }
 
-func resolveOutcomeIntent(report OutcomeReport, repo string, mapping *github.ObjectiveMapping) (intent.IntentRecord, error) {
+func resolveOutcomeIntent(ctx context.Context, report OutcomeReport, repo string, mapping *github.ObjectiveMapping) (intent.IntentRecord, error) {
 	resolver := intent.Resolver{
 		ResolverVersion: "outcome-eval-v1",
 		MatchLabels: func(labels []string) []string {
-			return mapping.GetObjectiveLabels(labels)
+			return mapping.FilterObjectiveLabels(labels)
 		},
 	}
 
 	if isPullRequestOutcomeType(report.Type) {
-		prIntent, err := resolvePullRequestIntent(report, repo, resolver)
+		prIntent, err := resolvePullRequestIntent(ctx, report, repo, resolver)
 		if err == nil {
 			return prIntent, nil
 		}
@@ -438,7 +484,7 @@ func resolveOutcomeIntent(report OutcomeReport, repo string, mapping *github.Obj
 		}
 	}
 
-	labels, err := objectiveMappingGHAPIGetArray(fmt.Sprintf("issues/%d/labels", report.ObjectNumber), repo)
+	labels, err := objectiveMappingGHAPIGetArray(ctx, fmt.Sprintf("issues/%d/labels", report.ObjectNumber), repo)
 	if err != nil {
 		return intent.IntentRecord{}, err
 	}
@@ -456,15 +502,15 @@ func isPullRequestOutcomeType(outcomeType string) bool {
 	}
 }
 
-func resolvePullRequestIntent(report OutcomeReport, repo string, resolver intent.Resolver) (intent.IntentRecord, error) {
-	prData, err := loadPullRequestIntentData(report, repo)
+func resolvePullRequestIntent(ctx context.Context, report OutcomeReport, repo string, resolver intent.Resolver) (intent.IntentRecord, error) {
+	prData, err := loadPullRequestIntentData(ctx, report, repo)
 	if err != nil {
 		return intent.IntentRecord{}, err
 	}
 	return resolver.ResolvePullRequest(prData), nil
 }
 
-func loadPullRequestIntentData(report OutcomeReport, repo string) (intent.PullRequestData, error) {
+func loadPullRequestIntentData(ctx context.Context, report OutcomeReport, repo string) (intent.PullRequestData, error) {
 	prNumber := report.ObjectNumber
 	ownerRepo, _ := repoutil.NormalizeRepoForAPI(repo)
 	owner, name, found := strings.Cut(ownerRepo, "/")
@@ -472,9 +518,9 @@ func loadPullRequestIntentData(report OutcomeReport, repo string) (intent.PullRe
 		return intent.PullRequestData{}, fmt.Errorf("invalid repo for root tracing: %s", repo)
 	}
 
-	query := fmt.Sprintf(`query {
-		repository(owner: "%s", name: "%s") {
-			pullRequest(number: %d) {
+	query := `query($owner: String!, $name: String!, $number: Int!) {
+		repository(owner: $owner, name: $name) {
+			pullRequest(number: $number) {
 				id
 				closingIssuesReferences(first: 10) {
 					nodes {
@@ -488,13 +534,14 @@ func loadPullRequestIntentData(report OutcomeReport, repo string) (intent.PullRe
 				}
 			}
 		}
-	}`,
-		escapeGraphQLString(owner),
-		escapeGraphQLString(name),
-		prNumber,
-	)
+	}`
+	variables := map[string]any{
+		"owner":  owner,
+		"name":   name,
+		"number": prNumber,
+	}
 
-	result, err := objectiveMappingGHAPIGraphQL(query, repo)
+	result, err := objectiveMappingGHAPIGraphQL(ctx, query, variables, repo)
 	if err != nil {
 		return intent.PullRequestData{}, err
 	}
@@ -508,7 +555,7 @@ func loadPullRequestIntentData(report OutcomeReport, repo string) (intent.PullRe
 	closingRefs, _ := pullRequest["closingIssuesReferences"].(map[string]any)
 	nodes, _ := closingRefs["nodes"].([]any)
 	if len(nodes) == 0 {
-		labels, labelErr := objectiveMappingGHAPIGetArray(fmt.Sprintf("issues/%d/labels", report.ObjectNumber), repo)
+		labels, labelErr := objectiveMappingGHAPIGetArray(ctx, fmt.Sprintf("issues/%d/labels", report.ObjectNumber), repo)
 		if labelErr != nil {
 			return intent.PullRequestData{}, labelErr
 		}
@@ -538,28 +585,28 @@ func loadPullRequestIntentData(report OutcomeReport, repo string) (intent.PullRe
 }
 
 func labelsToStringsFromNodes(nodes []any) []string {
-	if len(nodes) == 0 {
-		return []string{}
-	}
-	result := make([]string, 0, len(nodes))
-	for _, node := range nodes {
+	return collectLabelNames(nodes, func(node any) (string, bool) {
 		labelMap, _ := node.(map[string]any)
-		if name, ok := labelMap["name"].(string); ok {
-			result = append(result, name)
-		}
-	}
-	return result
+		name, ok := labelMap["name"].(string)
+		return name, ok
+	})
 }
 
 // labelsToStringsFromMaps converts GitHub API label map objects to string slice.
 func labelsToStringsFromMaps(labels []map[string]any) []string {
+	return collectLabelNames(labels, func(labelMap map[string]any) (string, bool) {
+		name, ok := labelMap["name"].(string)
+		return name, ok
+	})
+}
+
+func collectLabelNames[T any](labels []T, nameOf func(T) (string, bool)) []string {
 	if len(labels) == 0 {
 		return []string{}
 	}
-
 	result := make([]string, 0, len(labels))
-	for _, labelMap := range labels {
-		if name, ok := labelMap["name"].(string); ok {
+	for _, label := range labels {
+		if name, ok := nameOf(label); ok {
 			result = append(result, name)
 		}
 	}

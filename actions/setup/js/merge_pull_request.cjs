@@ -68,7 +68,9 @@ async function getPullRequestWithMergeability(githubClient, owner, repo, pullNum
         return fallback.data;
       }
     } catch (fallbackError) {
-      throw new Error(`${SAFE_OUTPUT_E099}: Failed to fetch pull request #${pullNumber} after retry and fallback attempts. Retry error: ${getErrorMessage(error)}. Fallback error: ${getErrorMessage(fallbackError)}`);
+      throw new Error(`${SAFE_OUTPUT_E099}: Failed to fetch pull request #${pullNumber} after retry and fallback attempts. Retry error: ${getErrorMessage(error)}. Fallback error: ${getErrorMessage(fallbackError)}`, {
+        cause: fallbackError,
+      });
     }
     throw error;
   });
@@ -84,7 +86,9 @@ async function getPullRequestWithMergeability(githubClient, owner, repo, pullNum
 async function getReviewSummary(githubClient, owner, repo, pullNumber) {
   core.info(`Collecting review summary for PR #${pullNumber}`);
   let unresolvedThreadCount = 0;
+  /** @type {any} */
   let reviewDecision = null;
+  /** @type {any} */
   let cursor = null;
   let hasNextPage = true;
   let page = 0;

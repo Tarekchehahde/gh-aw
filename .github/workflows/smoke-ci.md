@@ -10,6 +10,7 @@ on:
   schedule: daily
   pull_request:
     types: [opened, synchronize, reopened]
+    paths: ['cmd/**', 'pkg/**', '*.go', 'go.mod', 'actions/setup/js/**']
 concurrency:
   group: smoke-ci-${{ github.ref }}
   cancel-in-progress: true
@@ -72,6 +73,10 @@ timeout-minutes: 5
 strict: true
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 For all events, call the tools in this exact order:

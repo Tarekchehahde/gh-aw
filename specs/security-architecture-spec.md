@@ -7,7 +7,7 @@ sidebar:
 
 # GitHub Agentic Workflows Security Architecture Specification
 
-**Version**: 1.0.0  
+**Version**: 1.0.1  
 **Status**: Candidate Recommendation  
 **Latest Version**: https://github.com/github/gh-aw/blob/main/specs/security-architecture-spec.md  
 **Editors**: GitHub Next (GitHub, Inc.)
@@ -957,6 +957,15 @@ if: github.event.pull_request.head.repo.id == github.repository_id
 - Repository ID match: `github.event.workflow_run.repository.id == github.repository_id`
 - Not from fork: `!github.event.workflow_run.repository.fork`
 
+**RS-05a**: For `workflow_dispatch` triggers where the `aw_context` input encodes a pull request context (`item_type == "pull_request"`), the implementation MUST enforce all of the following before executing a PR checkout:
+
+1. **Repository scope**: If `aw_context.repo` is present, the implementation MUST compare it against the current repository identity (`context.repo.owner/context.repo.repo`). A mismatch MUST cause checkout to be skipped with a warning; cross-repository PR checkout is NOT supported.
+2. **Actor trust**: The triggering actor MUST satisfy `assertTrustedCheckoutRuntime()` — the runtime repository MUST NOT be a fork, and the actor MUST hold write-or-higher repository permission (or be a verified bot/app actor).
+3. **Parse resilience**: Malformed `aw_context` JSON MUST be caught; the implementation MUST emit a warning and skip checkout rather than propagating the parse error.
+4. **Ref isolation**: The PR head MUST be fetched exclusively via `refs/pull/N/head` from the current repository's origin, using array-based execution (no shell interpolation).
+
+The implementation MUST NOT perform checkout when `aw_context.item_number` is absent or falsy.
+
 ### 11.4 Role Validation
 
 **RS-06**: The implementation MUST validate user roles at workflow start.
@@ -1042,7 +1051,7 @@ A conforming implementation MUST execute runtime controls in this order:
 
 1. **Concurrency gate setup**: Apply `concurrency` grouping and cancellation policy before executing job logic (RS-16 through RS-22).
 2. **Freshness gate**: Validate source-vs-compiled timestamps and fail fast on stale lock files (RS-01 through RS-03).
-3. **Repository trust gate**: Validate repository identity and fork constraints for the active trigger (RS-04 and RS-05).
+3. **Repository trust gate**: Validate repository identity and fork constraints for the active trigger (RS-04, RS-05, and RS-05a).
 4. **Actor authorization gate**: Validate role membership and required privileges before any mutation-capable step (RS-06 through RS-08).
 5. **Credential gate**: Validate token shape and expression-only sourcing before token use (RS-09 through RS-11).
 6. **Network boundary gate**: Activate sandbox/proxy/iptables controls before running agent or MCP execution paths (RS-12 and RS-13).
@@ -1575,6 +1584,68 @@ safe-outputs:
 
 **Behavior**: All workflow runs complete in order, preventing incomplete operations.
 
+#### Example 5: Pre-Activation, Detection, and Conclusion Job Structure
+
+The following excerpt (abridged from a compiled `.lock.yml`) shows the three implementation-detail jobs referenced in the Minor Discrepancies section of `specs/security-architecture-spec-validation.md`: `pre_activation` (role-based access control ahead of `activation`), `detection` (runtime manifestation of the Threat Detection Layer, Section 9), and `conclusion` (cleanup/summary reporting job that always runs).
+
+```yaml
+jobs:
+  pre_activation:
+    if: >
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id)
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      activated: ${{ steps.check_membership.outputs.is_team_member == 'true' }}
+    steps:
+      - name: Check team membership for workflow
+        id: check_membership
+        uses: actions/github-script@<pinned-sha> # vX.Y.Z
+        env:
+          GH_AW_REQUIRED_ROLES: "admin,maintainer,write"
+
+  activation:
+    needs: [pre_activation]
+    # ... timestamp/lockdown validation (Section 11.1) ...
+
+  agent:
+    needs: [activation]
+    permissions:
+      contents: read
+    # ... agentic execution (read-only) ...
+
+  detection:
+    needs: [activation, agent]
+    if: always() && needs.agent.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      detection_conclusion: ${{ steps.detection_conclusion.outputs.conclusion }}
+      detection_success: ${{ steps.detection_conclusion.outputs.success }}
+    # ... AI threat-detection scan of agent output (Section 9.1) ...
+
+  safe_outputs:
+    needs: [activation, agent, detection]
+    if: (!cancelled()) && needs.agent.result != 'skipped' && needs.detection.result == 'success'
+    permissions:
+      issues: write
+      pull-requests: write
+    # ... write operations gated on successful detection ...
+
+  conclusion:
+    needs: [activation, agent, detection, safe_outputs]
+    if: always() && (needs.agent.result != 'skipped' || needs.activation.outputs.lockdown_check_failed == 'true')
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    # ... run summary, cleanup, and failure reporting ...
+```
+
+**Behavior**: `pre_activation` gates `activation` on role membership; `detection` runs after `agent` and gates `safe_outputs` on a successful threat-detection conclusion; `conclusion` always runs last (subject to `always()`) to report status regardless of upstream success or failure.
+
 ### Appendix E: Concurrency Control Examples
 
 #### Example 1: Pull Request Workflow with Cancellation
@@ -1768,6 +1839,42 @@ Use this checklist to verify that a compiled `.lock.yml` workflow file meets all
 
 ---
 
+#### G.10 Formal Test Coverage Audit
+
+The following table maps each Appendix G checklist category against the formal tests in
+`pkg/workflow/security_architecture_sg_formal_test.go`. Each cell may list zero, one, or
+more test function names. Cells marked **covered** have at least one dedicated test;
+cells marked **gap** lack direct formal test coverage; cells marked **partial** have
+related coverage that does not fully satisfy the checklist item.
+
+| Checklist Category | Formal Test(s) | Coverage |
+|---|---|---|
+| **G.1** Action pinning | _(none)_ | **gap** — no formal test verifies that compiled `uses:` lines are SHA-pinned; relies on actionlint/poutine in CI |
+| **G.2** Permission separation — agent job | `TestFormalSG02_AgentJobHasNoWritePermissions`, `TestFormalSG04_LeastPrivilegeBasePermissions` | covered |
+| **G.2** Permission separation — safe_outputs job | `TestFormalStaged_HandlerRequiresNoWritePerms` | **partial** — verifies that a globally staged handler does not accumulate write grants via `ComputePermissionsForSafeOutputs`, but does not inspect the compiled `safe_outputs` job itself or verify that its `permissions:` block is limited to the configured operations |
+| **G.3** Fork protection | `TestFormalBasicConformance_AllFourControls` | **partial** — verifies `safe_outputs` job presence, permission management, and compilation-time checks; does not inspect the activation job's `if:` expression or assert a repository-ID fork guard |
+| **G.4** Input sanitization | `TestFormalSG01_InputSanitizationInvariant` | **partial** — verifies that a generic `run:` step with a `${{ }}` expression is rewritten and an `env:` block is injected; does not assert either required activation step or that compiled prompts consume `steps.sanitized.outputs.text` |
+| **G.5** Threat detection | `TestFormalSG06_ThreatDetectionAuditArtifact`, `TestFormalThreatDetection_EnabledByDefault`, `TestFormalThreatDetection_ExplicitDisable` | **partial** — detection-job presence and configuration defaults are covered; `permissions: {}` on the detection job and the `needs.detection.outputs.success` gate on `safe_outputs` are not directly asserted |
+| **G.6** RBAC — job topology (PM-10b) | `TestFormalJobTopology_PipelineOrderEnforced` (verifies `pre_activation → activation` needs dependency) | covered |
+| **G.6** RBAC — membership check step (PM-11) | _(none)_ | **gap** — `TestFormalJobTopology_PipelineOrderEnforced` verifies job ordering but does NOT assert that the `pre_activation` job contains a `check_membership.cjs` step; no dedicated PM-11 formal test exists in this file |
+| **G.7** AWF sandbox | `TestFormalSG05_SandboxIsolationPresence` | **partial** — verifies `isSandboxEnabled()` return value for configuration combinations (AWF type, disabled flag, firewall); does not compile a workflow or assert `install_awf_binary.sh` step presence or execution inside the AWF container |
+| **G.8** Concurrency control | _(none)_ | **gap** — no formal test verifies `concurrency.group` is set or that `cancel-in-progress` matches workflow type |
+| **G.9** Runtime validation — timestamp check | _(none)_ | **gap** — `TestFormalSG07_FailSecureOnSecurityError` tests write-permission rejection at compile time and is unrelated to the G.9 checklist items; neither the activation timestamp step nor conclusion-job behavior is asserted by any test in this file |
+
+**Summary of coverage gaps (as of 2026-07-11)**:
+
+- **G.1 Action pinning**: Formal test gap. CI tooling (actionlint, poutine) provides runtime coverage; consider adding a dedicated test that parses compiled lock file `uses:` patterns.
+- **G.2 Permission separation — safe_outputs job**: Partial coverage. `TestFormalStaged_HandlerRequiresNoWritePerms` does not inspect the compiled `safe_outputs` job's own `permissions:` block. A dedicated test compiling a safe-outputs workflow and asserting its permission scope would close this gap.
+- **G.3 Fork protection**: Partial coverage. `TestFormalBasicConformance_AllFourControls` does not inspect the activation job's `if:` expression or verify a repository-ID fork guard. A test asserting the exact `if:` condition on the compiled activation job is needed.
+- **G.4 Input sanitization**: Partial coverage. `TestFormalSG01_InputSanitizationInvariant` covers expression rewriting but not the full three-item checklist (activation step presence; `steps.sanitized.outputs.text` consumption in compiled prompts).
+- **G.5 Threat detection**: Partial coverage. Detection-job presence and defaults are covered. Tests asserting `permissions: {}` on the detection job and the `needs.detection.outputs.success` gate on `safe_outputs` are missing.
+- **G.6 RBAC (PM-11) membership check step**: Formal test gap. `pre_activation` job topology is verified, but the presence of `check_membership.cjs` as a step inside that job is not asserted by any test in this file. A dedicated `TestFormalPM11_PreActivationContainsMembershipStep` test should be added. See: specs/security-architecture-spec-validation.md §4b (PM-11 note).
+- **G.7 AWF sandbox**: Partial coverage. Configuration-logic checks are covered; lock-file-level assertions (`install_awf_binary.sh`, AWF container execution) are missing.
+- **G.8 Concurrency control**: Formal test gap. Concurrency group format is validated only by manual review. Consider a test that compiles a PR-trigger workflow and asserts `concurrency.group` contains the PR number expression.
+- **G.9 Runtime validation — timestamp check**: Formal test gap. No formal test verifies the activation timestamp step or conclusion-job behavior.
+
+---
+
 ### Appendix H: Security Best Practices
 
 #### BP-01: Always Use Sanitized Context
@@ -1909,6 +2016,19 @@ roles: [admin, maintainer]  # Restrict to trusted roles
 
 ## Change Log
 
+### Version 1.0.1 (Editorial Update)
+
+**Published**: August 1, 2026
+
+**Added RS-05a** — `workflow_dispatch` + `aw_context` PR checkout validation:
+- Documents the four-property security contract for the new `workflow_dispatch`
+  event path in `checkout_pr_branch.cjs`: repository-scope check, actor trust,
+  parse resilience, and ref isolation.
+- Updates Section 11.9 (Runtime Enforcement Operations Sequence) to reference RS-05a
+  alongside RS-04 and RS-05 in the repository trust gate.
+- Backed by 9 unit test cases in `actions/setup/js/checkout_pr_branch.test.cjs`
+  (cross-repo mismatch, invalid JSON, missing `item_number`, successful checkout, etc.).
+
 ### Version 1.0.0 (Candidate Recommendation)
 
 **Published**: January 29, 2026  
@@ -1966,4 +2086,9 @@ A full revalidation pass **MUST** be triggered and the results in `specs/securit
 4. The reference implementation (GitHub Agentic Workflows) ships a change that affects a control described in Sections 4–11.
 
 The revalidation cadence **SHOULD** also include a review of `specs/security-architecture-spec-validation.md` on every minor version bump, even in the absence of the above triggers, to ensure the validation summary table remains current.
+
+### Last Revalidation
+
+The most recent full validation pass against this specification was completed on **2026-07-15**. The results are recorded in `specs/security-architecture-spec-validation.md`. Any changes to MUST-level requirements after this date require a new validation pass per the triggers above.
+
 *This specification is provided under the MIT License.*

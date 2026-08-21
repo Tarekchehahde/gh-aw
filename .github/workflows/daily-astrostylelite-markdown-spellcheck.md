@@ -33,12 +33,12 @@ jobs:
       dictionary_path: ${{ steps.run_spellcheck.outputs.dictionary_path }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
 
@@ -55,7 +55,6 @@ jobs:
 
           FILES_CHECKED=$(wc -l < "$ARTIFACT_DIR/files.txt" | tr -d ' ')
           CSPELL_RESULTS_PATH="$ARTIFACT_DIR/cspell-results.json"
-          CSPELL_STDERR_PATH="$ARTIFACT_DIR/cspell.stderr.log"
           RUNTIME_CONFIG_PATH="$ARTIFACT_DIR/cspell-runtime-config.json"
 
           echo "::group::Spellcheck setup"
@@ -103,7 +102,6 @@ jobs:
 
           if [ "$FILES_CHECKED" -eq 0 ]; then
             echo '{"issues":[],"info":[],"debug":[],"error":[]}' > "$CSPELL_RESULTS_PATH"
-            : > "$CSPELL_STDERR_PATH"
             CSPELL_EXIT_CODE=0
           else
             # cspell v8 removed --format json for lint; use JSON reporter instead.
@@ -115,7 +113,7 @@ jobs:
               --reporter @cspell/cspell-json-reporter \
               --config "$RUNTIME_CONFIG_PATH" \
               --file-list "$ARTIFACT_DIR/files.txt" \
-              > "$CSPELL_RESULTS_PATH" 2> "$CSPELL_STDERR_PATH"
+              > "$CSPELL_RESULTS_PATH"
             CSPELL_EXIT_CODE=$?
             set -e
           fi
@@ -124,12 +122,6 @@ jobs:
           echo "Selected dictionary: ${DICTIONARY_PATH_REL:-none}"
           echo "Runtime config path: $RUNTIME_CONFIG_PATH"
           echo "cspell exit code: $CSPELL_EXIT_CODE"
-          if [ -s "$CSPELL_STDERR_PATH" ]; then
-            echo "cspell stderr (tail):"
-            tail -n 20 "$CSPELL_STDERR_PATH"
-          else
-            echo "cspell stderr: (empty)"
-          fi
           echo "::endgroup::"
 
           if ! jq -e . "$CSPELL_RESULTS_PATH" >/dev/null; then
@@ -181,15 +173,16 @@ jobs:
               }
             }' > "$ARTIFACT_DIR/summary.json"
 
-          if [ "$FINDINGS_COUNT" -gt 0 ]; then
-            echo "has_findings=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_findings=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "findings_count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
-          echo "files_checked=$FILES_CHECKED" >> "$GITHUB_OUTPUT"
-          echo "dictionary_path=$DICTIONARY_PATH_REL" >> "$GITHUB_OUTPUT"
+          {
+            if [ "$FINDINGS_COUNT" -gt 0 ]; then
+              echo "has_findings=true"
+            else
+              echo "has_findings=false"
+            fi
+            echo "findings_count=$FINDINGS_COUNT"
+            echo "files_checked=$FILES_CHECKED"
+            echo "dictionary_path=$DICTIONARY_PATH_REL"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Render spellcheck report to step summary
         if: success()
@@ -231,7 +224,6 @@ jobs:
           path: |
             /tmp/gh-aw/agent/spellcheck/summary.json
             /tmp/gh-aw/agent/spellcheck/cspell-results.json
-            /tmp/gh-aw/agent/spellcheck/cspell.stderr.log
             /tmp/gh-aw/agent/spellcheck/cspell-runtime-config.json
             /tmp/gh-aw/agent/spellcheck/findings.ndjson
             /tmp/gh-aw/agent/spellcheck/files.txt
@@ -284,7 +276,13 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: cloud-hypervisor
+evals:
+  - id: spellcheck_completed
+    question: Did the agent run American English spellcheck on AstroStyleLite docs content?
+  - id: pr_created_or_noop
+    question: Was a PR created with spelling corrections, or was noop used when no misspellings were found?
 ---
 
 # Daily AstroStyleLite Markdown Spellcheck

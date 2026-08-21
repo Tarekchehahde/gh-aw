@@ -150,7 +150,7 @@ Test that setting both app and github-token is an error.
 	// Compile the workflow - should fail because both app and github-token are set
 	err = compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "Expected error when both app and github-token are set")
-	assert.Contains(t, err.Error(), "'tools.github.github-app' and 'tools.github.github-token' cannot both be set", "Error should mention mutual exclusion")
+	require.ErrorContains(t, err, "'tools.github.github-app' and 'tools.github.github-token' cannot both be set", "Error should mention mutual exclusion")
 }
 
 // TestGitHubMCPAppTokenWithRemoteMode tests that app token works with remote mode
@@ -417,6 +417,7 @@ tools:
       permissions:
         members: read
         organization-administration: read
+        secret-scanning-alerts: read
 ---
 
 # Test Workflow
@@ -447,6 +448,53 @@ Test extra org-level permissions in GitHub App token.
 	// Verify that the extra org-level permissions from github-app.permissions are included
 	assert.Contains(t, lockContent, "permission-members: read", "Should include extra members permission from github-app.permissions")
 	assert.Contains(t, lockContent, "permission-organization-administration: read", "Should include extra organization-administration permission from github-app.permissions")
+	assert.Contains(t, lockContent, "permission-secret-scanning-alerts: read", "Should include extra secret-scanning-alerts permission from github-app.permissions")
+}
+
+// TestGitHubMCPAppTokenWithSecretScanningAlertsNoneOmitted tests that
+// secret-scanning-alerts: none under tools.github.github-app.permissions is omitted
+// from create-github-app-token inputs because the action does not accept "none"
+// for that permission.
+func TestGitHubMCPAppTokenWithSecretScanningAlertsNoneOmitted(t *testing.T) {
+	compiler := NewCompiler(WithVersion("1.0.0"))
+
+	markdown := `---
+on: issues
+permissions:
+  contents: read
+strict: false
+tools:
+  github:
+    mode: local
+    github-app:
+      app-id: ${{ vars.APP_ID }}
+      private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      repositories: ["*"]
+      permissions:
+        members: read
+        secret-scanning-alerts: none
+---
+
+# Test Workflow
+
+Test extra secret-scanning-alerts none behavior in GitHub App token.
+`
+
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.md")
+	err := os.WriteFile(testFile, []byte(markdown), 0644)
+	require.NoError(t, err, "Failed to write test file")
+
+	err = compiler.CompileWorkflow(testFile)
+	require.NoError(t, err, "Failed to compile workflow")
+
+	lockFile := strings.TrimSuffix(testFile, ".md") + ".lock.yml"
+	content, err := os.ReadFile(lockFile)
+	require.NoError(t, err, "Failed to read lock file")
+	lockContent := string(content)
+
+	assert.Contains(t, lockContent, "permission-members: read", "Should include other app permissions")
+	assert.NotContains(t, lockContent, "permission-secret-scanning-alerts:", "secret-scanning-alerts: none should be omitted")
 }
 
 // TestGitHubMCPAppTokenExtraPermissionsOverrideJobLevel tests that extra permissions
@@ -532,9 +580,9 @@ Test that write is rejected in tools.github.github-app.permissions.
 
 	err = compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "Compiler should reject write in tools.github.github-app.permissions")
-	assert.Contains(t, err.Error(), "Invalid permission levels in tools.github.github-app.permissions", "Error should mention invalid permission levels")
-	assert.Contains(t, err.Error(), `"write" is not allowed`, "Error should mention that write is not allowed")
-	assert.Contains(t, err.Error(), "members", "Error should mention the offending scope")
+	require.ErrorContains(t, err, "Invalid permission levels in tools.github.github-app.permissions", "Error should mention invalid permission levels")
+	require.ErrorContains(t, err, `"write" is not allowed`, "Error should mention that write is not allowed")
+	require.ErrorContains(t, err, "members", "Error should mention the offending scope")
 }
 
 // TestCheckoutAppTokensMintedInAgentJob verifies that checkout-related GitHub App token

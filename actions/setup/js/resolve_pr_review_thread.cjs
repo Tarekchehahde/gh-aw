@@ -22,17 +22,37 @@ const HANDLER_TYPE = "resolve_pull_request_review_thread";
  * Used to validate the thread before resolving.
  * @param {any} github - GitHub GraphQL instance
  * @param {string} threadId - Review thread node ID (e.g., 'PRRT_kwDOABCD...')
- * @returns {Promise<{prNumber: number, repoNameWithOwner: string|null}|null>} The PR number and repo, or null if not found
+ * @returns {Promise<
+ *   | {status: "missing"}
+ *   | {status: "thread", threadId: string, prNumber: number, repoNameWithOwner: string|null, isResolved: boolean}
+ *   | {status: "invalid_type", nodeType: string}
+ *   | {status: "comment_without_thread"}
+ * >} Thread lookup result
  */
 async function getThreadPullRequestInfo(github, threadId) {
   const query = /* GraphQL */ `
     query ($threadId: ID!) {
       node(id: $threadId) {
+        __typename
         ... on PullRequestReviewThread {
+          id
+          isResolved
           pullRequest {
             number
             repository {
               nameWithOwner
+            }
+          }
+        }
+        ... on PullRequestReviewComment {
+          pullRequest {
+            number
+            repository {
+              name
+              nameWithOwner
+              owner {
+                login
+              }
             }
           }
         }
@@ -42,15 +62,145 @@ async function getThreadPullRequestInfo(github, threadId) {
 
   const result = await github.graphql(query, { threadId });
 
-  const pullRequest = result?.node?.pullRequest;
-  if (!pullRequest) {
-    return null;
+  const threadNode = result?.node;
+  if (!threadNode) {
+    return { status: "missing" };
   }
+  if (threadNode.__typename === "PullRequestReviewComment") {
+    return findThreadInfoForReviewComment(github, threadId, threadNode);
+  }
+  if (threadNode.__typename !== "PullRequestReviewThread") {
+    return {
+      status: "invalid_type",
+      nodeType: threadNode.__typename || "unknown",
+    };
+  }
+  const pullRequest = threadNode.pullRequest;
 
   return {
+    status: "thread",
+    threadId: threadNode.id,
     prNumber: pullRequest.number,
     repoNameWithOwner: pullRequest.repository?.nameWithOwner ?? null,
+    isResolved: threadNode?.isResolved === true,
   };
+}
+
+/**
+ * Resolve a PullRequestReviewComment node ID to its containing review thread.
+ * @param {any} github - GitHub GraphQL instance
+ * @param {string} commentId - Pull request review comment node ID (e.g., 'PRRC_kwDOABCD...')
+ * @param {any} commentNode - PullRequestReviewComment node returned by the initial lookup
+ * @returns {Promise<
+ *   | {status: "thread", threadId: string, prNumber: number, repoNameWithOwner: string|null, isResolved: boolean}
+ *   | {status: "comment_without_thread"}
+ * >}
+ */
+async function findThreadInfoForReviewComment(github, commentId, commentNode) {
+  const pullRequest = commentNode.pullRequest;
+  const repository = pullRequest?.repository;
+  const prNumber = pullRequest?.number;
+  const repoOwner = repository?.owner?.login;
+  const repoName = repository?.name;
+  const repoNameWithOwner = repository?.nameWithOwner ?? (repoOwner && repoName ? `${repoOwner}/${repoName}` : null);
+
+  if (!prNumber || !repoOwner || !repoName) {
+    return { status: "comment_without_thread" };
+  }
+
+  const threadListQuery = /* GraphQL */ `
+    query ($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+              isResolved
+              comments(first: 100) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const threadCommentsQuery = /* GraphQL */ `
+    query ($threadId: ID!, $cursor: String) {
+      node(id: $threadId) {
+        ... on PullRequestReviewThread {
+          comments(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  let threadCursor = null;
+  do {
+    const result = await github.graphql(threadListQuery, {
+      owner: repoOwner,
+      repo: repoName,
+      number: prNumber,
+      cursor: threadCursor,
+    });
+    const reviewThreads = result?.repository?.pullRequest?.reviewThreads;
+
+    for (const thread of reviewThreads?.nodes || []) {
+      // Check first page of comments for this thread
+      if ((thread.comments?.nodes || []).some(comment => comment?.id === commentId)) {
+        return {
+          status: "thread",
+          threadId: thread.id,
+          prNumber,
+          repoNameWithOwner,
+          isResolved: thread.isResolved === true,
+        };
+      }
+
+      // If there are more comment pages, paginate within this thread
+      let commentCursor = thread.comments?.pageInfo?.hasNextPage ? thread.comments.pageInfo.endCursor : null;
+      while (commentCursor) {
+        const commentResult = await github.graphql(threadCommentsQuery, {
+          threadId: thread.id,
+          cursor: commentCursor,
+        });
+        const commentsPage = commentResult?.node?.comments;
+        if ((commentsPage?.nodes || []).some(comment => comment?.id === commentId)) {
+          return {
+            status: "thread",
+            threadId: thread.id,
+            prNumber,
+            repoNameWithOwner,
+            isResolved: thread.isResolved === true,
+          };
+        }
+        commentCursor = commentsPage?.pageInfo?.hasNextPage ? commentsPage.pageInfo.endCursor : null;
+      }
+    }
+
+    threadCursor = reviewThreads?.pageInfo?.hasNextPage ? reviewThreads.pageInfo.endCursor : null;
+  } while (threadCursor);
+
+  return { status: "comment_without_thread" };
 }
 
 /**
@@ -98,6 +248,57 @@ function isIntegrationAccessError(error) {
   }
 
   return messages.some(message => message.toLowerCase().includes(integrationErrorFragment));
+}
+
+/**
+ * Check whether an error indicates the referenced GraphQL node no longer exists.
+ * Review thread node IDs can become stale between the agent turn and the safe-outputs
+ * replay (thread already resolved, deleted, or superseded), which surfaces as a
+ * "Could not resolve to a node" or "Not Found" error. These are treated as skippable.
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isMissingNodeError(error) {
+  /** @type {string[]} */
+  const messages = [getErrorMessage(error)];
+  /** @type {Array<{type?: unknown, message?: unknown, path?: unknown}>} */
+  const graphQLErrors = [];
+
+  if (error && typeof error === "object" && "errors" in error && Array.isArray(error.errors)) {
+    for (const graphQLError of error.errors) {
+      graphQLErrors.push(graphQLError);
+      if (typeof graphQLError?.message === "string") {
+        messages.push(graphQLError.message);
+      }
+    }
+  }
+
+  const hasNodeScopedNotFoundType = graphQLErrors.some(graphQLError => {
+    if (typeof graphQLError?.type !== "string" || graphQLError.type.toUpperCase() !== "NOT_FOUND") {
+      return false;
+    }
+    const hasNodeScopedMessage = typeof graphQLError?.message === "string" && graphQLError.message.toLowerCase().includes("could not resolve to a node");
+    const hasNodeScopedPath =
+      Array.isArray(graphQLError?.path) &&
+      graphQLError.path.some(pathPart => {
+        if (typeof pathPart !== "string") return false;
+        const normalized = pathPart.toLowerCase();
+        // GraphQL paths for stale-thread mutation failures are rooted at "resolveReviewThread".
+        return normalized === "node" || normalized === "resolvereviewthread";
+      });
+    return hasNodeScopedMessage || hasNodeScopedPath;
+  });
+  if (hasNodeScopedNotFoundType) {
+    return true;
+  }
+
+  return messages.some(message => {
+    const normalized = message.trim().toLowerCase();
+    // Match the stale-node GraphQL error, or Octokit's bare "Not Found" 404 message.
+    // Deliberately avoid a loose "not found" substring match so unrelated errors
+    // (e.g. "Repository not found") still surface as real failures.
+    return normalized.includes("could not resolve to a node") || normalized === "not found";
+  });
 }
 
 /**
@@ -173,16 +374,50 @@ async function main(config = {}) {
       }
 
       // Look up the thread's PR number and repository
-      const threadInfo = await getThreadPullRequestInfo(githubClient, threadId);
-      if (threadInfo === null) {
-        core.warning(`Review thread not found or not a PullRequestReviewThread: ${threadId}`);
+      /** @type {Awaited<ReturnType<typeof getThreadPullRequestInfo>>} */
+      let threadInfo;
+      try {
+        threadInfo = await getThreadPullRequestInfo(githubClient, threadId);
+      } catch (error) {
+        if (isMissingNodeError(error)) {
+          core.info(`Review thread ${threadId} could not be resolved (${getErrorMessage(error)}) — already resolved or stale; skipping`);
+          return {
+            success: true,
+            thread_id: threadId,
+            is_resolved: true,
+            skipped: true,
+          };
+        }
+        throw error;
+      }
+      if (threadInfo.status === "missing") {
+        core.info(`Review thread ${threadId} not found — already resolved or stale; skipping`);
         return {
-          success: false,
-          error: `Review thread not found: ${threadId}`,
+          success: true,
+          thread_id: threadId,
+          is_resolved: true,
+          skipped: true,
         };
       }
 
-      const { prNumber: threadPRNumber, repoNameWithOwner: threadRepo } = threadInfo;
+      if (threadInfo.status === "comment_without_thread") {
+        return {
+          success: false,
+          error: `Could not find a PullRequestReviewThread containing review comment ${threadId}`,
+        };
+      }
+
+      if (threadInfo.status !== "thread") {
+        return {
+          success: false,
+          error: `thread_id must reference a PullRequestReviewThread node ID (PRRT_...); received ${threadInfo.nodeType} for ${threadId}`,
+        };
+      }
+
+      const { threadId: resolvedThreadId, prNumber: threadPRNumber, repoNameWithOwner: threadRepo, isResolved } = threadInfo;
+      if (resolvedThreadId !== threadId) {
+        core.info(`Resolved review comment ${threadId} to review thread ${resolvedThreadId}`);
+      }
 
       // When the user explicitly configured target-repo or allowed-repos, validate the thread's
       // repository using validateTargetRepo (supports wildcards like "*", "org/*").
@@ -190,15 +425,15 @@ async function main(config = {}) {
       if (hasExplicitTargetConfig) {
         // Cross-repo mode: validate thread repo against configured repos (fail closed if missing)
         if (!threadRepo) {
-          core.warning(`Could not determine repository for thread ${threadId}`);
+          core.warning(`Could not determine repository for thread ${resolvedThreadId}`);
           return {
             success: false,
-            error: `Could not determine the repository for thread ${threadId}`,
+            error: `Could not determine the repository for thread ${resolvedThreadId}`,
           };
         }
         const repoValidation = validateTargetRepo(threadRepo, defaultTargetRepo, allowedRepos);
         if (!repoValidation.valid) {
-          core.warning(`Thread ${threadId} belongs to repo ${threadRepo}, which is not in the allowed repos`);
+          core.warning(`Thread ${resolvedThreadId} belongs to repo ${threadRepo}, which is not in the allowed repos`);
           return {
             success: false,
             error: repoValidation.error,
@@ -215,7 +450,7 @@ async function main(config = {}) {
             };
           }
           if (threadPRNumber !== triggeringPRNumber) {
-            core.warning(`Thread ${threadId} belongs to PR #${threadPRNumber}, not triggering PR #${triggeringPRNumber}`);
+            core.warning(`Thread ${resolvedThreadId} belongs to PR #${threadPRNumber}, not triggering PR #${triggeringPRNumber}`);
             return {
               success: false,
               error: `Thread belongs to PR #${threadPRNumber}, but only threads on the triggering PR #${triggeringPRNumber} can be resolved`,
@@ -232,7 +467,7 @@ async function main(config = {}) {
             };
           }
           if (threadPRNumber !== targetPRNumber) {
-            core.warning(`Thread ${threadId} belongs to PR #${threadPRNumber}, not target PR #${targetPRNumber}`);
+            core.warning(`Thread ${resolvedThreadId} belongs to PR #${threadPRNumber}, not target PR #${targetPRNumber}`);
             return {
               success: false,
               error: `Thread belongs to PR #${threadPRNumber}, but target is PR #${targetPRNumber}`,
@@ -244,18 +479,25 @@ async function main(config = {}) {
         // Default (legacy) mode: always validate thread repo against defaultTargetRepo to stay
         // least-privilege, even when there is no triggering PR (e.g. schedule/workflow_dispatch).
         if (!threadRepo) {
-          core.warning(`Unable to determine repository for review thread ${threadId}; refusing to resolve in legacy mode`);
+          core.warning(`Unable to determine repository for review thread ${resolvedThreadId}; refusing to resolve in legacy mode`);
           return {
             success: false,
-            error: `Unable to determine repository for review thread ${threadId}`,
+            error: `Unable to determine repository for review thread ${resolvedThreadId}`,
           };
         }
 
         const legacyRepoValidation = validateTargetRepo(threadRepo, defaultTargetRepo, allowedRepos);
         if (!legacyRepoValidation.valid) {
-          core.warning(`Thread ${threadId} repository ${threadRepo} is not allowed in legacy mode`);
+          // In legacy mode, no cross-repo behavior was ever configured, so a thread_id resolving
+          // to an unrelated repository almost always indicates a stale or malformed ID (e.g. a
+          // hallucinated GraphQL node ID) rather than a genuine cross-repo access attempt. Treat
+          // this the same as an already-resolved/stale thread (skipped) so a single bad ID does
+          // not fail the entire safe_outputs job, while still refusing to perform the action.
+          core.warning(`Thread ${resolvedThreadId} repository ${threadRepo} is not allowed in legacy mode; skipping`);
           return {
             success: false,
+            skipped: true,
+            thread_id: resolvedThreadId,
             error: legacyRepoValidation.error || `Repository ${threadRepo} is not allowed for this handler`,
           };
         }
@@ -264,9 +506,9 @@ async function main(config = {}) {
         if (!triggeringPRNumber) {
           // No triggering PR (e.g. schedule/workflow_dispatch trigger), but the thread has been
           // resolved to a specific allowed repository via the API — allow the resolution to proceed
-          core.info(`No triggering PR context; resolving thread ${threadId} via explicit thread_id (PR #${threadPRNumber} in ${threadRepo})`);
+          core.info(`No triggering PR context; resolving thread ${resolvedThreadId} via explicit thread_id (PR #${threadPRNumber} in ${threadRepo})`);
         } else if (threadPRNumber !== triggeringPRNumber) {
-          core.warning(`Thread ${threadId} belongs to PR #${threadPRNumber}, not triggering PR #${triggeringPRNumber}`);
+          core.warning(`Thread ${resolvedThreadId} belongs to PR #${threadPRNumber}, not triggering PR #${triggeringPRNumber}`);
           return {
             success: false,
             error: `Thread belongs to PR #${threadPRNumber}, but only threads on the triggering PR #${triggeringPRNumber} can be resolved`,
@@ -274,7 +516,7 @@ async function main(config = {}) {
         }
       }
 
-      core.info(`Resolving review thread: ${threadId} (PR #${threadPRNumber}${threadRepo ? " in " + threadRepo : ""})`);
+      core.info(`Resolving review thread: ${resolvedThreadId} (PR #${threadPRNumber}${threadRepo ? " in " + threadRepo : ""})`);
 
       // Apply required-labels/required-title-prefix filter
       const [threadOwner, threadRepoName] = (threadRepo || `${context.repo.owner}/${context.repo.repo}`).split("/");
@@ -282,14 +524,24 @@ async function main(config = {}) {
       const filterResult = await checkRequiredFilter(githubClient, repoParts, threadPRNumber, requiredLabels, requiredTitlePrefix, "resolve_pull_request_review_thread");
       if (filterResult) return filterResult;
 
+      if (isResolved) {
+        core.info(`Review thread ${resolvedThreadId} is already resolved; skipping`);
+        return {
+          success: true,
+          thread_id: resolvedThreadId,
+          is_resolved: true,
+          skipped: true,
+        };
+      }
+
       // If in staged mode, preview without executing
       if (isStaged) {
-        logStagedPreviewInfo(`Would resolve review thread ${threadId}`);
+        logStagedPreviewInfo(`Would resolve review thread ${resolvedThreadId}`);
         return {
           success: true,
           staged: true,
           previewInfo: {
-            thread_id: threadId,
+            thread_id: resolvedThreadId,
             pr_number: threadPRNumber,
           },
         };
@@ -297,11 +549,20 @@ async function main(config = {}) {
 
       let resolveResult;
       try {
-        resolveResult = await resolveReviewThreadAPI(githubClient, threadId);
+        resolveResult = await resolveReviewThreadAPI(githubClient, resolvedThreadId);
       } catch (error) {
+        if (isMissingNodeError(error)) {
+          core.info(`Review thread ${resolvedThreadId} could not be resolved (${getErrorMessage(error)}) — already resolved or stale; skipping`);
+          return {
+            success: true,
+            thread_id: resolvedThreadId,
+            is_resolved: true,
+            skipped: true,
+          };
+        }
         if (isIntegrationAccessError(error)) {
           const warningMessage =
-            `Skipping resolve_pull_request_review_thread for ${threadId}: configuration mismatch ` +
+            `Skipping resolve_pull_request_review_thread for ${resolvedThreadId}: configuration mismatch ` +
             `(GitHub integration token cannot resolve this review thread: Resource not accessible by integration). ` +
             `Use safe-outputs.resolve-pull-request-review-thread.github-token with a token that can resolve review threads.`;
           core.warning(warningMessage);
@@ -315,17 +576,17 @@ async function main(config = {}) {
       }
 
       if (resolveResult.isResolved) {
-        core.info(`Successfully resolved review thread: ${threadId}`);
+        core.info(`Successfully resolved review thread: ${resolvedThreadId}`);
         return {
           success: true,
-          thread_id: threadId,
+          thread_id: resolvedThreadId,
           is_resolved: true,
         };
       } else {
-        core.error(`Failed to resolve review thread: ${threadId}`);
+        core.error(`Failed to resolve review thread: ${resolvedThreadId}`);
         return {
           success: false,
-          error: `Failed to resolve review thread: ${threadId}`,
+          error: `Failed to resolve review thread: ${resolvedThreadId}`,
         };
       }
     } catch (error) {

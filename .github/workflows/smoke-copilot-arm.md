@@ -29,6 +29,7 @@ imports:
   - shared/mcp/serena-go.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
 network:
   allowed:
     - defaults
@@ -111,17 +112,18 @@ safe-outputs:
     messages:
       append-only-comments: true
       footer: "> 📰 *BREAKING: Report filed by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
-      run-started: "📰 BREAKING: [{workflow_name}]({run_url}) is now investigating this {event_type}. Sources say the story is developing..."
-      run-success: "📰 VERDICT: [{workflow_name}]({run_url}) has concluded. All systems operational. This is a developing story. 🎤"
-      run-failure: "📰 DEVELOPING STORY: [{workflow_name}]({run_url}) reports {status}. Our correspondents are investigating the incident..."
+      run-started: "[{workflow_name}]({run_url}) ARM64 smoke test started for this {event_type}."
+      run-success: "[{workflow_name}]({run_url}) ARM64 smoke test completed successfully."
+      run-failure: "[{workflow_name}]({run_url}) ARM64 smoke test {status}. Check the logs for details."
 timeout-minutes: 15
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    id: awf
 ---
 
 # Smoke Test: Copilot Engine Validation (ARM64)
-
-**IMPORTANT: Keep all outputs extremely short and concise. Use single-line responses where possible. No verbose explanations.**
 
 **PURPOSE**: This smoke test validates that the Copilot engine, AWF firewall, MCP servers, and safe outputs work correctly on Linux ARM64 (ubuntu-24.04-arm) runners. This is critical for ensuring multi-architecture support.
 

@@ -9,9 +9,26 @@ import (
 	"testing"
 
 	"github.com/github/gh-aw/pkg/testutil"
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCreateProjectStatusUpdateConfigYAMLInlineBaseConfig(t *testing.T) {
+	config := CreateProjectStatusUpdateConfig{
+		BaseSafeOutputConfig: BaseSafeOutputConfig{
+			GitHubToken: "${{ secrets.CUSTOM_TOKEN }}",
+		},
+		Project: "https://github.com/orgs/test-org/projects/1",
+	}
+
+	out, err := yaml.Marshal(config)
+	require.NoError(t, err)
+
+	yamlStr := string(out)
+	assert.Contains(t, yamlStr, "github-token: ${{ secrets.CUSTOM_TOKEN }}")
+	assert.NotContains(t, yamlStr, "basesafeoutputconfig:")
+}
 
 // TestCreateProjectStatusUpdateHandlerConfigIncludesMax verifies that the max field
 // is properly passed to the handler config JSON (GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG)
@@ -59,7 +76,8 @@ Test workflow
 		"Expected create_project_status_update in handler config")
 
 	// Verify max is set in the handler config
-	require.Contains(t, compiledStr, `"max":5`,
+	handlerConfig := extractHandlerConfig(t, compiledStr)
+	require.InDelta(t, 5, handlerConfig["create_project_status_update"]["max"], 0,
 		"Expected max:5 in create_project_status_update handler config")
 }
 

@@ -13,7 +13,10 @@ var engineConfigDirLog = logger.New("workflow:engine_config_dir")
 // AgentManifestPathPrefix from the AgentFileProvider interface.
 // Falls back to ".github" when the engine is not found or provides no path prefixes.
 func engineConfigBaseDir(engineID string) string {
-	registry := GetGlobalEngineRegistry()
+	return engineConfigBaseDirForRegistry(GetGlobalEngineRegistry(), engineID)
+}
+
+func engineConfigBaseDirForRegistry(registry *EngineRegistry, engineID string) string {
 	engine, err := registry.GetEngine(strings.ToLower(engineID))
 	if err == nil {
 		if provider, ok := engine.(AgentFileProvider); ok {
@@ -36,9 +39,6 @@ func engineConfigBaseDir(engineID string) string {
 //	claude       → .claude/skills
 //	codex        → .codex/skills
 //	gemini       → .gemini/skills
-//	crush        → .crush/skills
-//	opencode     → .opencode/skills
-//	antigravity  → .antigravity/skills
 //	pi           → .pi/skills
 //	others       → .github/skills  (Copilot default)
 func GetEngineSkillDir(engineID string) string {
@@ -53,9 +53,6 @@ func GetEngineSkillDir(engineID string) string {
 //	claude       → .claude/agents
 //	codex        → .codex/agents
 //	gemini       → .gemini/agents
-//	crush        → .crush/agents
-//	opencode     → .opencode/agents
-//	antigravity  → .antigravity/agents
 //	pi           → .pi/agents
 //	others       → .github/agents  (Copilot default)
 func GetEngineSubAgentDir(engineID string) string {

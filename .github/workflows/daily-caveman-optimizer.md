@@ -15,9 +15,9 @@ permissions:
   issues: read
 
 tracker-id: daily-caveman-optimizer
+model: "${{ needs.activation.outputs.model_size }}"
 engine:
   id: claude
-  model: "${{ needs.activation.outputs.model_size }}"
 strict: true
 experiments:
   model_size:
@@ -54,7 +54,8 @@ safe-outputs:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   cache-memory: true
@@ -71,6 +72,11 @@ imports:
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: instruction_file_optimized
+    question: Did the agent apply caveman optimization to an instruction file in .github/aw or .github/agents?
+  - id: pr_created_or_noop
+    question: Was a PR created with concise improvements, or was noop used when no improvements were needed?
 ---
 
 # Daily Caveman Optimizer 🪨

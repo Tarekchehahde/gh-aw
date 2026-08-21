@@ -10,11 +10,15 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tracker-id: daily-code-metrics
-engine: claude
+engine:
+  id: crush
+model: copilot/claude-sonnet-4.5
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   github:
@@ -33,6 +37,7 @@ safe-outputs:
 timeout-minutes: 30
 strict: true
 imports:
+  - shared/crush.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[daily-code-metrics] "
@@ -42,18 +47,18 @@ imports:
   - shared/otlp.md
 experiments:
   output_format:
-    variants: [full_detail, executive_summary]
-    description: "Tests whether a concise executive summary report drives higher reader engagement than the current full-detail 6-chart report."
-    hypothesis: "H0: no change in discussion engagement rate. H1: executive_summary variant increases discussion reactions+comments by ≥20% due to improved readability."
+    variants: [full_detail, executive_summary, ste]
+    description: "Tests whether a concise executive summary report or a Simplified Technical English (STE) report drives higher reader engagement than the current full-detail 6-chart report."
+    hypothesis: "H0: no change in discussion engagement rate. H1: executive_summary variant increases discussion reactions+comments by ≥20% due to improved readability; ste variant improves readability further via simplified language."
     metric: discussion_engagement_score
-    secondary_metrics: [output_token_count, run_duration_seconds, chart_count]
+    secondary_metrics: [output_token_count, run_duration_seconds, chart_count, "eval:output_format_adherence"]
     guardrail_metrics:
       - name: report_empty_rate
         threshold: "<=0"
       - name: quality_score_present
         threshold: ">=1"
     min_samples: 20
-    weight: [50, 50]
+    weight: [34, 33, 33]
     start_date: "2026-05-16"
     issue: 1
 pre-agent-steps:
@@ -84,7 +89,15 @@ pre-agent-steps:
       fi
 features:
   gh-aw-detection: true
+evals:
+  - id: metrics_collected
+    question: Did the agent collect daily code metrics for the repository?
+  - id: metrics_report_created
+    question: Was a report or discussion created with code metrics trends and repository health indicators?
+  - id: output_format_adherence
+    question: Does the report match the writing style expected for the assigned output_format variant (e.g., short active-voice sentences with one fact per sentence when the variant is "ste")?
 ---
+
 {{#runtime-import? .github/shared-instructions.md}}
 
 # Daily Code Metrics and Trend Tracking Agent
@@ -202,6 +215,12 @@ For each metric: current value, 7-day % change, 30-day % change, trend indicator
 
 Use detailed template with embedded visualization charts:
 
+**Report Structure Guidelines**
+
+- Use `###` (or lower) headers only.
+- Keep summary and critical actions visible; move long detail into `<details>` blocks.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+
 ### Discussion Structure
 
 - **Title**: `Daily Code Metrics Report - YYYY-MM-DD`
@@ -209,6 +228,10 @@ Use detailed template with embedded visualization charts:
 
 ```markdown
 {{#if experiments.output_format == 'executive_summary' }}
+### Summary
+
+**X items found** — [brief description]
+
 **Key metrics today**: LOC: X,XXX | Quality score: XX/100 | Test ratio: X.XX | Active files (7d): XXX
 
 ### 📊 Key Visualizations
@@ -223,7 +246,35 @@ Use detailed template with embedded visualization charts:
 - [Recommendation 3]
 
 *For full metric tables, switch to `full_detail` variant.*
+{{#elseif experiments.output_format == 'ste' }}
+Write every sentence below using Simplified Technical English (STE) rules:
+- Use short sentences. Limit each sentence to 20 words or fewer.
+- Write one fact per sentence.
+- Use active voice and present tense.
+- Use simple, familiar words. Do not use jargon.
+- Spell out each acronym on first use.
+
+### Summary
+
+**X items found** — [brief description]
+
+**Key metrics today**: LOC: X,XXX | Quality score: XX/100 | Test ratio: X.XX | Active files (7d): XXX
+
+### 📊 Key Visualizations
+
+![Quality Score](URL_FROM_UPLOAD_ASSET)
+
+![Historical Trends](URL_FROM_UPLOAD_ASSET)
+
+### 💡 Top Recommendations
+- [Recommendation 1: one short sentence]
+- [Recommendation 2: one short sentence]
+- [Recommendation 3: one short sentence]
 {{else}}
+### Summary
+
+**X items found** — [brief description]
+
 Brief 2-3 paragraph executive summary highlighting key findings, quality score, notable trends, and any concerns requiring attention.
 
 ### 📊 Visualizations
@@ -231,7 +282,7 @@ Brief 2-3 paragraph executive summary highlighting key findings, quality score, 
 Embed all 6 charts (LOC by Language, Top Directories, Quality Score, Test Coverage, Code Churn, Historical Trends) with a brief analysis sentence each.
 
 <details>
-<summary>📈 Detailed Metrics</summary>
+<summary><b>View Full Details</b></summary>
 
 One compact table per category (Size, Quality, Tests, Churn-source, Churn-generated, Workflows/Docs). Follow with a Quality Score breakdown (Test Coverage 30%, Code Organization 25%, Documentation 20%, Churn Stability 15%, Comment Density 10%) and 3–5 actionable recommendations.
 

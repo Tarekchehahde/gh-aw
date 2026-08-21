@@ -20,6 +20,10 @@ func (c *Compiler) CompileToYAML(workflowData *WorkflowData, markdownPath string
 	compilerStringAPILog.Printf("CompileToYAML: markdownPath=%s", markdownPath)
 	c.markdownPath = markdownPath
 	c.skipHeader = true
+	c.configureGHESCompatibility()
+	if workflowData != nil {
+		workflowData.GHES = c.ghesArtifactCompat
+	}
 	// Clear contentOverride after compilation (set by ParseWorkflowString)
 	defer func() { c.contentOverride = "" }()
 
@@ -57,6 +61,8 @@ func (c *Compiler) CompileToYAML(workflowData *WorkflowData, markdownPath string
 func (c *Compiler) ParseWorkflowString(content string, virtualPath string) (*WorkflowData, error) {
 	workflowLog.Printf("ParseWorkflowString: parsing %d bytes with virtual path %s", len(content), virtualPath)
 
+	c.configureGHESCompatibility()
+
 	cleanPath := filepath.Clean(virtualPath)
 	contentBytes := []byte(content)
 
@@ -78,7 +84,7 @@ func (c *Compiler) ParseWorkflowString(content string, virtualPath string) (*Wor
 		return nil, c.createFrontmatterError(cleanPath, content, err, frontmatterStart)
 	}
 
-	if len(result.Frontmatter) == 0 {
+	if !hasMeaningfulFrontmatter(result) {
 		return nil, errors.New("no frontmatter found")
 	}
 
@@ -153,6 +159,11 @@ func (c *Compiler) ParseWorkflowString(content string, virtualPath string) (*Wor
 		return nil, fmt.Errorf("%s: %w", cleanPath, err)
 	}
 
+	// Validate that cli-proxy is not enabled while shell execution is refused
+	if err := validateCLIProxyBashCompatibility(workflowData.Tools, workflowData.Name); err != nil {
+		return nil, fmt.Errorf("%s: %w", cleanPath, err)
+	}
+
 	// Validate optional engine.mcp.session-timeout configuration.
 	if err := c.validateEngineMCPSessionTimeout(workflowData); err != nil {
 		return nil, fmt.Errorf("%s: %w", cleanPath, err)
@@ -178,6 +189,7 @@ func (c *Compiler) ParseWorkflowString(content string, virtualPath string) (*Wor
 		return nil, fmt.Errorf("%s: %w", cleanPath, err)
 	}
 	emitGitHubLockdownGuardPolicyWarning(c, workflowData.ParsedTools, cleanPath)
+	emitMinIntegrityNoneBashWarning(c, workflowData.ParsedTools, cleanPath)
 
 	// Validate integrity-reactions feature configuration
 	var gatewayConfig *MCPGatewayRuntimeConfig
@@ -189,12 +201,13 @@ func (c *Compiler) ParseWorkflowString(content string, virtualPath string) (*Wor
 	}
 
 	// Setup action cache and resolver
-	actionCache, actionResolver := c.getSharedActionResolver()
+	actionCache, actionResolver := c.ensureSharedActionCacheAndResolver()
 	workflowData.Ctx = c.ctx
 	workflowData.ActionCache = actionCache
 	workflowData.ActionResolver = actionResolver
 	workflowData.ActionPinWarnings = c.actionPinWarnings
 	workflowData.ActionPinMappings = c.getActionPinMappings()
+	workflowData.ContainerPinMappings = c.getContainerPinMappings()
 
 	// Extract YAML configuration sections
 	if err := c.extractYAMLSections(parseResult.frontmatterResult.Frontmatter, workflowData); err != nil {

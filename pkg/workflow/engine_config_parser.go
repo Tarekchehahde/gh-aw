@@ -4,7 +4,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/github/gh-aw/pkg/types"
 	"github.com/github/gh-aw/pkg/typeutil"
 )
 
@@ -28,35 +27,72 @@ func parseMaxAICreditsValue(raw any) int64 {
 // parseMaxRunsValue parses max-runs from either integer or numeric-string
 // frontmatter values.
 func parseMaxRunsValue(raw any) int {
-	if val, ok := typeutil.ParseIntValue(raw); ok && val > 0 {
-		return val
-	}
-	if rawStr, ok := raw.(string); ok {
-		if parsed, err := strconv.Atoi(rawStr); err == nil && parsed > 0 {
-			return parsed
-		}
-		engineLog.Printf("Ignoring invalid max-runs value: %q", rawStr)
-	}
-	return 0
+	return parsePositiveIntValue(raw, "max-runs")
 }
 
 // parseMaxTurnCacheMissesValue parses max-turn-cache-misses from either integer or
 // numeric-string frontmatter values.
 func parseMaxTurnCacheMissesValue(raw any) int {
-	if val, ok := typeutil.ParseIntValue(raw); ok && val > 0 {
-		return val
+	return parsePositiveIntValue(raw, "max-turn-cache-misses")
+}
+
+// parsePositiveIntValue parses a strictly-positive integer from raw.
+// Delegates to parseIntOrExpressionValue for a single int-validation path.
+// GitHub Actions expression strings (e.g. "${{ inputs.value }}") are silently
+// treated as 0 (not configured) because these fields are integer-only.
+func parsePositiveIntValue(raw any, fieldName string) int {
+	s := parseIntOrExpressionValue(raw, 1, fieldName)
+	if s == "" || isExpression(s) {
+		return 0
 	}
-	if rawStr, ok := raw.(string); ok {
-		if parsed, err := strconv.Atoi(rawStr); err == nil && parsed > 0 {
-			return parsed
-		}
-		engineLog.Printf("Ignoring invalid max-turn-cache-misses value: %q", rawStr)
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
 	}
-	return 0
+	return val
 }
 
 func parseMaxTurnsValue(raw any) string {
-	if val, ok := typeutil.ParseIntValue(raw); ok && val > 0 {
+	return parseIntOrExpressionValue(raw, 1, "max-turns")
+}
+
+// parseHarnessMaxRetriesValue parses harness.max-retries from a raw frontmatter value
+// that must be a non-negative integer (≥ 0) or a GitHub Actions expression template (${{ ... }}).
+// It is intentionally distinct from parseMaxTurnsValue which rejects zero.
+// Returns the canonical string representation, or "" when the value is absent/invalid.
+func parseHarnessMaxRetriesValue(raw any) string {
+	return parseIntOrExpressionValue(raw, 0, "harness.max-retries")
+}
+
+// parseHarnessWatchdogTimeoutValue parses harness.watchdog-timeout (seconds)
+// and converts it to milliseconds for GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS.
+// Accepts a positive integer (converted seconds→ms) or a GitHub Actions expression
+// template (${{ ... }}), which is passed through unchanged and must already be in ms.
+func parseHarnessWatchdogTimeoutValue(raw any) string {
+	seconds := parseIntOrExpressionValue(raw, 1, "harness.watchdog-timeout")
+	if seconds == "" {
+		return ""
+	}
+	// GitHub Actions expressions do not support arithmetic operators; pass through
+	// unchanged. Callers using an expression must supply a value already in ms.
+	if _, ok := extractWrappedGitHubExpression(seconds); ok {
+		return seconds
+	}
+	parsedSeconds, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		engineLog.Printf("Ignoring invalid harness.watchdog-timeout value: %q", seconds)
+		return ""
+	}
+	const maxInt64Div1000 = int64((1<<63)-1) / 1000
+	if parsedSeconds > maxInt64Div1000 {
+		engineLog.Printf("Ignoring out-of-range harness.watchdog-timeout value: %q", seconds)
+		return ""
+	}
+	return strconv.FormatInt(parsedSeconds*1000, 10)
+}
+
+func parseIntOrExpressionValue(raw any, minValue int, fieldName string) string {
+	if val, ok := typeutil.ParseIntValue(raw); ok && val >= minValue {
 		return strconv.Itoa(val)
 	}
 	if rawStr, ok := raw.(string); ok {
@@ -64,62 +100,22 @@ func parseMaxTurnsValue(raw any) string {
 		if trimmed == "" {
 			return ""
 		}
-		if parsed, err := strconv.Atoi(trimmed); err == nil && parsed > 0 {
+		if parsed, err := strconv.Atoi(trimmed); err == nil && parsed >= minValue {
 			return strconv.Itoa(parsed)
 		}
 		// Match the same GitHub Actions expression wrapper accepted by the schema.
 		// The schema and GitHub Actions runtime are responsible for validating the
 		// expression body itself; this helper only needs to preserve templated values.
-		if strings.HasPrefix(trimmed, "${{") && strings.HasSuffix(trimmed, "}}") {
+		if isExpression(trimmed) {
 			return trimmed
 		}
-		engineLog.Printf("Ignoring invalid max-turns value: %q", rawStr)
-	}
-	return ""
-}
-
-// parseNonNegativeIntOrExpressionValue parses a raw frontmatter value that must be a
-// non-negative integer (≥ 0) or a GitHub Actions expression template (${{ ... }}).
-// It is intentionally distinct from parseMaxTurnsValue which rejects zero.
-// Returns the canonical string representation, or "" when the value is absent/invalid.
-func parseNonNegativeIntOrExpressionValue(raw any) string {
-	if val, ok := typeutil.ParseIntValue(raw); ok && val >= 0 {
-		return strconv.Itoa(val)
-	}
-	if rawStr, ok := raw.(string); ok {
-		trimmed := strings.TrimSpace(rawStr)
-		if trimmed == "" {
-			return ""
-		}
-		if parsed, err := strconv.Atoi(trimmed); err == nil && parsed >= 0 {
-			return strconv.Itoa(parsed)
-		}
-		if strings.HasPrefix(trimmed, "${{") && strings.HasSuffix(trimmed, "}}") {
-			return trimmed
-		}
-		engineLog.Printf("Ignoring invalid harness.max-retries value: %q", rawStr)
+		engineLog.Printf("Ignoring invalid %s value: %q", fieldName, rawStr)
 	}
 	return ""
 }
 
 func parseMaxToolDenialsValue(raw any) string {
-	if val, ok := typeutil.ParseIntValue(raw); ok && val > 0 {
-		return strconv.Itoa(val)
-	}
-	if rawStr, ok := raw.(string); ok {
-		trimmed := strings.TrimSpace(rawStr)
-		if trimmed == "" {
-			return ""
-		}
-		if parsed, err := strconv.Atoi(trimmed); err == nil && parsed > 0 {
-			return strconv.Itoa(parsed)
-		}
-		if strings.HasPrefix(trimmed, "${{") && strings.HasSuffix(trimmed, "}}") {
-			return trimmed
-		}
-		engineLog.Printf("Ignoring invalid max-tool-denials value: %q", rawStr)
-	}
-	return ""
+	return parseIntOrExpressionValue(raw, 1, "max-tool-denials")
 }
 
 // parseAuthDefinition converts a raw auth config map (from engine.provider.auth) into
@@ -187,6 +183,18 @@ func parseEngineAuthConfig(authObj map[string]any) *EngineAuthConfig {
 	if s, ok := authObj["workspace-id"].(string); ok {
 		auth.AnthropicWorkspaceID = s
 	}
+	if s, ok := authObj["workload-identity-provider"].(string); ok {
+		auth.GoogleWorkloadIdentityProvider = s
+	}
+	if s, ok := authObj["service-account"].(string); ok {
+		auth.GoogleServiceAccount = s
+	}
+	if s, ok := authObj["project"].(string); ok {
+		auth.GoogleProject = s
+	}
+	if s, ok := authObj["location"].(string); ok {
+		auth.GoogleLocation = s
+	}
 	return auth
 }
 
@@ -214,70 +222,4 @@ func parseRequestShape(requestObj map[string]any) *RequestShape {
 		}
 	}
 	return shape
-}
-
-// parseEngineTokenWeights converts a raw token-weights config value (from engine.token-weights)
-// into a types.TokenWeights. Returns nil when the input is not a usable map or contains
-// no recognisable data. Multiplier values of unexpected numeric types (anything other than
-// float64, int, or uint64) are silently ignored — this matches the behaviour of the YAML
-// parser which produces float64 for JSON-number literals and integers for integer literals.
-func parseEngineTokenWeights(raw any) *types.TokenWeights {
-	obj, ok := raw.(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	tw := &types.TokenWeights{}
-
-	// Parse multipliers: map of model name → float64
-	if multipliersRaw, ok := obj["multipliers"]; ok {
-		if multipliersMap, ok := multipliersRaw.(map[string]any); ok && len(multipliersMap) > 0 {
-			tw.Multipliers = make(map[string]float64, len(multipliersMap))
-			for model, val := range multipliersMap {
-				switch v := val.(type) {
-				case float64:
-					tw.Multipliers[model] = v
-				case int:
-					tw.Multipliers[model] = float64(v)
-				case uint64:
-					tw.Multipliers[model] = float64(v)
-				}
-			}
-		}
-	}
-
-	// Parse token-class-weights
-	if tcwRaw, ok := obj["token-class-weights"]; ok {
-		if tcwMap, ok := tcwRaw.(map[string]any); ok {
-			tcw := &types.TokenClassWeights{}
-			setFloat := func(dst *float64, key string) {
-				if v, ok := tcwMap[key]; ok {
-					switch f := v.(type) {
-					case float64:
-						*dst = f
-					case int:
-						*dst = float64(f)
-					case uint64:
-						*dst = float64(f)
-					}
-				}
-			}
-			setFloat(&tcw.Input, "input")
-			setFloat(&tcw.CachedInput, "cached-input")
-			setFloat(&tcw.Output, "output")
-			setFloat(&tcw.Reasoning, "reasoning")
-			setFloat(&tcw.CacheWrite, "cache-write")
-			// Only assign if at least one weight was set
-			if tcw.Input != 0 || tcw.CachedInput != 0 || tcw.Output != 0 ||
-				tcw.Reasoning != 0 || tcw.CacheWrite != 0 {
-				tw.TokenClassWeights = tcw
-			}
-		}
-	}
-
-	// Return nil when nothing useful was parsed
-	if len(tw.Multipliers) == 0 && tw.TokenClassWeights == nil {
-		return nil
-	}
-	return tw
 }

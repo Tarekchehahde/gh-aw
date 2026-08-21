@@ -10,17 +10,15 @@ const HANDLER_TYPE = "update_issue";
 
 const { resolveTarget, checkRequiredFilter } = require("./safe_output_helpers.cjs");
 const { createUpdateHandlerFactory, createStandardResolveNumber, createStandardFormatResult } = require("./update_handler_factory.cjs");
-const { updateBody } = require("./update_pr_description_helpers.cjs");
+const { buildUpdatedBody } = require("./update_pr_description_helpers.cjs");
 const { buildCommonEntityUpdateData } = require("./update_entity_helpers.cjs");
 const { loadTemporaryProjectMap, replaceTemporaryProjectReferences } = require("./temporary_id.cjs");
 const { tryEnforceArrayLimit } = require("./limit_enforcement_helpers.cjs");
-const { ERR_VALIDATION } = require("./error_codes.cjs");
-const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
-const { generateHistoryUrl } = require("./generate_history_link.cjs");
+const { ERR_VALIDATION, ERR_API } = require("./error_codes.cjs");
 const { fetchIssueState, mergeIssueState } = require("./safe_output_execution_metadata.cjs");
 const { MAX_LABELS, MAX_ASSIGNEES } = require("./constants.cjs");
 const { fetchAllRepoLabels } = require("./github_api_helpers.cjs");
-const { buildIssueIntentLabelUpdates, getIssueIntentLabelNames, hasIssueIntentsRuntimeFeature, normalizeIssueIntentLabelSpecs } = require("./issue_intents.cjs");
+const { buildIssueIntentLabelUpdates, getIssueIntentLabelNames, normalizeIssueIntentLabelSpecs } = require("./issue_intents.cjs");
 
 /**
  * Execute the issue update API call
@@ -39,7 +37,7 @@ async function executeIssueUpdate(github, context, issueNumber, updateData) {
   const titlePrefix = updateData._titlePrefix || "";
   const labelsWereProvided = updateData.labels !== undefined;
   const labelSpecs = labelsWereProvided ? normalizeIssueIntentLabelSpecs(updateData.labels) : undefined;
-  const useIssueIntentLabels = Boolean(labelSpecs) && hasIssueIntentsRuntimeFeature();
+  const useIssueIntentLabels = Boolean(labelSpecs);
 
   // Remove internal fields
   const { _operation, _rawBody, _includeFooter, _titlePrefix, _workflowRepo, ...apiData } = updateData;
@@ -82,39 +80,30 @@ async function executeIssueUpdate(github, context, issueNumber, updateData) {
 
       const currentBody = currentIssue.body || "";
 
-      // Get workflow run URL for AI attribution.
-      // Use the original workflow repo (_workflowRepo) rather than context.repo, because
-      // context may be effectiveContext with repo overridden to a cross-repo target.
-      const workflowName = process.env.GH_AW_WORKFLOW_NAME || "GitHub Agentic Workflow";
-      const workflowId = process.env.GH_AW_WORKFLOW_ID || "";
-      const callerWorkflowId = process.env.GH_AW_CALLER_WORKFLOW_ID || "";
-      const workflowRepo = _workflowRepo || context.repo;
-      const runUrl = buildWorkflowRunUrl(context, workflowRepo);
-
-      const historyUrl =
-        generateHistoryUrl({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          itemType: "issue",
-          workflowCallId: callerWorkflowId,
-          workflowId,
-          serverUrl: context.serverUrl,
-        }) || undefined;
-
-      // Use helper to update body (handles all operations including replace)
-      apiData.body = updateBody({
+      apiData.body = buildUpdatedBody({
+        context,
         currentBody,
         newContent: rawBody,
         operation,
-        workflowName,
-        runUrl,
-        workflowId,
-        includeFooter, // Pass footer flag to helper
-        historyUrl,
+        includeFooter,
+        workflowRepo: _workflowRepo,
+        itemType: "issue",
       });
 
       core.info(`Will update body (length: ${apiData.body.length})`);
     }
+  }
+
+  // Resolve and validate label IDs before any writes to prevent partial updates:
+  // if a label name doesn't exist, buildIssueIntentLabelUpdates throws here so the
+  // REST update below is never attempted.
+  /** @type {any} */
+  let labelIntentUpdates = null;
+  if (useIssueIntentLabels && labelSpecs) {
+    const repoLabels = await fetchAllRepoLabels(github, context.repo.owner, context.repo.repo);
+    const labelIdByName = new Map(repoLabels.map(label => [label.name.toLowerCase(), label.id]));
+    labelIntentUpdates = buildIssueIntentLabelUpdates(labelSpecs, labelIdByName);
+    core.info(`Validated ${labelIntentUpdates.length} label(s) for issue #${issueNumber}`);
   }
 
   /** @type {any} */
@@ -129,16 +118,14 @@ async function executeIssueUpdate(github, context, issueNumber, updateData) {
     issue = response.data;
   }
 
-  if (useIssueIntentLabels && labelSpecs) {
+  if (useIssueIntentLabels && labelIntentUpdates) {
     const issueNodeId = issue?.node_id || currentIssue?.node_id;
     if (!issueNodeId) {
-      throw new Error(`Failed to resolve GraphQL node ID for issue #${issueNumber}`);
+      throw new Error(`${ERR_API}: Failed to resolve GraphQL node ID for issue #${issueNumber}`);
     }
 
-    core.info(`Using GraphQL intent path for label update with GraphQL-Features header (issue_intents runtime feature enabled)`);
-    const repoLabels = await fetchAllRepoLabels(github, context.repo.owner, context.repo.repo);
-    const labelIdByName = new Map(repoLabels.map(label => [label.name.toLowerCase(), label.id]));
-    const labels = buildIssueIntentLabelUpdates(labelSpecs, labelIdByName);
+    core.info("Using GraphQL intent path for label update with GraphQL-Features header");
+    const labels = labelIntentUpdates;
     core.info(`Updating ${labels.length} label(s) on issue #${issueNumber} via GraphQL intent mutation`);
     const result = await github.graphql(
       `mutation($issueId: ID!, $labels: [LabelUpdateInput!]!) {

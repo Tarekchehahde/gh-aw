@@ -46,18 +46,25 @@ func writeJSONStringMapEntriesRaw(yaml *strings.Builder, values map[string]strin
 	}
 }
 
-// writeJSONStringMapSectionRaw writes a JSON object section using writeJSONStringMapEntriesRaw.
-// Use this for env and headers sections in unquoted heredoc MCP configs.  Values are
-// JSON-encoded (so special chars remain safe) with the double-escape of shell
-// placeholders (\${VAR} → \\${VAR}) undone so bash can process them correctly.
-func writeJSONStringMapSectionRaw(yaml *strings.Builder, indent, name string, values map[string]string, trailingComma bool) {
+// writeJSONStringMapSectionWithEntries writes a JSON object section, delegating
+// per-entry serialisation to writeEntries.  writeEntries receives the builder,
+// the values map, and the child indent string (indent+"  ").
+func writeJSONStringMapSectionWithEntries(yaml *strings.Builder, indent, name string, values map[string]string, trailingComma bool, writeEntries func(*strings.Builder, map[string]string, string)) {
 	fmt.Fprintf(yaml, "%s\"%s\": {\n", indent, name)
-	writeJSONStringMapEntriesRaw(yaml, values, indent+"  ")
+	writeEntries(yaml, values, indent+"  ")
 	if trailingComma {
 		fmt.Fprintf(yaml, "%s},\n", indent)
 		return
 	}
 	fmt.Fprintf(yaml, "%s}\n", indent)
+}
+
+// writeJSONStringMapSectionRaw writes a JSON object section using writeJSONStringMapEntriesRaw.
+// Use this for env and headers sections in unquoted heredoc MCP configs.  Values are
+// JSON-encoded (so special chars remain safe) with the double-escape of shell
+// placeholders (\${VAR} → \\${VAR}) undone so bash can process them correctly.
+func writeJSONStringMapSectionRaw(yaml *strings.Builder, indent, name string, values map[string]string, trailingComma bool) {
+	writeJSONStringMapSectionWithEntries(yaml, indent, name, values, trailingComma, writeJSONStringMapEntriesRaw)
 }
 
 func mustMarshalJSONString(value string) string {
@@ -69,13 +76,7 @@ func mustMarshalJSONString(value string) string {
 }
 
 func writeJSONStringMapSection(yaml *strings.Builder, indent, name string, values map[string]string, trailingComma bool) {
-	fmt.Fprintf(yaml, "%s\"%s\": {\n", indent, name)
-	writeJSONStringMapEntries(yaml, values, indent+"  ")
-	if trailingComma {
-		fmt.Fprintf(yaml, "%s},\n", indent)
-		return
-	}
-	fmt.Fprintf(yaml, "%s}\n", indent)
+	writeJSONStringMapSectionWithEntries(yaml, indent, name, values, trailingComma, writeJSONStringMapEntries)
 }
 
 func writeTOMLInlineStringMapSection(yaml *strings.Builder, indent, name string, values map[string]string) {
@@ -96,7 +97,7 @@ func writeTOMLInlineStringMapSection(yaml *strings.Builder, indent, name string,
 // trailing slash) because github-mcp-server expects GITHUB_HOST in the same
 // format that GitHub Actions exposes via GITHUB_SERVER_URL (for example
 // https://github.com or https://myorg.ghe.com).
-func buildGitHubMCPEnvVars(tokenValue, hostValue string, readOnly, lockdown bool, toolsets string) map[string]string {
+func buildGitHubMCPEnvVars(tokenValue, hostValue string, readOnly, lockdown bool, toolsets, features string) map[string]string {
 	envVars := map[string]string{
 		"GITHUB_PERSONAL_ACCESS_TOKEN": tokenValue,
 		"GITHUB_HOST":                  hostValue,
@@ -114,13 +115,17 @@ func buildGitHubMCPEnvVars(tokenValue, hostValue string, readOnly, lockdown bool
 		envVars["GITHUB_TOOLSETS"] = toolsets
 	}
 
+	if features != "" {
+		envVars["GITHUB_FEATURES"] = features
+	}
+
 	// Note: tokenValue is a secret and is intentionally not logged.
-	mcpRendererSectionHelpersLog.Printf("Built GitHub MCP env vars: host=%s, readOnly=%v, lockdown=%v, hasToolsets=%v", hostValue, readOnly, lockdown, toolsets != "")
+	mcpRendererSectionHelpersLog.Printf("Built GitHub MCP env vars: host=%s, readOnly=%v, lockdown=%v, hasToolsets=%v, hasFeatures=%v", hostValue, readOnly, lockdown, toolsets != "", features != "")
 
 	return envVars
 }
 
-func buildGitHubMCPRemoteHeaders(authValue string, readOnly, lockdown bool, toolsets string) map[string]string {
+func buildGitHubMCPRemoteHeaders(authValue string, readOnly, lockdown bool, toolsets, features string) map[string]string {
 	headers := map[string]string{
 		"Authorization": authValue,
 	}
@@ -137,8 +142,12 @@ func buildGitHubMCPRemoteHeaders(authValue string, readOnly, lockdown bool, tool
 		headers["X-MCP-Toolsets"] = toolsets
 	}
 
+	if features != "" {
+		headers["X-MCP-Features"] = features
+	}
+
 	// Note: authValue is a secret and is intentionally not logged.
-	mcpRendererSectionHelpersLog.Printf("Built GitHub MCP remote headers: readOnly=%v, lockdown=%v, hasToolsets=%v", readOnly, lockdown, toolsets != "")
+	mcpRendererSectionHelpersLog.Printf("Built GitHub MCP remote headers: readOnly=%v, lockdown=%v, hasToolsets=%v, hasFeatures=%v", readOnly, lockdown, toolsets != "", features != "")
 
 	return headers
 }

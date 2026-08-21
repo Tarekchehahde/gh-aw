@@ -15,17 +15,11 @@ func hasModelPricingResolver(compiler *workflow.Compiler) bool {
 	return !reflect.ValueOf(compiler).Elem().FieldByName("modelPricingResolver").IsNil()
 }
 
-func TestCreateAndConfigureCompiler_RegistersModelPricingResolverByDefault(t *testing.T) {
+func TestCreateAndConfigureCompiler_DoesNotRegisterModelPricingResolverByDefault(t *testing.T) {
+	t.Parallel()
 	compiler := createAndConfigureCompiler(CompileConfig{})
-	if !hasModelPricingResolver(compiler) {
-		t.Fatal("expected model pricing resolver to be registered by default")
-	}
-}
-
-func TestCreateAndConfigureCompiler_SkipsModelPricingResolverWhenDisabled(t *testing.T) {
-	compiler := createAndConfigureCompiler(CompileConfig{DisableModelsDevLookup: true})
 	if hasModelPricingResolver(compiler) {
-		t.Fatal("expected model pricing resolver to be nil when models.dev lookup is disabled")
+		t.Fatal("expected model pricing resolver to be nil by default")
 	}
 }
 
@@ -34,6 +28,7 @@ func TestCreateAndConfigureCompiler_SkipsModelPricingResolverWhenDisabled(t *tes
 // sets it on the compiler AND locks it so per-file git-remote detection
 // cannot overwrite it.
 func TestSetupRepositoryContext_ValidScheduleSeedLocksSlug(t *testing.T) {
+	t.Parallel()
 	compiler := workflow.NewCompiler()
 	config := CompileConfig{
 		ScheduleSeed: "github/gh-aw",
@@ -59,6 +54,7 @@ func TestSetupRepositoryContext_ValidScheduleSeedLocksSlug(t *testing.T) {
 // invalid --schedule-seed value triggers a warning and falls back to git remote
 // detection; the slug is NOT locked so per-file detection can still set it.
 func TestSetupRepositoryContext_InvalidScheduleSeedDoesNotLock(t *testing.T) {
+	t.Parallel()
 	compiler := workflow.NewCompiler()
 	config := CompileConfig{
 		ScheduleSeed: "not-valid", // missing slash
@@ -74,6 +70,7 @@ func TestSetupRepositoryContext_InvalidScheduleSeedDoesNotLock(t *testing.T) {
 // TestSetupRepositoryContext_EmptyScheduleSeedDoesNotLock verifies that omitting
 // --schedule-seed leaves the slug unlocked so per-file git-remote detection applies.
 func TestSetupRepositoryContext_EmptyScheduleSeedDoesNotLock(t *testing.T) {
+	t.Parallel()
 	compiler := workflow.NewCompiler()
 	config := CompileConfig{
 		ScheduleSeed: "",
@@ -90,6 +87,7 @@ func TestSetupRepositoryContext_EmptyScheduleSeedDoesNotLock(t *testing.T) {
 // end-to-end regression guard: even after compileWorkflowFile calls
 // SetRepositorySlugIfUnlocked, the slug remains the one from --schedule-seed.
 func TestSetupRepositoryContext_ScheduleSeedTakesPrecedenceOverPerFileRemote(t *testing.T) {
+	t.Parallel()
 	compiler := workflow.NewCompiler()
 
 	// Simulate setupRepositoryContext with a valid --schedule-seed.

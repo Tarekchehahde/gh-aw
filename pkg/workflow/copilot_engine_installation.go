@@ -3,11 +3,10 @@
 // This file contains functions for generating GitHub Actions steps to install
 // the GitHub Copilot CLI and related sandbox infrastructure (AWF or SRT).
 //
-// Installation order:
+// Installation includes:
 //  1. Secret validation (COPILOT_GITHUB_TOKEN) — runs in the activation job
-//  2. Node.js setup
-//  3. Sandbox installation (SRT or AWF, if needed)
-//  4. Copilot CLI installation
+//  2. Sandbox installation (SRT or AWF, if needed)
+//  3. Copilot CLI installation
 //
 // The installation strategy differs based on sandbox mode:
 //   - Standard mode: Global installation using official installer script
@@ -17,6 +16,7 @@
 package workflow
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -30,9 +30,18 @@ type copilotSDKInstallSpec struct {
 	runtimeID string
 	stepName  string
 	command   string
+	// runLines, if non-empty, generates a "run: |" multiline step instead of "run: <command>".
+	runLines []string
 }
 
 const workspaceCommandPrefix = `cd "${GITHUB_WORKSPACE}" && `
+const copilotSDKPythonTargetDir = `${GITHUB_WORKSPACE}/.gh-aw/copilot-sdk/python`
+
+// inlineMavenVersion is the pinned Maven version used to bootstrap Maven for inline Java drivers
+// on runners that don't have it pre-installed (e.g. self-hosted). GitHub-hosted runners already
+// have Maven, so the bootstrap is a no-op there. The binary is fetched from repo.maven.apache.org
+// which is already in the Java ecosystem firewall allowlist.
+const inlineMavenVersion = "3.9.9"
 
 // getWorkspaceCommandPrefixFor returns the shell cd prefix for engine command generation.
 // When engine.cwd is configured it returns a prefix that changes to ${GH_AW_ENGINE_CWD}
@@ -48,42 +57,60 @@ func getWorkspaceCommandPrefixFor(config *EngineConfig) string {
 // GetSecretValidationStep returns the secret validation step for the Copilot engine.
 // Returns an empty step if:
 //   - permissions.copilot-requests is set to write (uses GitHub Actions token instead), or
-//   - COPILOT_PROVIDER_BASE_URL, COPILOT_PROVIDER_API_KEY, or COPILOT_PROVIDER_BEARER_TOKEN is set in engine.env
+//   - COPILOT_PROVIDER_BASE_URL, COPILOT_PROVIDER_API_KEY, or COPILOT_PROVIDER_BEARER_TOKEN is set to a non-empty value in engine.env
 //     (BYOK mode — the external provider handles authentication, so COPILOT_GITHUB_TOKEN
 //     is not required for model routing).
 func (e *CopilotEngine) GetSecretValidationStep(workflowData *WorkflowData) GitHubActionStep {
 	provider := e.ResolveLLMProvider(workflowData)
-	if provider == LLMProviderGitHub && hasCopilotRequestsWritePermission(workflowData) {
-		copilotInstallLog.Print("Skipping secret validation step: permissions.copilot-requests=write enabled, using GitHub Actions token")
-		return GitHubActionStep{}
+	return BuildEngineSecretValidationStep(workflowData, EngineSecretValidationConfig{
+		SecretNames: llmProviderSecretNames(provider),
+		EngineName:  "GitHub Copilot CLI",
+		DocsURL:     llmProviderDocsURL(provider),
+		Skip: func(workflowData *WorkflowData) bool {
+			if provider == LLMProviderGitHub && hasCopilotRequestsWritePermission(workflowData) {
+				copilotInstallLog.Print("Skipping secret validation step: permissions.copilot-requests=write enabled, using GitHub Actions token")
+				return true
+			}
+			if engineEnvHasNonEmptyValue(workflowData, constants.CopilotProviderBaseURL) ||
+				engineEnvHasNonEmptyValue(workflowData, constants.CopilotProviderAPIKey) ||
+				engineEnvHasNonEmptyValue(workflowData, constants.CopilotProviderBearerToken) {
+				copilotInstallLog.Print("Skipping COPILOT_GITHUB_TOKEN validation: BYOK provider credentials are configured")
+				return true
+			}
+			return false
+		},
+	})
+}
+
+// GetSecretFailureMessage returns a Copilot-specific guidance message shown in the agentic
+// failure issue when the COPILOT_GITHUB_TOKEN secret validation step fails. The message
+// explains the permissions: copilot-requests: write alternative that avoids the need for a
+// personal access token when an organization Copilot subscription is available.
+//
+// When the workflow uses a non-GitHub provider (engine.model-provider: openai or anthropic),
+// the copilot-requests: write permission does not apply and an empty string is returned instead.
+func (e *CopilotEngine) GetSecretFailureMessage(workflowData *WorkflowData) string {
+	if e.ResolveLLMProvider(workflowData) != LLMProviderGitHub {
+		return ""
 	}
-	if engineEnvHasKey(workflowData, constants.CopilotProviderBaseURL) ||
-		engineEnvHasKey(workflowData, constants.CopilotProviderAPIKey) ||
-		engineEnvHasKey(workflowData, constants.CopilotProviderBearerToken) {
-		copilotInstallLog.Print("Skipping COPILOT_GITHUB_TOKEN validation: BYOK provider credentials are configured")
-		return GitHubActionStep{}
-	}
-	return BuildDefaultSecretValidationStep(
-		workflowData,
-		llmProviderSecretNames(provider),
-		"GitHub Copilot CLI",
-		llmProviderDocsURL(provider),
-	)
+	return "**Alternative**: If your organization has a Copilot subscription, you can avoid the need for a personal access token by adding a top-level `permissions` block to your workflow file. " +
+		"This enables Copilot inference through the org using the built-in GitHub Actions token.\n" +
+		"\n```yaml\npermissions:\n  copilot-requests: write\n```\n" +
+		"\nSee: https://github.github.com/gh-aw/reference/engines/#github-copilot-default"
 }
 
 // GetInstallationSteps generates the complete installation workflow for Copilot CLI.
 // This includes Node.js setup, sandbox installation (SRT or AWF), and Copilot CLI installation.
 // Secret validation is handled separately in the activation job via GetSecretValidationStep.
-// The installation order is:
-// 1. Node.js setup
-// 2. Sandbox installation (AWF, if needed)
-// 3. Copilot CLI installation
+// The generated steps include Copilot CLI installation and sandbox installation
+// (AWF, if needed).
 //
 // If a custom command is specified in the engine configuration, this function skips
 // standard Copilot CLI installation. When firewall is enabled, it still returns AWF
 // runtime installation steps required for harness execution.
 func (e *CopilotEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHubActionStep {
 	copilotInstallLog.Printf("Generating installation steps for Copilot engine: workflow=%s", workflowData.Name)
+	inlineDriverWriteStep := buildInlineCopilotSDKDriverWriteStep(workflowData)
 	sdkInstallStep := buildCopilotSDKInstallStep(workflowData)
 
 	// Skip standard Copilot CLI installation if custom command is specified.
@@ -93,39 +120,60 @@ func (e *CopilotEngine) GetInstallationSteps(workflowData *WorkflowData) []GitHu
 		if isFirewallEnabled(workflowData) {
 			copilotInstallLog.Printf("Skipping Copilot CLI installation: custom command specified (%s); keeping AWF runtime installation because firewall is enabled", workflowData.EngineConfig.Command)
 			var steps []GitHubActionStep
+			if len(inlineDriverWriteStep) > 0 {
+				steps = append(steps, inlineDriverWriteStep)
+			}
 			if len(sdkInstallStep) > 0 {
 				steps = append(steps, sdkInstallStep)
 			}
 			return appendCopilotLSPInstallSteps(BuildNpmEngineInstallStepsWithAWF(steps, workflowData), workflowData)
 		}
+		var steps []GitHubActionStep
+		if len(inlineDriverWriteStep) > 0 {
+			steps = append(steps, inlineDriverWriteStep)
+		}
 		if len(sdkInstallStep) > 0 {
 			copilotInstallLog.Printf("Skipping Copilot CLI installation: custom command specified (%s); keeping Copilot SDK install step", workflowData.EngineConfig.Command)
-			return appendCopilotLSPInstallSteps([]GitHubActionStep{sdkInstallStep}, workflowData)
+			steps = append(steps, sdkInstallStep)
+			return appendCopilotLSPInstallSteps(steps, workflowData)
 		}
 		copilotInstallLog.Printf("Skipping installation steps: custom command specified (%s)", workflowData.EngineConfig.Command)
-		return appendCopilotLSPInstallSteps([]GitHubActionStep{}, workflowData)
+		return appendCopilotLSPInstallSteps(steps, workflowData)
 	}
 
-	// Copilot CLI is pinned to the default version constant.
-	copilotVersion := string(constants.DefaultCopilotVersion)
+	// Version selection follows a three-level priority:
+	//   1. engine.version if explicitly set in the workflow — pass it as a positional arg.
+	//   2. compat.json toolcache lookup at runtime — enabled when no explicit version is set;
+	//      the script uses GH_AW_COMPILED_VERSION (injected by compiledVersion below) to
+	//      select the right compat window and pick the best cached binary.
+	//   3. Baked-in DEFAULT_COPILOT_VERSION in the script — final fallback.
+	//
+	// EngineConfig.Version is intentionally left unset when no explicit engine.version is given.
+	// Downstream compile-time lookups (OTel, GH_AW_INFO_VERSION, copilotSupportsNoAskUser, …)
+	// already fall back to DefaultCopilotVersion via getVersionForSetup / getInstallationVersion,
+	// so no normalization mutation is needed here.
+	copilotVersion := "" // empty means "let the script decide via compat/default" (priorities 2 & 3)
 	if workflowData.EngineConfig != nil {
 		if workflowData.EngineConfig.Version != "" {
-			copilotInstallLog.Printf("Ignoring pinned engine.version (%s): Copilot CLI install version is pinned to %s", workflowData.EngineConfig.Version, copilotVersion)
+			copilotVersion = workflowData.EngineConfig.Version
+			copilotInstallLog.Printf("Using engine.version for Copilot CLI installation: %s", copilotVersion)
+		} else {
+			copilotInstallLog.Printf("No engine.version specified; script will resolve via compat.json or baked-in default")
 		}
-		// Normalize engine config version to effective installed version so
-		// downstream checks that consult EngineConfig.Version stay consistent.
-		// This applies even when the original version was empty (unset), so all
-		// downstream consumers observe the effective installed value.
-		// This mutates workflowData by design because subsequent generation steps
-		// in the same compile flow should observe the effective installed version.
-		// Callers that reuse the same WorkflowData instance should expect this
-		// field to be rewritten after installation-step generation.
-		workflowData.EngineConfig.Version = copilotVersion
 	}
 
 	// Use the installer script for global installation
 	copilotInstallLog.Print("Using new installer script for Copilot installation")
-	npmSteps := GenerateCopilotInstallerSteps(copilotVersion, "Install GitHub Copilot CLI")
+	// On ARC/DinD runners, sudo may not be available (allowPrivilegeEscalation: false).
+	// Pass --rootless so the script installs to ~/.local/bin without sudo.
+	// The "Copy Copilot CLI to daemon-visible path" step in nodejs.go then copies from
+	// the rootless location to ${RUNNER_TEMP}/gh-aw/bin/copilot where AWF expects it.
+	rootless := isArcDindTopology(workflowData)
+	compiledVersion := workflowData.CompiledVersion
+	npmSteps := GenerateCopilotInstallerSteps(copilotVersion, "Install GitHub Copilot CLI", rootless, compiledVersion)
+	if len(inlineDriverWriteStep) > 0 {
+		npmSteps = append(npmSteps, inlineDriverWriteStep)
+	}
 	if len(sdkInstallStep) > 0 {
 		npmSteps = append(npmSteps, sdkInstallStep)
 	}
@@ -151,6 +199,11 @@ func buildCopilotSDKInstallStep(workflowData *WorkflowData) GitHubActionStep {
 	if workflowData == nil || workflowData.EngineConfig == nil || !workflowData.EngineConfig.CopilotSDK {
 		return GitHubActionStep{}
 	}
+	if inlineRuntimeID := copilotSDKInlineDriverRuntimeID(workflowData); inlineRuntimeID != "" {
+		spec := getInlineCopilotSDKInstallSpec(inlineRuntimeID)
+		copilotInstallLog.Printf("copilot-sdk enabled with inline driver; runtime=%s; install command=%s", spec.runtimeID, spec.command)
+		return specToInstallStep(spec)
+	}
 	// When a custom SDK driver is configured without a custom engine command, use the driver's
 	// file extension to determine which language SDK to install. This ensures the correct SDK
 	// package manager command is generated (e.g., pip for .py drivers, ruby/gem for .rb drivers).
@@ -160,6 +213,23 @@ func buildCopilotSDKInstallStep(workflowData *WorkflowData) GitHubActionStep {
 	}
 	spec := getCopilotSDKInstallSpec(command)
 	copilotInstallLog.Printf("copilot-sdk enabled; runtime=%s; install command=%s", spec.runtimeID, spec.command)
+	return specToInstallStep(spec)
+}
+
+// specToInstallStep converts a copilotSDKInstallSpec into a GitHubActionStep.
+// When the spec has runLines set it emits a "run: |" multi-line block; otherwise
+// it emits a single "run: <command>" line.
+func specToInstallStep(spec copilotSDKInstallSpec) GitHubActionStep {
+	if len(spec.runLines) > 0 {
+		step := GitHubActionStep{
+			"      - name: " + spec.stepName,
+			"        run: |",
+		}
+		for _, line := range spec.runLines {
+			step = append(step, "          "+line)
+		}
+		return step
+	}
 	return GitHubActionStep{
 		"      - name: " + spec.stepName,
 		"        run: " + spec.command,
@@ -168,8 +238,9 @@ func buildCopilotSDKInstallStep(workflowData *WorkflowData) GitHubActionStep {
 
 // sdkDriverInstallCommand returns a synthetic command string for the given driver filename
 // that can be passed to getCopilotSDKInstallSpec/detectRuntimeFromCopilotCommand to select
-// the correct SDK package manager. Only non-JS language extensions need special handling;
-// JS drivers and arbitrary commands (no extension) fall back to the Node.js default.
+// the correct SDK package manager. Python and Ruby extensions need special handling;
+// JS, TypeScript, and arbitrary commands (no extension) fall back to the Node.js default.
+// TypeScript uses Node.js native support (Node 24+) so no extra toolchain install is needed.
 func sdkDriverInstallCommand(driverName string) string {
 	ext := strings.ToLower(filepath.Ext(driverName))
 	switch ext {
@@ -177,10 +248,8 @@ func sdkDriverInstallCommand(driverName string) string {
 		return "python3 " + driverName
 	case ".rb":
 		return "ruby " + driverName
-	case ".ts", ".mts":
-		return "ts-node " + driverName
 	default:
-		// .js/.cjs/.mjs and no-extension (arbitrary commands) default to Node.js.
+		// .js/.cjs/.mjs, .ts/.mts, and no-extension (arbitrary commands) default to Node.js.
 		return ""
 	}
 }
@@ -198,7 +267,11 @@ func getCopilotSDKInstallSpec(command string) copilotSDKInstallSpec {
 	switch runtimeID {
 	case "python":
 		spec.stepName = "Install GitHub Copilot SDK (Python)"
-		spec.command = workspaceCommandPrefix + "python3 -m pip install --disable-pip-version-check github-copilot-sdk==" + version
+		spec.command = workspaceCommandPrefix + fmt.Sprintf(
+			`mkdir -p "%[1]s" && python3 -m pip install --disable-pip-version-check --target "%[1]s" github-copilot-sdk==%[2]s`,
+			copilotSDKPythonTargetDir,
+			version,
+		)
 	case "typescript":
 		spec.stepName = "Install GitHub Copilot SDK (TypeScript)"
 		spec.command = workspaceCommandPrefix + "npm install --ignore-scripts --no-save @github/copilot-sdk@" + version + " ts-node typescript"
@@ -214,6 +287,61 @@ func getCopilotSDKInstallSpec(command string) copilotSDKInstallSpec {
 	case "java":
 		spec.stepName = "Install GitHub Copilot SDK (Java)"
 		spec.command = workspaceCommandPrefix + "mvn -q org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=com.github:copilot-sdk-java:" + version
+	}
+
+	return spec
+}
+
+func getInlineCopilotSDKInstallSpec(runtimeID string) copilotSDKInstallSpec {
+	version := string(constants.DefaultCopilotSDKVersion)
+
+	spec := copilotSDKInstallSpec{
+		runtimeID: runtimeID,
+		stepName:  "Install GitHub Copilot SDK (Node.js)",
+		command:   workspaceCommandPrefix + "npm install --ignore-scripts --no-save @github/copilot-sdk@" + version,
+	}
+
+	switch runtimeID {
+	case "python":
+		spec.stepName = "Install GitHub Copilot SDK (Python)"
+		spec.command = workspaceCommandPrefix + fmt.Sprintf(
+			`mkdir -p "%[1]s" && python3 -m pip install --disable-pip-version-check --target "%[1]s" github-copilot-sdk==%[2]s`,
+			copilotSDKPythonTargetDir,
+			version,
+		)
+	case "go":
+		spec.stepName = "Install GitHub Copilot SDK (Go)"
+		// Fetch the SDK and compile the driver to a binary in one step.
+		// Using a pre-compiled binary eliminates per-invocation `go run` recompilation
+		// and removes the Go toolchain requirement from the agent's runtime path.
+		goSrcFile := inlineCopilotSDKDriverGoPath[strings.LastIndex(inlineCopilotSDKDriverGoPath, "/")+1:]
+		goBinFile := inlineCopilotSDKDriverGoBinPath[strings.LastIndex(inlineCopilotSDKDriverGoBinPath, "/")+1:]
+		spec.command = fmt.Sprintf(
+			`mkdir -p "${GITHUB_WORKSPACE}/%[1]s" && cd "${GITHUB_WORKSPACE}/%[1]s" && go get github.com/github/copilot-sdk/go@v%[2]s && go build -o "%[4]s" "./%[3]s"`,
+			inlineCopilotSDKDriverDir,
+			version,
+			goSrcFile,
+			goBinFile,
+		)
+	case "java":
+		spec.stepName = "Install GitHub Copilot SDK (Java)"
+		classpathFile := inlineCopilotSDKDriverJavaClassPath[strings.LastIndex(inlineCopilotSDKDriverJavaClassPath, "/")+1:]
+		spec.runLines = []string{
+			`# Bootstrap Maven if not already available (e.g. self-hosted runners).`,
+			`# GitHub-hosted runners have Maven pre-installed; this is a no-op there.`,
+			`if ! command -v mvn >/dev/null 2>&1; then`,
+			`  MAVEN_HOME="${RUNNER_TEMP:-/tmp}/apache-maven-` + inlineMavenVersion + `"`,
+			`  if [ ! -d "${MAVEN_HOME}" ]; then`,
+			`    curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/` + inlineMavenVersion + `/apache-maven-` + inlineMavenVersion + `-bin.tar.gz" \`,
+			`      | tar -xzf - -C "${RUNNER_TEMP:-/tmp}"`,
+			`  fi`,
+			`  export PATH="${MAVEN_HOME}/bin:${PATH}"`,
+			`fi`,
+			fmt.Sprintf(`cd "${GITHUB_WORKSPACE}/%s" && mvn -q dependency:build-classpath -Dmdep.outputFile="%s"`,
+				inlineCopilotSDKDriverDir,
+				classpathFile,
+			),
+		}
 	}
 
 	return spec
@@ -297,12 +425,15 @@ func generateAWFInstallationStep(version string, agentConfig *AgentSandboxConfig
 	}
 
 	installCmd := "bash \"${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh\" " + version
-	// When sudo is false (network isolation mode), AWF runs rootless: pass --rootless
-	// so the install script installs into $HOME/.local/{bin,lib/awf} (always writable,
-	// even on standard GitHub-hosted runners where /usr/local is root-owned) and exports
+	// Rootless runtime profiles run AWF as the runner user: pass --rootless so the
+	// install script installs into $HOME/.local/{bin,lib/awf} (always writable, even on
+	// standard GitHub-hosted runners where /usr/local is root-owned) and exports
 	// $GITHUB_PATH so the bare awf invocation in later steps resolves correctly.
-	// Also check Disabled to match isAWFNetworkIsolationEnabled() behavior.
-	if agentConfig != nil && agentConfig.NetworkIsolation && !agentConfig.Disabled {
+	//
+	// Exceptions: the docker-sudo-iptables and cloud-hypervisor profiles use privileged
+	// AWF invocations, so the binary must be installed to /usr/local/bin to be on
+	// sudo's secure_path.
+	if agentConfig != nil && !agentConfig.Disabled && resolveSandboxRuntimeProfile(agentConfig).Rootless {
 		installCmd += " --rootless"
 	}
 
@@ -345,45 +476,12 @@ func generateDockerComposeInstallStep() GitHubActionStep {
 //     not call setHostGatewayIP(), which breaks --add-host host.docker.internal:host-gateway.
 //   - Downloads both runsc and containerd-shim-runsc-v1; the shim is required for Docker's
 //     containerd integration.
+//   - Script source: actions/setup/sh/sudo_gvisor_install.sh (requires sudo).
 func generateGVisorInstallStep() GitHubActionStep {
 	version := constants.DefaultGVisorVersion
 	return GitHubActionStep([]string{
 		"      - name: Install gVisor (runsc)",
-		"        run: |",
-		"          set -euo pipefail",
-		"",
-		`          echo "::group::Install gVisor (runsc)"`,
-		`          ARCH=$(uname -m)`,
-		`          URL="https://storage.googleapis.com/gvisor/releases/release/` + version + `/${ARCH}"`,
-		`          echo "Downloading runsc ` + version + ` for ${ARCH}..."`,
-		`          curl -fsSL "${URL}/runsc" -o /tmp/runsc`,
-		`          curl -fsSL "${URL}/runsc.sha512" -o /tmp/runsc.sha512`,
-		`          echo "Verifying SHA-512 for runsc..."`,
-		`          (cd /tmp && sha512sum -c runsc.sha512)`,
-		`          curl -fsSL "${URL}/containerd-shim-runsc-v1" -o /tmp/containerd-shim-runsc-v1`,
-		`          curl -fsSL "${URL}/containerd-shim-runsc-v1.sha512" -o /tmp/containerd-shim-runsc-v1.sha512`,
-		`          echo "Verifying SHA-512 for containerd-shim-runsc-v1..."`,
-		`          (cd /tmp && sha512sum -c containerd-shim-runsc-v1.sha512)`,
-		`          sudo install -m 755 /tmp/runsc /usr/local/bin/runsc`,
-		`          sudo install -m 755 /tmp/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1`,
-		`          runsc --version`,
-		`          echo "::endgroup::"`,
-		"",
-		`          echo "::group::Register runsc as Docker runtime"`,
-		`          sudo runsc install`,
-		`          # IMPORTANT: Must use restart (not reload).`,
-		`          # Docker's SIGHUP reload does NOT call setHostGatewayIP(), so`,
-		`          # --add-host host.docker.internal:host-gateway breaks for any`,
-		`          # container started after a reload-only config change.`,
-		`          sudo systemctl restart docker`,
-		`          echo "Docker runtimes:"`,
-		`          docker info --format '{{.Runtimes}}' || docker info | grep -i runtime`,
-		`          echo "::endgroup::"`,
-		"",
-		`          echo "::group::Verify gVisor works"`,
-		`          docker pull hello-world`,
-		`          docker run --rm --runtime=runsc hello-world`,
-		`          echo "✅ gVisor runtime verified"`,
-		`          echo "::endgroup::"`,
+		"        # runner-guard:ignore RGS-012 -- pinned release, SHA-512 verified artifacts, download-only step (no outbound secret transmission).",
+		`        run: bash "${RUNNER_TEMP}/gh-aw/actions/sudo_gvisor_install.sh" ` + version,
 	})
 }

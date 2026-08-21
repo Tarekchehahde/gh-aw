@@ -11,6 +11,7 @@ import (
 )
 
 func TestBuildAuditComparison_NoBaseline(t *testing.T) {
+	t.Parallel()
 	comparison := buildAuditComparison("success", auditComparisonSnapshot{Turns: 4, Posture: "read_only"}, nil, nil)
 	require.NotNil(t, comparison, "comparison should still be returned when no baseline exists")
 	assert.False(t, comparison.BaselineFound, "baseline should be marked unavailable")
@@ -20,6 +21,7 @@ func TestBuildAuditComparison_NoBaseline(t *testing.T) {
 }
 
 func TestBuildAuditComparison_RiskyChange(t *testing.T) {
+	t.Parallel()
 	baselineRun := &WorkflowRun{
 		DatabaseID:   100,
 		WorkflowName: "triage",
@@ -54,6 +56,7 @@ func TestBuildAuditComparison_RiskyChange(t *testing.T) {
 }
 
 func TestBuildAuditComparison_StableRun(t *testing.T) {
+	t.Parallel()
 	baselineRun := &WorkflowRun{DatabaseID: 99, WorkflowName: "triage", Conclusion: "success", CreatedAt: time.Now().Add(-time.Hour)}
 	comparison := buildAuditComparison(
 		"success",
@@ -69,6 +72,7 @@ func TestBuildAuditComparison_StableRun(t *testing.T) {
 }
 
 func TestBuildAuditComparison_FailedRunIsRisky(t *testing.T) {
+	t.Parallel()
 	baselineRun := &WorkflowRun{DatabaseID: 101, WorkflowName: "triage", Conclusion: "success", CreatedAt: time.Now().Add(-time.Hour)}
 	comparison := buildAuditComparison(
 		"failure",
@@ -86,6 +90,7 @@ func TestBuildAuditComparison_FailedRunIsRisky(t *testing.T) {
 }
 
 func TestSelectAuditComparisonBaselinePrefersCohortMatchOverRecency(t *testing.T) {
+	t.Parallel()
 	current := ProcessedRun{
 		Run: WorkflowRun{
 			Event: "issues",
@@ -143,6 +148,7 @@ func TestSelectAuditComparisonBaselinePrefersCohortMatchOverRecency(t *testing.T
 }
 
 func TestScoreAuditComparisonCandidateFallsBackToLatestSuccess(t *testing.T) {
+	t.Parallel()
 	current := ProcessedRun{Run: WorkflowRun{Event: "issues"}}
 	candidate := auditComparisonCandidate{
 		Run: WorkflowRun{DatabaseID: 300, CreatedAt: time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC), Event: "push"},
@@ -153,4 +159,147 @@ func TestScoreAuditComparisonCandidateFallsBackToLatestSuccess(t *testing.T) {
 	assert.Equal(t, 0, candidate.Score)
 	assert.Equal(t, "latest_success", candidate.Selection)
 	assert.Nil(t, candidate.MatchedOn)
+}
+
+func TestRecommendAuditComparisonAction(t *testing.T) {
+	t.Parallel()
+
+	newlyPresentMCPFailure := &AuditComparisonMCPFailureDelta{NewlyPresent: true}
+
+	tests := []struct {
+		name              string
+		label             string
+		currentConclusion string
+		delta             *AuditComparisonDelta
+		expectedContains  string
+	}{
+		{
+			name:              "non-success failure conclusion",
+			label:             "changed",
+			currentConclusion: "failure",
+			delta:             &AuditComparisonDelta{},
+			expectedContains:  "Investigate failure; run concluded with errors",
+		},
+		{
+			name:              "non-success non-failure conclusion",
+			label:             "changed",
+			currentConclusion: "action_required",
+			delta:             &AuditComparisonDelta{},
+			expectedContains:  "Investigate the action required conclusion",
+		},
+		{
+			name:              "nil delta with success conclusion",
+			label:             "changed",
+			currentConclusion: "success",
+			delta:             nil,
+			expectedContains:  "No action needed",
+		},
+		{
+			name:              "stable label with success conclusion",
+			label:             "stable",
+			currentConclusion: "success",
+			delta:             &AuditComparisonDelta{},
+			expectedContains:  "No action needed",
+		},
+		{
+			name:              "empty conclusion treated as success-equivalent, stable label",
+			label:             "stable",
+			currentConclusion: "",
+			delta:             &AuditComparisonDelta{},
+			expectedContains:  "No action needed",
+		},
+		{
+			name:              "posture read_only to write_capable",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				Posture: AuditComparisonStringDelta{Before: "read_only", After: "write_capable"},
+			},
+			expectedContains: "Review first-time write-capable behavior",
+		},
+		{
+			name:              "newly present MCP failure",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				MCPFailure: newlyPresentMCPFailure,
+			},
+			expectedContains: "Inspect the new MCP failure",
+		},
+		{
+			name:              "MCP failure present but not newly present falls through",
+			label:             "changed",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				MCPFailure: &AuditComparisonMCPFailureDelta{NewlyPresent: false},
+			},
+			expectedContains: "Review the behavior change",
+		},
+		{
+			name:              "blocked requests increased",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				BlockedRequests: AuditComparisonIntDelta{Before: 1, After: 3},
+			},
+			expectedContains: "Review network policy changes",
+		},
+		{
+			name:              "turns increased",
+			label:             "changed",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				Turns: AuditComparisonIntDelta{Before: 2, After: 5},
+			},
+			expectedContains: "Compare prompt or task-shape changes",
+		},
+		{
+			name:              "fallback default review message",
+			label:             "changed",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				Turns:           AuditComparisonIntDelta{Before: 5, After: 3},
+				BlockedRequests: AuditComparisonIntDelta{Before: 3, After: 1},
+			},
+			expectedContains: "Review the behavior change against the selected successful baseline",
+		},
+		{
+			name:              "priority order: posture change wins over MCP failure",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				Posture:    AuditComparisonStringDelta{Before: "read_only", After: "write_capable"},
+				MCPFailure: newlyPresentMCPFailure,
+			},
+			expectedContains: "Review first-time write-capable behavior",
+		},
+		{
+			name:              "priority order: MCP failure wins over blocked requests",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				MCPFailure:      newlyPresentMCPFailure,
+				BlockedRequests: AuditComparisonIntDelta{Before: 1, After: 5},
+			},
+			expectedContains: "Inspect the new MCP failure",
+		},
+		{
+			name:              "priority order: blocked requests wins over turns",
+			label:             "risky",
+			currentConclusion: "success",
+			delta: &AuditComparisonDelta{
+				BlockedRequests: AuditComparisonIntDelta{Before: 1, After: 5},
+				Turns:           AuditComparisonIntDelta{Before: 2, After: 8},
+			},
+			expectedContains: "Review network policy changes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := recommendAuditComparisonAction(tt.label, tt.currentConclusion, tt.delta)
+			assert.Contains(t, result, tt.expectedContains)
+		})
+	}
 }

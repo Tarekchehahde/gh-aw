@@ -19,6 +19,9 @@ const mockGithub = {
     repos: {
       getCollaboratorPermissionLevel: vi.fn(),
     },
+    orgs: {
+      listCustomRepoRoles: vi.fn(),
+    },
   },
 };
 
@@ -325,6 +328,184 @@ describe("check_permissions_utils", () => {
       expect(mockCore.warning).toHaveBeenCalledWith("User permission 'maintain' does not meet requirements: write");
     });
 
+    it("should authorize custom org role via the standard permission level", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "write", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["admin", "maintain", "write"]);
+
+      expect(result).toEqual({
+        authorized: true,
+        permission: "Security Champions",
+      });
+      expect(mockGithub.rest.orgs.listCustomRepoRoles).not.toHaveBeenCalled();
+      expect(mockCore.debug).toHaveBeenCalledWith("Repository permission API fields for 'testuser': permission='write', role='Security Champions'");
+      expect(mockCore.debug).toHaveBeenCalledWith("Repository permission computed roles for 'testuser': effective='Security Champions', custom_role=true, base_role='write'");
+      expect(mockCore.info).toHaveBeenCalledWith("Custom repository role 'Security Champions' satisfied required role 'write' via base role");
+      expect(mockCore.info).toHaveBeenCalledWith("✅ User has Security Champions access to repository");
+    });
+
+    it("should authorize the real-world Project Lead payload with write permission", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: {
+          permission: "write",
+          role_name: "Project Lead",
+          user: { login: "octocat", role_name: "Project Lead" },
+        },
+      });
+
+      const result = await checkRepositoryPermission("octocat", "example-org", "example-repo", ["admin", "maintain", "write"]);
+
+      expect(result).toEqual({
+        authorized: true,
+        permission: "Project Lead",
+      });
+    });
+
+    it("should reject a write-permission custom org role when maintain is required", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "write", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["maintain"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+      expect(mockCore.warning).toHaveBeenCalledWith("User permission 'Security Champions' does not meet requirements: maintain");
+    });
+
+    it("should authorize a maintain-permission custom org role when maintain is required", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "maintain", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["maintain"]);
+
+      expect(result).toEqual({
+        authorized: true,
+        permission: "Security Champions",
+      });
+      expect(mockCore.info).toHaveBeenCalledWith("✅ User has Security Champions access to repository");
+    });
+
+    it("should not authorize a write-permission custom org role for admin", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "write", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["admin"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+    });
+
+    it("should never authorize admin for a custom org role reporting admin permission", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "admin", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["admin"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+      expect(mockCore.warning).toHaveBeenCalledWith("Ignoring 'admin' permission reported for custom repository role 'Security Champions': custom roles cannot grant admin access");
+      expect(mockCore.debug).toHaveBeenCalledWith("Repository permission computed roles for 'testuser': effective='Security Champions', custom_role=true, base_role='<empty>'");
+    });
+
+    it("should not let an admin-permission custom org role satisfy a lesser required role", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "admin", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["write"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+      expect(mockCore.warning).toHaveBeenCalledWith("User permission 'Security Champions' does not meet requirements: write");
+    });
+
+    it("should authorize read-permission custom org role when read is required", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "read", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["read"]);
+
+      expect(result).toEqual({
+        authorized: true,
+        permission: "Security Champions",
+      });
+      expect(mockCore.info).toHaveBeenCalledWith("✅ User has Security Champions access to repository");
+    });
+
+    it("should reject read-permission custom org role when required permission does not match", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "read", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["write"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+      expect(mockCore.warning).toHaveBeenCalledWith("User permission 'Security Champions' does not meet requirements: write");
+    });
+
+    it("should authorize when required permissions include the exact custom role name", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "read", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["Security Champions"]);
+
+      expect(result).toEqual({
+        authorized: true,
+        permission: "Security Champions",
+      });
+      expect(mockCore.info).toHaveBeenCalledWith("✅ User has Security Champions access to repository");
+    });
+
+    it("should not treat an empty role_name as a custom org role", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "write", role_name: "" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["maintain"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "write",
+      });
+      expect(mockGithub.rest.orgs.listCustomRepoRoles).not.toHaveBeenCalled();
+      expect(mockCore.warning).toHaveBeenCalledWith("User permission 'write' does not meet requirements: maintain");
+    });
+
+    it("should fail closed for a custom org role with a non-standard permission value", async () => {
+      mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
+        data: { permission: "none", role_name: "Security Champions" },
+      });
+
+      const result = await checkRepositoryPermission("testuser", "testowner", "testrepo", ["write"]);
+
+      expect(result).toEqual({
+        authorized: false,
+        permission: "Security Champions",
+      });
+      expect(mockCore.debug).toHaveBeenCalledWith("Repository permission computed roles for 'testuser': effective='Security Champions', custom_role=true, base_role='<empty>'");
+      expect(mockCore.info).toHaveBeenCalledWith("Repository permission fallback unavailable for custom role 'Security Champions' because GitHub did not report a standard permission level");
+      expect(mockCore.warning).toHaveBeenCalledWith("User permission 'Security Champions' does not meet requirements: write");
+    });
+
     it("should check permissions in order and stop at first match", async () => {
       mockGithub.rest.repos.getCollaboratorPermissionLevel.mockResolvedValue({
         data: { permission: "write" },
@@ -604,6 +785,26 @@ describe("check_permissions_utils", () => {
       it("should return false for pull_request:review_requested even if actor differs from PR author", () => {
         const payload = { action: "review_requested", pull_request: { user: { login: "pr-author" } } };
         expect(isConfusedDeputyAttack("pelikhan", "pull_request", payload)).toBe(false);
+      });
+
+      it("should return true when a bot actor differs from the PR author on pull_request_target:synchronize", () => {
+        const payload = { action: "synchronize", pull_request: { user: { login: "attacker" } } };
+        expect(isConfusedDeputyAttack("dependabot[bot]", "pull_request_target", payload)).toBe(true);
+      });
+
+      it("should return false when the actor matches the PR author on pull_request_target:synchronize", () => {
+        const payload = { action: "synchronize", pull_request: { user: { login: "dependabot[bot]" } } };
+        expect(isConfusedDeputyAttack("dependabot[bot]", "pull_request_target", payload)).toBe(false);
+      });
+
+      it("should return false for a human collaborator on pull_request_target:synchronize", () => {
+        const payload = { action: "synchronize", pull_request: { user: { login: "alice" } } };
+        expect(isConfusedDeputyAttack("bob", "pull_request_target", payload)).toBe(false);
+      });
+
+      it("should return false for pull_request_target:labeled even if actor differs from PR author", () => {
+        const payload = { action: "labeled", pull_request: { user: { login: "alice" } } };
+        expect(isConfusedDeputyAttack("dependabot[bot]", "pull_request_target", payload)).toBe(false);
       });
 
       it("should return false for pull_request_review when actor matches review author (genuine review)", () => {

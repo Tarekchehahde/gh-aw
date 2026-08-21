@@ -31,6 +31,7 @@ const GOLDEN_DIR = join(
   "pkg/workflow/testdata/wasm_golden"
 );
 const WASM_FILE = join(ROOT, "gh-aw.wasm");
+const VERSION_CONSTANTS_FILE = join(ROOT, "pkg/constants/version_constants.go");
 const UPDATE_MODE = process.argv.includes("--update");
 
 // Fixtures with known wasm-vs-native divergence due to filesystem limitations.
@@ -42,6 +43,34 @@ const KNOWN_WASM_DIVERGENCE = new Set([
   "copilot-cli-deep-research", // pre_activation job generated differently in wasm
   "dev-hawk",             // workflow_run trigger: missing zizmor annotation + fork validation
 ]);
+
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function loadDefaultRuntimeVersions() {
+  const source = readFileSync(VERSION_CONSTANTS_FILE, "utf8");
+  const getVersion = (name) => {
+    const match = source.match(new RegExp(`^const\\s+${name}\\s+Version\\s+=\\s+"([^"]+)"`, "m"));
+    if (!match) {
+      throw new Error(`Could not find ${name} in ${VERSION_CONSTANTS_FILE}`);
+    }
+    return match[1];
+  };
+
+  const awfVersion = getVersion("DefaultFirewallVersion");
+  return {
+    awfVersion,
+    awfImageTag: awfVersion.replace(/^v/, ""),
+    mcpgVersion: getVersion("DefaultMCPGatewayVersion"),
+    ghMcpVersion: getVersion("DefaultGitHubMCPServerVersion"),
+    codexVersion: getVersion("DefaultCodexVersion"),
+    piVersion: getVersion("DefaultPiVersion"),
+    copilotVersion: getVersion("DefaultCopilotVersion"),
+  };
+}
+
+const DEFAULT_RUNTIME_VERSIONS = loadDefaultRuntimeVersions();
 
 // ── Build wasm if needed ─────────────────────────────────────────────
 function ensureWasmBuilt() {
@@ -170,9 +199,117 @@ function normalizeProjectUTC(content) {
 // Mirrors normalizeOutput() in pkg/workflow/wasm_golden_test.go.
 function normalizeCopilotDefaultModel(content) {
   return content.replace(
-    /\|\| 'claude-sonnet-\d+\.\d+'/g,
+    /\|\| 'claude-sonnet-[\d.]+'/g,
+    "|| 'default'"
+  ).replace(
+    /\|\| 'auto'/g,
+    "|| 'default'"
+  ).replace(
+    /\|\| 'gpt-[\d.][\w.-]*'/g,
     "|| 'default'"
   );
+}
+
+// ── Normalize AWF config payload ─────────────────────────────────────────
+// Keep golden fixtures stable across AWF config payload changes (model aliases,
+// domain allowlists, container image tags). The entire JSON body is replaced with
+// a stable placeholder so that model/domain additions don't break golden comparisons.
+// Mirrors testAWFConfigPayloadRE / normalizeOutput() in pkg/workflow/wasm_golden_test.go.
+function normalizeAWFConfigPayload(content) {
+  return content.replace(
+    /(printf '%s\\n' ")(\{.*\})(" > "\$\{RUNNER_TEMP\}\/gh-aw\/awf-config\.json")/g,
+    "$1AWF_CONFIG_PAYLOAD$3"
+  );
+}
+
+// ── Normalize actions/checkout pin ──────────────────────────────────────
+// Keep golden fixtures stable across actions/checkout pin version bumps.
+// Mirrors testCheckoutPinRE / normalizeOutput() in pkg/workflow/wasm_golden_test.go.
+function normalizeCheckoutPin(content) {
+  return content.replace(
+    /actions\/checkout@[0-9a-f]{40}\s+#\s+v\d+\.\d+\.\d+/g,
+    "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
+  );
+}
+
+// ── Normalize default runtime versions ───────────────────────────────────
+// Keep tracked wasm snapshots stable across default AWF/MCPG version bumps
+// without masking explicitly pinned non-default versions in fixtures.
+function normalizeDefaultRuntimeVersions(content) {
+  const {
+    awfVersion,
+    awfImageTag,
+    mcpgVersion,
+    ghMcpVersion,
+    codexVersion,
+    piVersion,
+    copilotVersion,
+  } = DEFAULT_RUNTIME_VERSIONS;
+  return content
+    .replace(
+      new RegExp(`GH_AW_INFO_AWF_VERSION: "${escapeRegex(awfVersion)}"`, "g"),
+      'GH_AW_INFO_AWF_VERSION: "vAWF_VERSION"'
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_AWMG_VERSION: "${escapeRegex(mcpgVersion)}"`, "g"),
+      'GH_AW_INFO_AWMG_VERSION: "vMCPG_VERSION"'
+    )
+    .replace(
+      new RegExp(`(install_awf_binary\\.sh"\\s+)${escapeRegex(awfVersion)}\\b`, "g"),
+      "$1vAWF_VERSION"
+    )
+    .replace(
+      new RegExp(`(ghcr\\.io/github/gh-aw-firewall/(?:agent|api-proxy|cli-proxy|squid):)${escapeRegex(awfImageTag)}\\b`, "g"),
+      "$1AWF_VERSION"
+    )
+    .replace(
+      new RegExp(`(releases/download/)${escapeRegex(awfVersion)}(/awf-config\\.schema\\.json)`, "g"),
+      "$1vAWF_VERSION$2"
+    )
+    .replace(
+      new RegExp(`("imageTag"\\s*:\\s*")(?:v)?${escapeRegex(awfImageTag)}"`, "g"),
+      '$1AWF_VERSION"'
+    )
+    .replace(
+      new RegExp(`(ghcr\\.io/github/gh-aw-mcpg:)${escapeRegex(mcpgVersion)}\\b`, "g"),
+      "$1MCPG_VERSION"
+    )
+    .replace(
+      new RegExp(`(ghcr\\.io/github/github-mcp-server:)${escapeRegex(ghMcpVersion)}\\b`, "g"),
+      "$1GH_MCP_VERSION"
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_VERSION: "${escapeRegex(codexVersion)}"`, "g"),
+      'GH_AW_INFO_VERSION: "CODEX_VERSION"'
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_AGENT_VERSION: "${escapeRegex(codexVersion)}"`, "g"),
+      'GH_AW_INFO_AGENT_VERSION: "CODEX_VERSION"'
+    )
+    .replace(
+      new RegExp(`(@openai/codex@)${escapeRegex(codexVersion)}\\b`, "g"),
+      "$1CODEX_VERSION"
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_VERSION: "${escapeRegex(piVersion)}"`, "g"),
+      'GH_AW_INFO_VERSION: "PI_VERSION"'
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_AGENT_VERSION: "${escapeRegex(piVersion)}"`, "g"),
+      'GH_AW_INFO_AGENT_VERSION: "PI_VERSION"'
+    )
+    .replace(
+      new RegExp(`(@earendil-works/pi-coding-agent@)${escapeRegex(piVersion)}\\b`, "g"),
+      "$1PI_VERSION"
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_VERSION: "${escapeRegex(copilotVersion)}"`, "g"),
+      'GH_AW_INFO_VERSION: "COPILOT_VERSION"'
+    )
+    .replace(
+      new RegExp(`GH_AW_INFO_AGENT_VERSION: "${escapeRegex(copilotVersion)}"`, "g"),
+      'GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"'
+    );
 }
 
 // ── Normalize output ──────────────────────────────────────────────────
@@ -181,13 +318,13 @@ function normalizeCopilotDefaultModel(content) {
 // new normalization steps only need to be added in one place.
 // Mirrors normalizeOutput() in pkg/workflow/wasm_golden_test.go.
 function normalize(content) {
-  return normalizeCopilotDefaultModel(
+  return normalizeAWFConfigPayload(normalizeCheckoutPin(normalizeDefaultRuntimeVersions(normalizeCopilotDefaultModel(
     normalizeProjectUTC(
       normalizeAWFImageTagDigests(
         normalizeContainerPins(normalizeHeredocDelimiters(content))
       )
     )
-  );
+  ))));
 }
 
 // ── Load golden file ─────────────────────────────────────────────────
@@ -212,7 +349,7 @@ function saveWasmGoldenFile(testName, content) {
     mkdirSync(dir, { recursive: true });
   }
   const goldenPath = join(dir, testName + ".golden");
-  writeFileSync(goldenPath, content);
+  writeFileSync(goldenPath, normalize(content));
 }
 
 // ── Main test runner ─────────────────────────────────────────────────

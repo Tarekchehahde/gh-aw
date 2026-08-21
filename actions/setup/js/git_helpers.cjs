@@ -4,6 +4,8 @@
 const { spawnSync } = require("child_process");
 const { ERR_SYSTEM } = require("./error_codes.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
+const { isTransientError } = require("./error_recovery.cjs");
+const { buildGitAuthEnv } = require("./git_auth_env.cjs");
 
 /**
  * Build GIT_CONFIG_* environment variables that inject an Authorization header
@@ -28,13 +30,55 @@ function getGitAuthEnv(token) {
     core.debug("getGitAuthEnv: no token available, git network operations may fail if credentials were cleaned");
     return {};
   }
-  const serverUrl = (process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/$/, "");
-  const tokenBase64 = Buffer.from(`x-access-token:${authToken}`).toString("base64");
-  return {
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: `http.${serverUrl}/.extraheader`,
-    GIT_CONFIG_VALUE_0: `Authorization: basic ${tokenBase64}`,
-  };
+  return buildGitAuthEnv(authToken);
+}
+
+/**
+ * Ensure the given directory is trusted for git in the current process context.
+ * Injects safe.directory via GIT_CONFIG_COUNT/KEY/VALUE env vars so that all
+ * subsequent git commands in this process inherit the trust without writing to
+ * ~/.gitconfig (no persistent global git config side effects).
+ *
+ * This is specifically needed for the "bridge" path (the Process Safe Outputs step
+ * running outside the Docker container) where HOME or the uid may differ from the
+ * in-container user that originally configured safe.directory in ~/.gitconfig.
+ *
+ * GIT_CONFIG_COUNT/KEY/VALUE is supported since git 2.31.
+ *
+ * @param {string} gitCwd - The directory to trust (e.g. GITHUB_WORKSPACE or a repo checkout path)
+ * @param {Object|Function} [logger] - Optional logger object
+ *   with a debug method (for example the MCP server) or a direct debug function.
+ * @returns {void}
+ */
+function ensureSafeDirectoryTrust(gitCwd, logger) {
+  if (!gitCwd) return;
+
+  // Check if gitCwd is already present in the injected env-var config to avoid
+  // duplicate entries when the handler is called more than once in the same process.
+  // Malformed pre-existing GIT_CONFIG_COUNT values (NaN, negative, fractional,
+  // or unsafe integers) fall back to 0 to avoid corrupting the env-var config chain.
+  const rawCount = process.env.GIT_CONFIG_COUNT || "0";
+  const parsedCount = Number(rawCount);
+  const existingCount = Number.isSafeInteger(parsedCount) && parsedCount >= 0 ? parsedCount : 0;
+  for (let i = 0; i < existingCount; i++) {
+    if (process.env[`GIT_CONFIG_KEY_${i}`] === "safe.directory" && process.env[`GIT_CONFIG_VALUE_${i}`] === gitCwd) {
+      return;
+    }
+  }
+
+  const idx = existingCount;
+  process.env.GIT_CONFIG_COUNT = String(existingCount + 1);
+  process.env[`GIT_CONFIG_KEY_${idx}`] = "safe.directory";
+  process.env[`GIT_CONFIG_VALUE_${idx}`] = gitCwd;
+  let debug;
+  if (typeof logger === "function") {
+    debug = logger;
+  } else if (typeof logger?.debug === "function") {
+    debug = logger.debug.bind(logger);
+  } else if (typeof globalThis.core?.debug === "function") {
+    debug = globalThis.core.debug.bind(globalThis.core);
+  }
+  debug?.(`Configured git safe.directory for bridge context: ${gitCwd}`);
 }
 
 /**
@@ -154,6 +198,70 @@ function execGitSync(args, options = {}) {
 }
 
 /**
+ * Git transport failures that are transient but not covered by the generic
+ * network patterns in isTransientError (git reports them with its own wording).
+ * Matched case-insensitively against the error message.
+ * @type {string[]}
+ */
+const TRANSIENT_GIT_PATTERNS = [
+  "the remote end hung up",
+  "early eof",
+  "rpc failed",
+  "http 5",
+  "unable to access",
+  "could not resolve host",
+  "connection reset",
+  "timed out",
+  "ssl_error",
+  "gnutls_handshake",
+  "failed to connect",
+  "server hung up",
+];
+
+/**
+ * Determine whether a git failure is a transient transport error worth
+ * retrying. Deterministic failures (authentication/permission errors, invalid
+ * refs, local git errors, filesystem errors) return false so callers fail fast.
+ *
+ * @param {any} error - The error thrown by a git operation
+ * @returns {boolean} True when the failure looks like a transient transport error
+ */
+function isTransientGitError(error) {
+  if (isTransientError(error)) return true;
+  const msg = getErrorMessage(error).toLowerCase();
+  return TRANSIENT_GIT_PATTERNS.some(pattern => msg.includes(pattern));
+}
+
+/**
+ * Run a git operation, retrying only transient transport failures with
+ * exponential backoff. Non-transient failures are rethrown immediately.
+ *
+ * @template T
+ * @param {() => T | Promise<T>} operation - The git operation to run
+ * @param {{maxRetries?: number, baseDelayMs?: number, operationName?: string}} [options]
+ * @returns {Promise<T>} The operation result
+ * @throws {any} The last error when retries are exhausted, or the first non-transient error
+ */
+async function withGitRetry(operation, options = {}) {
+  const { maxRetries = 3, baseDelayMs = 1000, operationName = "git operation" } = options;
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      if (!isTransientGitError(err)) throw err;
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        core.warning(`${operationName} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${getErrorMessage(err)}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Ensure refs/remotes/origin/<branch> is available locally, attempting a
  * single fetch when it is not. Returns whether the ref now exists and
  * whether a fetch was required.
@@ -197,6 +305,89 @@ function ensureOriginRemoteTrackingRef(branch, options) {
 }
 
 /**
+ * Maximum number of commits in a `base..head` range before it is considered
+ * implausible for a shallow checkout.  A shallow clone with `fetch-depth: 1`
+ * will report the entire local history as the range when the base ref is not
+ * reachable from the shallow grafts, producing a count in the tens-of-thousands
+ * even for a single-commit branch.  This threshold guards against that case.
+ *
+ * Callers can override the threshold via the `maxCommits` option on the
+ * functions that accept it.
+ */
+const SHALLOW_RANGE_MAX_COMMITS = 100;
+
+/**
+ * Detect whether a commit range is implausibly large for a shallow checkout.
+ *
+ * In a shallow clone (`fetch-depth: 1`) the base ref (e.g. `origin/main`) has
+ * no traversable ancestry, so `git rev-list base..HEAD` cannot exclude anything
+ * and returns essentially the entire repository history.  A count far above what
+ * a typical PR branch would contain almost certainly means the base ref is not
+ * reachable from the shallow grafts rather than representing real branch work.
+ *
+ * When the range size exceeds `options.maxCommits` (default
+ * `SHALLOW_RANGE_MAX_COMMITS`) **and** the repository is shallow, this function
+ * emits a `core.warning` with an actionable message and returns
+ * `{ implausible: true, commitCount }`.  Otherwise it returns
+ * `{ implausible: false, commitCount }`.
+ *
+ * All git failures are treated as non-fatal so callers are never blocked.
+ * If `git rev-list` fails, returns `{ implausible: false, commitCount: 0 }`.
+ * If `git rev-list` succeeds but `git rev-parse --is-shallow-repository` fails,
+ * returns `{ implausible: false, commitCount }` with the measured commit count.
+ *
+ * @param {string} baseRef - The base ref (exclusive). Example: "origin/main".
+ * @param {string} headRef - The head ref (inclusive). Example: "HEAD" or a branch name.
+ * @param {Object} [options]
+ * @param {string} [options.cwd] - Working directory for git commands.
+ * @param {number} [options.maxCommits] - Override the implausibility threshold.
+ * @returns {{ implausible: boolean, commitCount: number }}
+ */
+function checkImplausibleShallowRange(baseRef, headRef, options = {}) {
+  const { maxCommits = SHALLOW_RANGE_MAX_COMMITS, cwd } = options;
+  if (!baseRef || !headRef) return { implausible: false, commitCount: 0 };
+
+  let commitCount = 0;
+  try {
+    const countOut = execGitSync(["rev-list", "--count", `${baseRef}..${headRef}`], {
+      cwd,
+      suppressLogs: true,
+    });
+    commitCount = parseInt(countOut.trim(), 10) || 0;
+  } catch {
+    return { implausible: false, commitCount: 0 };
+  }
+
+  if (!Number.isFinite(commitCount) || commitCount <= maxCommits) {
+    return { implausible: false, commitCount };
+  }
+
+  // Count is suspiciously large; only flag it as implausible when the repo is
+  // actually shallow — a large honest branch in a full clone is fine.
+  let isShallow = false;
+  try {
+    const shallowOut = execGitSync(["rev-parse", "--is-shallow-repository"], {
+      cwd,
+      suppressLogs: true,
+    });
+    isShallow = shallowOut.trim() === "true";
+  } catch {
+    return { implausible: false, commitCount };
+  }
+
+  if (isShallow) {
+    core.warning(
+      `Shallow checkout produced an implausible commit range of ${commitCount} commits for ${baseRef}..${headRef}. ` +
+        `This usually means ${baseRef} is not reachable from the shallow grafts. ` +
+        `Increase fetch-depth in your workflow checkout step (e.g. fetch-depth: 0) to resolve this.`
+    );
+    return { implausible: true, commitCount };
+  }
+
+  return { implausible: false, commitCount };
+}
+
+/**
  * Check whether a commit range contains any merge commits.
  *
  * `git am` (the default patch transport) cannot apply merge commits — it only
@@ -209,14 +400,26 @@ function ensureOriginRemoteTrackingRef(branch, options) {
  * "unknown" as "no merge commits detected" so that a detection failure never
  * blocks the normal patch path.
  *
+ * Also returns `false` when the range is implausibly large for a shallow
+ * checkout (see `checkImplausibleShallowRange`).  In that case a warning is
+ * already emitted by the range check, so forcing bundle transport based on
+ * phantom merge-commit detections in a huge, unreliable range is avoided.
+ *
  * @param {string} baseRef - The base ref (exclusive). Example: "origin/feature".
  * @param {string} headRef - The head ref (inclusive). Example: "feature".
  * @param {Object} [options]
  * @param {string} [options.cwd] - Working directory for the git command.
+ * @param {number} [options.maxCommits] - Override the implausibility threshold.
  * @returns {boolean} True if at least one merge commit exists in baseRef..headRef.
  */
 function hasMergeCommitsInRange(baseRef, headRef, options = {}) {
   if (!baseRef || !headRef) return false;
+
+  // Guard: if the range is implausibly large for a shallow checkout, treat as
+  // no merge commits so a false-positive does not force bundle transport.
+  const { implausible } = checkImplausibleShallowRange(baseRef, headRef, options);
+  if (implausible) return false;
+
   try {
     const out = execGitSync(["rev-list", "--merges", "--count", `${baseRef}..${headRef}`], {
       cwd: options.cwd,
@@ -567,49 +770,140 @@ async function backfillCommitObjects(execApi, commitShas, options = {}) {
  *   When omitted, exec calls are made without additional options.
  * @param {string[]} [opts.commitFlags] - Extra flags prepended before `-m` in the `git commit`
  *   invocation (e.g. `["--allow-empty", "--no-verify"]`).
+ * @param {string[]} [opts.excludedFiles] - Paths that should be removed from the staged rewrite
+ *   before creating the linearized commit.
+ * @param {string} [opts.rebaseOnto] - Optional ref to replay the synthesized commit onto after
+ *   it has been linearized relative to `baseRef`. Use this when `baseRef` captures the agent's
+ *   actual change base but the resulting single commit must sit on a newer branch tip.
+ * @param {number} [opts.maxCommits] - Override the implausibility threshold (default
+ *   `SHALLOW_RANGE_MAX_COMMITS`).  Set to `Infinity` to disable the shallow guard.
  * @returns {Promise<string>} The new HEAD SHA after the rewrite.
- * @throws {Error} If the soft reset, staged-changes validation, or recommit fails.
+ * @throws {Error} If the soft reset, staged-changes validation, or recommit fails, or if a
+ *   shallow checkout produces an implausible commit range.
  */
 async function linearizeRangeAsCommit(baseRef, commitMessage, execApi, opts = {}) {
-  const { gitOpts, commitFlags = [] } = opts;
+  const { gitOpts, commitFlags = [], excludedFiles = [], rebaseOnto, maxCommits = SHALLOW_RANGE_MAX_COMMITS } = opts;
   // Spread gitOpts into exec calls only when it is explicitly provided — passing
   // `undefined` as a third argument changes the arity seen by mocks in tests.
   const execArgs = gitOpts !== undefined ? [gitOpts] : [];
 
+  // Guard against implausibly large commit ranges in shallow checkouts.
+  // In a shallow clone with fetch-depth:1 the base ref has no traversable
+  // ancestry, so git rev-list cannot exclude anything and returns the entire
+  // local history.  Synthesizing a rewrite commit from tens-of-thousands of
+  // commits is almost certainly wrong and could produce an oversized payload.
+  {
+    let rangeCommitCount = 0;
+    try {
+      const { stdout: countOut } = await execApi.getExecOutput("git", ["rev-list", "--count", `${baseRef}..HEAD`], ...execArgs);
+      rangeCommitCount = parseInt(countOut.trim(), 10) || 0;
+    } catch {
+      rangeCommitCount = 0;
+    }
+    if (Number.isFinite(rangeCommitCount) && rangeCommitCount > maxCommits) {
+      let isShallow = false;
+      try {
+        const shallowOpts = gitOpts !== undefined ? { ...gitOpts, ignoreReturnCode: true } : { ignoreReturnCode: true };
+        const { stdout: shallowOut } = await execApi.getExecOutput("git", ["rev-parse", "--is-shallow-repository"], shallowOpts);
+        isShallow = shallowOut.trim() === "true";
+      } catch {
+        // Non-fatal: if the shallow probe fails, do not block the rewrite.
+      }
+      if (isShallow) {
+        throw new Error(
+          `${ERR_SYSTEM}: Refusing to linearize an implausible commit range: ${rangeCommitCount} commits in ${baseRef}..HEAD in a shallow checkout. ` +
+            `This likely means ${baseRef} is not reachable from the shallow grafts. ` +
+            `Increase fetch-depth in your workflow checkout step (e.g. fetch-depth: 0) to resolve this.`
+        );
+      }
+    }
+  }
+
   const { stdout: originalHeadOut } = await execApi.getExecOutput("git", ["rev-parse", "HEAD"], ...execArgs);
   const originalHead = originalHeadOut.trim();
   if (!originalHead) {
-    throw new Error("Could not resolve current HEAD before linearizing range");
+    throw new Error(`${ERR_SYSTEM}: ` + "Could not resolve current HEAD before linearizing range");
   }
 
+  // Track whether a `git rebase` call was started so the catch block can distinguish
+  // "rebase in progress" (needs --abort) from "pre-rebase failure" (needs reset only).
+  let rebaseStarted = false;
   try {
     await execApi.exec("git", ["reset", "--soft", baseRef], ...execArgs);
+    if (Array.isArray(excludedFiles) && excludedFiles.length > 0) {
+      const { stdout: excludedStagedOut } = await execApi.getExecOutput("git", ["diff", "--cached", "--name-only", "--", ...excludedFiles], ...execArgs);
+      if (excludedStagedOut.trim()) {
+        // Use `git reset HEAD -- <files>` rather than `git checkout HEAD -- <files>`.
+        // For newly-added excluded files (not present in HEAD), `checkout` fails with
+        // "pathspec did not match any file(s) known to git". `reset HEAD --` handles
+        // both cases: removes new files from the index and restores modified files to
+        // the HEAD version, without touching the working tree.
+        await execApi.exec("git", ["reset", "HEAD", "--", ...excludedFiles], ...execArgs);
+        // For excluded files that were modifications (not new additions), the working tree
+        // still has the agent's version while the index was just restored to HEAD. This
+        // creates an unstaged change that would cause `git rebase --onto` to fail.
+        // Detect any such unstaged changes among the excluded files and restore them from
+        // the index so the working tree stays in sync before the commit and rebase steps.
+        const { stdout: modifiedExcludedOut } = await execApi.getExecOutput("git", ["diff", "--name-only", "--", ...excludedFiles], ...execArgs);
+        const modifiedExcluded = modifiedExcludedOut.trim().split("\n").filter(Boolean);
+        if (modifiedExcluded.length > 0) {
+          await execApi.exec("git", ["checkout", "--", ...modifiedExcluded], ...execArgs);
+        }
+      }
+    }
     const { stdout: stagedFilesOut } = await execApi.getExecOutput("git", ["diff", "--cached", "--name-only"], ...execArgs);
     if (!stagedFilesOut.trim()) {
-      throw new Error(`No staged changes found after soft reset to ${baseRef}. ` + `The commit range may contain only no-op or empty commits. ` + `Ensure your commits contain actual file changes before pushing.`);
+      throw new Error(`${ERR_SYSTEM}: No staged changes found after soft reset to ${baseRef}. ` + `The commit range may contain only no-op or empty commits. ` + `Ensure your commits contain actual file changes before pushing.`);
     }
     await execApi.exec("git", ["commit", ...commitFlags, "-m", commitMessage], ...execArgs);
+    if (typeof rebaseOnto === "string" && rebaseOnto.trim() && rebaseOnto.trim() !== baseRef.trim()) {
+      rebaseStarted = true;
+      await execApi.exec("git", ["rebase", "--onto", rebaseOnto.trim(), baseRef, "HEAD"], ...execArgs);
+      rebaseStarted = false;
+      // Guard: if the rebase silently dropped the commit (became empty relative to rebaseOnto),
+      // the agent's changes are lost. Detect and fail loudly rather than pushing an empty diff.
+      const { stdout: diffOut } = await execApi.getExecOutput("git", ["diff", "--name-only", rebaseOnto.trim(), "HEAD"], ...execArgs);
+      if (!diffOut.trim()) {
+        throw new Error(`${ERR_SYSTEM}: Rebase onto ${rebaseOnto} produced no changes; the synthesized commit was dropped as empty`);
+      }
+    }
     const { stdout: newHeadOut } = await execApi.getExecOutput("git", ["rev-parse", "HEAD"], ...execArgs);
     return newHeadOut.trim();
   } catch (rewriteError) {
     try {
+      if (rebaseStarted) {
+        // A rebase was in progress when the error occurred; abort it to restore the repo to its
+        // pre-rebase state before the hard reset below finishes the rollback.
+        try {
+          await execApi.exec("git", ["rebase", "--abort"], ...execArgs);
+        } catch (abortError) {
+          // --abort failed while a rebase was genuinely in progress — repo may be in a dirty state.
+          core.error(`linearizeRangeAsCommit: rebase --abort also failed: ${getErrorMessage(abortError)}`);
+        }
+      }
       await execApi.exec("git", ["reset", "--hard", originalHead], ...execArgs);
       core.warning(`linearizeRangeAsCommit: rewrite failed; restored original HEAD ${originalHead}`);
     } catch (restoreError) {
       core.warning(`linearizeRangeAsCommit: rollback also failed: ${getErrorMessage(restoreError)}`);
     }
-    throw new Error(`Failed to linearize ${baseRef}..HEAD as a single commit: ${getErrorMessage(rewriteError)}`, { cause: rewriteError });
+    throw new Error(`${ERR_SYSTEM}: Failed to linearize ${baseRef}..HEAD as a single commit: ${getErrorMessage(rewriteError)}`, { cause: rewriteError });
   }
 }
 
 module.exports = {
+  ensureSafeDirectoryTrust,
+  isTransientGitError,
+  withGitRetry,
   execGitSync,
   backfillCommitObjects,
+  checkImplausibleShallowRange,
   ensureFullHistoryForBundle,
   ensureOriginRemoteTrackingRef,
   extractBundlePrerequisiteCommits,
+  getBundlePrerequisites,
   getGitAuthEnv,
   hasMergeCommitsInRange,
   isShallowOrSparseCheckout,
   linearizeRangeAsCommit,
+  SHALLOW_RANGE_MAX_COMMITS,
 };

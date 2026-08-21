@@ -14,17 +14,16 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
   - shared/otlp.md
 tools:
   cli-proxy: true
+  bash: ["cat", "ls", "find", "grep", "head", "tail", "wc"]
   github:
     mode: gh-proxy
     toolsets: [default, discussions]
@@ -59,6 +58,11 @@ experiments:
     start_date: "2026-07-02"
     issue: 42941
 
+evals:
+  - id: subissues-planned
+    question: Did the workflow analyze the triggering issue or discussion and break the work into actionable sub-issues?
+  - id: issue-actions-completed
+    question: Were the planned sub-issues created successfully, with discussion closure handled correctly when required?
 
 ---
 
@@ -137,9 +141,11 @@ Since grouping is enabled, simply create sub-issues without parent references:
 {
   "type": "create_issue",
   "title": "Add user authentication middleware",
-  "body": "## Objective\n\nImplement JWT-based authentication middleware for API routes.\n\n## Context\n\nThis is needed to secure API endpoints before implementing user-specific features.\n\n<details>\n<summary><b>Implementation Plan</b></summary>\n\n## Approach\n\n1. Create middleware function in `src/middleware/auth.js`\n2. Add JWT verification using the existing auth library\n3. Attach user info to request object\n4. Handle token expiration and invalid tokens\n\n## Files to Modify\n\n- Create: `src/middleware/auth.js`\n- Update: `src/routes/api.js` (to use the middleware)\n- Update: `tests/middleware/auth.test.js` (add tests)\n\n</details>\n\n## Acceptance Criteria\n\n- [ ] Middleware validates JWT tokens\n- [ ] Invalid tokens return 401 status\n- [ ] User info is accessible in route handlers\n- [ ] Tests cover success and error cases"
+  "body": "### Objective\n\nImplement JWT-based authentication middleware for API routes.\n\n### Context\n\nThis is needed to secure API endpoints before implementing user-specific features.\n\n<details>\n<summary><b>Implementation Plan</b></summary>\n\n#### Approach\n\n1. Create middleware function in `src/middleware/auth.js`\n2. Add JWT verification using the existing auth library\n3. Attach user info to request object\n4. Handle token expiration and invalid tokens\n\n#### Files to Modify\n\n- Create: `src/middleware/auth.js`\n- Update: `src/routes/api.js` (to use the middleware)\n- Update: `tests/middleware/auth.test.js` (add tests)\n\n</details>\n\n### Acceptance Criteria\n\n- [ ] Middleware validates JWT tokens\n- [ ] Invalid tokens return 401 status\n- [ ] User info is accessible in route handlers\n- [ ] Tests cover success and error cases"
 }
 ```
+
+Use `###` (or lower) headers only in sub-issue bodies — `#` and `##` collide with the issue title when rendered — and wrap long detail sections in `<details>` as shown above.
 
 All created issues will be automatically grouped under a parent tracking issue.
 

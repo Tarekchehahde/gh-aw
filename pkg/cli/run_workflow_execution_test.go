@@ -3,10 +3,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRunWorkflowOnGitHub_InputValidation tests input validation in RunWorkflowOnGitHub
@@ -25,21 +31,21 @@ func TestRunWorkflowOnGitHub_InputValidation(t *testing.T) {
 			workflowName:  "",
 			inputs:        []string{},
 			expectError:   true,
-			errorContains: "workflow name or ID is required",
+			errorContains: "workflow name or ID is missing",
 		},
 		{
 			name:          "invalid input format - no equals sign",
 			workflowName:  "test-workflow",
 			inputs:        []string{"invalidinput"},
 			expectError:   true,
-			errorContains: "invalid input format",
+			errorContains: "not in key=value format",
 		},
 		{
 			name:          "invalid input format - empty key",
 			workflowName:  "test-workflow",
 			inputs:        []string{"=value"},
 			expectError:   true,
-			errorContains: "key cannot be empty",
+			errorContains: "empty key before '='",
 		},
 		{
 			name:          "valid input format - workflow resolution fails",
@@ -126,7 +132,7 @@ func TestRunWorkflowsOnGitHub_InputValidation(t *testing.T) {
 			name:          "empty workflow list",
 			workflowNames: []string{},
 			expectError:   true,
-			errorContains: "at least one workflow name or ID is required",
+			errorContains: "workflow list is empty",
 		},
 		{
 			name:          "single workflow - resolution fails",
@@ -187,6 +193,29 @@ func TestRunWorkflowsOnGitHub_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestValidateLocalWorkflowForRun_PropagatesVerbose(t *testing.T) {
+	workflowPath, err := filepath.Abs(filepath.Join("..", "..", ".github", "workflows", "smoke-call-workflow.md"))
+	require.NoError(t, err, "should resolve workflow path")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err, "should create stderr pipe")
+	os.Stderr = w
+
+	runErr := validateLocalWorkflowForRun(workflowPath, nil, true)
+
+	require.NoError(t, w.Close(), "should close write end of stderr pipe")
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, err = buf.ReadFrom(r)
+	require.NoError(t, err, "should read captured stderr")
+
+	require.NoError(t, runErr, "local workflow validation should succeed for a runnable direct path")
+	assert.Contains(t, buf.String(), "Found workflow file at path",
+		"verbose workflow validation should preserve resolveWorkflowFile diagnostics")
+}
+
 // TestRunWorkflowOnGitHub_FlagCombinations tests various flag combinations
 func TestRunWorkflowOnGitHub_FlagCombinations(t *testing.T) {
 	ctx := context.Background()
@@ -203,12 +232,15 @@ func TestRunWorkflowOnGitHub_FlagCombinations(t *testing.T) {
 			push:         true,
 			repoOverride: "owner/repo",
 			expectError:  true,
-			// Accept either the expected validation error, GH_TOKEN error in CI, HTTP 404 for non-existent repo, or HTTP 403 for auth issues
+			// Accept either the expected validation error, GH_TOKEN error in CI, HTTP 404 for non-existent repo, HTTP 403 for auth issues, or network/TLS failures in sandbox environments
 			errorContains: []string{
 				"--push flag is only supported for local workflows",
 				"GH_TOKEN environment variable",
 				"HTTP 404",
 				"HTTP 403",
+				"TLS handshake timeout",
+				"failed to list workflows",
+				"failed to validate remote workflow",
 			},
 		},
 	}

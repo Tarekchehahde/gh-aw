@@ -27,17 +27,17 @@ permissions:
   pull-requests: read
 
 # AI engine configuration
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
   bare: true
 
 # Import shared reporting guidelines
 imports:
   - shared/reporting.md
+  - shared/otlp.md
 
 # Deny all network access
-  - shared/otlp.md
 network: {}
 
 # Tools configuration
@@ -48,9 +48,7 @@ tools:
     toolsets: [default]
   edit:
   bash:
-    - "echo"
-    - "date"
-    - "git"
+    - "*"
   # Memory cache for persistent AI memory across runs
   cache-memory:
     key: poem-memory-${{ github.workflow }}
@@ -151,9 +149,13 @@ safe-outputs:
 # Global timeout
 timeout-minutes: 10
 strict: true
-sandbox:
-  agent:
-    sudo: false
+evals:
+  - id: issue-created
+    question: Did the agent create an issue containing a poem?
+  - id: poem-on-theme
+    question: Does the agent output confirm the poem is related to the requested theme or topic?
+  - id: poem-present
+    question: Does the agent output include actual poem text (lines of verse) rather than only a description?
 ---
 
 # Poem Bot - A Creative Agentic Workflow

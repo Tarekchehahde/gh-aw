@@ -4,7 +4,7 @@ description: Formal W3C-style specification for observability contract for GitHu
 version: 0.4.0
 status: Working Draft
 date: 2026-06-18
-last_updated: 2026-06-18
+last_updated: 2026-08-01
 editors:
   - GitHub gh-aw Team
 ---
@@ -709,13 +709,17 @@ It MUST NOT extend the original workflow trace across hours or days when doing s
 
 Each outcome-evaluation span SHOULD contain a span link to the originating workflow root context when that context was persisted.
 
-When a full span context is unavailable, the evaluation span SHOULD include `gh-aw.outcome.source_run_id`, `gh-aw.outcome.source_workflow`, and `gh-aw.outcome.repository`.
+When a full span context is unavailable, the evaluation span SHOULD include `gh-aw.outcome.source_run_id`, `gh-aw.outcome.source_workflow`, and `gh-aw.outcome.repo`.
+
+For compatibility with existing processors, implementations MAY additionally emit `gh-aw.outcome.repository` as an alias. New implementations SHOULD prefer `gh-aw.outcome.repo` for consistency with `specs/safe-output-outcome-evaluation.md`.
 
 ### 13.3 Evaluation Span and Metrics
 
 The span SHOULD be named `gh-aw.outcome.evaluate` and use `INTERNAL` span kind.
 
-It SHOULD include `gh-aw.outcome.type`, `gh-aw.outcome.result`, `gh-aw.outcome.source_run_id`, `gh-aw.outcome.source_workflow`, and `gh-aw.outcome.repository`.
+It SHOULD include `gh-aw.outcome.type`, `gh-aw.outcome.result`, `gh-aw.outcome.source_run_id`, `gh-aw.outcome.source_workflow`, and `gh-aw.outcome.repo`.
+
+`gh-aw.outcome.result` SHOULD use the canonical outcome taxonomy defined in `specs/safe-output-outcome-evaluation.md` (`accepted`, `rejected`, `ignored`, `pending`, `lifecycle`, `lifecycle_close`).
 
 URLs and item identifiers MUST NOT be metric dimensions.
 
@@ -749,7 +753,7 @@ Mirror-write failure MUST produce a structured diagnostic but SHOULD NOT fail th
 
 The mirror writer MUST create parent directories with restrictive permissions, MUST use append-safe writes, SHOULD tolerate concurrent writers, MUST NOT write exporter credentials, MUST apply the same content-capture and redaction policy as remote export, and SHOULD rotate or bound file size.
 
-When telemetry artifacts are uploaded, the artifact SHOULD contain `otel.jsonl`, runtime-specific companion files such as `copilot-otel.jsonl` when present, and no secret headers or credentials. A manifest containing schema version, signal counts, byte sizes, and redaction mode MAY be added as an optional companion file.
+When telemetry artifacts are uploaded, the artifact SHOULD contain `otel.jsonl` and no secret headers or credentials. As of the removal in PR #32280, gh-aw does not produce a runtime-specific companion mirror file for Copilot CLI spans; Copilot CLI is expected to export its spans directly to the configured OTLP backend using the injected `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS`/`OTEL_RESOURCE_ATTRIBUTES` environment variables (see ADR-34450). A manifest containing schema version, signal counts, byte sizes, and redaction mode MAY be added as an optional companion file.
 
 ---
 
@@ -758,6 +762,8 @@ When telemetry artifacts are uploaded, the artifact SHOULD contain `otel.jsonl`,
 ### 15.1 Secret Handling
 
 Exporter headers and credentials MUST be masked before any diagnostic output; MUST NOT appear in telemetry records, artifacts, generated gateway JSON, or job summaries; SHOULD be short-lived and least-privilege; and SHOULD be held by a Collector or trusted exporter helper rather than workflow-global environment variables.
+
+In direct-export mode (`observability.otlp.mode: direct`), implementations MUST treat `OTEL_EXPORTER_OTLP_HEADERS` and equivalent header sources as secret material, MUST redact header values before writing any mirror/artifact/diagnostic record, and MUST NOT copy raw header values or credential-bearing header keys into span attributes, span events, logs, or metric attributes.
 
 ### 15.2 Content Defaults and Redaction
 
@@ -821,6 +827,16 @@ Job finalization SHOULD finish functional work, record result attributes and eve
 
 When an additive pipeline root span is emitted, it SHOULD end only after the workflow result and all known job results are available.
 
+### Safeguards
+
+Observability is fail-closed with respect to telemetry correctness and
+secrets: export failures, partial endpoint fan-out failures, and shutdown
+timeouts MUST be recorded as bounded diagnostics and MUST NOT be reported as
+successful delivery. They MUST NOT discard successful endpoint deliveries,
+delete local mirror data, expose exporter credentials, or interrupt already
+completed functional workflow work. Finalization MUST write eligible mirror
+records and end known spans before its bounded exporter flush.
+
 ---
 
 ## 17. Compliance Testing
@@ -873,6 +889,7 @@ attribute-level checks mapped directly to Section 10 requirements:
 | **T-OT-008** | §10.2 `gh-aw.job.name` on built-in job spans | The setup span includes `gh-aw.job.name` equal to the GitHub Actions job name | Decode `/tmp/gh-aw/otel.jsonl` or captured OTLP payloads and assert the setup span attribute value exactly matches the workflow job name |
 | **T-OT-009** | §10.3 `gen_ai.system` on built-in agent spans | A known engine emits a non-empty normalized provider/system value | Run a workflow with a built-in agent span, decode exported spans, and assert `gen_ai.system` is present whenever the engine mapping is known |
 | **T-OT-010** | §13.3 `gh-aw.outcome.type` on outcome-evaluation spans | Outcome-evaluation spans emit the safe-output type being evaluated | Execute the outcome collector, inspect the `gh-aw.outcome.evaluate` span, and assert `gh-aw.outcome.type` matches the evaluated manifest item type |
+| **T-OT-011** | §17 Backward-compatibility: v0.3.0 fields present in v0.4.0 export | All span attribute keys that were present in v0.3.0 (`gh-aw.*`, `github.*`, `gen_ai.system`, `gen_ai.usage.total_tokens`, `OTEL_EXPORTER_OTLP_ENDPOINT`, built-in setup/conclusion span names) **MUST** also be present in a v0.4.0 export at the same semantic positions | Produce a v0.4.0 compliant export from the current implementation; compare the set of attribute keys against the v0.3.0 attribute inventory (defined in Version 0.3.0 change-log entry in Section 19); assert no v0.3.0 attribute has been removed or renamed; assert no built-in span name has changed |
 
 
 ### 17.2 Optional Extension Tests
@@ -890,6 +907,8 @@ The following implementation areas are authoritative for version 0.4.0 compatibi
 | Frontmatter schema | `pkg/parser/schemas/main_workflow_schema.json`, `pkg/parser/schema_test.go` |
 | Compiler normalization and env injection | `pkg/workflow/observability_otlp.go`, `pkg/workflow/observability_otlp_test.go`, `pkg/workflow/safe_output_helpers_test.go` |
 | Gateway credential scoping | `pkg/workflow/mcp_renderer.go`, `pkg/workflow/mcp_setup_generator.go`, `pkg/workflow/mcp_renderer_test.go` |
+| MCP access-control fixture contract | `specs/github-mcp-access-control-compliance/README.md` |
+| Replace-label fixture contract | `specs/replace-label-compliance/README.md` |
 | Runtime setup/conclusion spans and JSONL mirror | `actions/setup/js/send_otlp_span.cjs`, `actions/setup/js/send_otlp_span.test.cjs`, `actions/setup/js/otel_contract.test.cjs` |
 | Header and attribute masking | `actions/setup/sh/mask_otlp_headers.sh`, `actions/setup/sh/mask_otlp_attributes.sh`, `pkg/workflow/observability_otlp_mask_script_test.go` |
 | Local validation target | `Makefile` target `validate-otel-contract` |
@@ -926,7 +945,6 @@ context is added to outcome spans or links.
 - `docs/src/content/docs/reference/open-telemetry.mdx`
 - `docs/src/content/docs/reference/frontmatter.md`
 - `docs/src/content/docs/reference/mcp-gateway.md`
-- `specs/aw-harness.md`
 - `specs/safe-output-outcome-evaluation.md`
 
 ---
@@ -935,6 +953,8 @@ context is added to outcome spans or links.
 
 ### Version 0.4.0 (Working Draft, June 18, 2026)
 
+- **Removed** (documentation correction, August 2026): References to a `copilot-otel.jsonl` local mirror/companion artifact. PR #32280 removed the file-export pipeline that produced it (`COPILOT_OTEL_FILE_EXPORTER_PATH` injection, artifact inclusion, and forwarding script); Copilot CLI spans are now expected to be exported directly to the configured OTLP backend and queried there.
+
 - **Changed**: Reframed 0.4.0 as a non-breaking compatibility revision rather than a replacement telemetry standard.
 - **Preserved**: `observability.otlp`, direct OTLP export, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `GITHUB_AW_OTEL_TRACE_ID`, `GITHUB_AW_OTEL_PARENT_SPAN_ID`, `TRACEPARENT` compatibility, built-in setup/conclusion spans, `gen_ai.system`, `gen_ai.usage.total_tokens`, and raw OTLP JSONL mirror behavior.
 - **Clarified**: Standard OpenTelemetry attributes such as `gen_ai.provider.name` and CI/CD attributes may be emitted as additive aliases, not replacements for existing fields.
@@ -942,6 +962,8 @@ context is added to outcome spans or links.
 - **Clarified**: A versioned mirror envelope may be added only as an additive format; `/tmp/gh-aw/otel.jsonl` remains raw OTLP/JSON lines for compatibility.
 - **Added**: Metric cardinality, privacy, redaction, and secret-handling guidance while preserving existing artifacts and query surfaces.
 - **Added**: Inlined compatibility validation requirements, optional extension tests, and the implementation map so this document is self-contained.
+- **Added**: Consolidated fail-closed safeguards for export, endpoint fan-out, and shutdown handling.
+- **See also**: `specs/safe-output-outcome-evaluation.md` (Change Log, Version 1.0.1) for aligned outcome-taxonomy and provenance rules.
 
 ### Version 0.3.0 (Working Draft, June 15, 2026)
 

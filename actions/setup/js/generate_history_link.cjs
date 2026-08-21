@@ -58,12 +58,22 @@ function generateHistoryUrl({ owner, repo, itemType, workflowCallId, workflowId,
 
   queryParts.push(`"${markerId}"`);
 
-  const url = new URL(`${server}/search`);
-  url.searchParams.set("q", queryParts.join(" "));
+  const url = (() => {
+    try {
+      return new URL(`${server}/search`);
+    } catch {
+      throw new Error(`Invalid server URL: ${server}`);
+    }
+  })();
+  const encodedQuery = encodeURIComponent(queryParts.join(" "))
+    .replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replaceAll("%20", "+");
 
   // Set the type parameter based on itemType for correct GitHub search filtering
   const searchTypeMap = { issue: "issues", pull_request: "pullrequests", discussion: "discussions", comment: "issues", discussion_comment: "discussions" };
-  url.searchParams.set("type", searchTypeMap[itemType] ?? "issues");
+  const searchType = searchTypeMap[itemType] ?? "issues";
+
+  url.search = `q=${encodedQuery}&type=${searchType}`;
 
   return url.toString();
 }

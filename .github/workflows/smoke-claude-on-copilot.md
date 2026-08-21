@@ -12,12 +12,14 @@ permissions:
   contents: read
   pull-requests: read
 name: Smoke Claude on Copilot
+model: claude-haiku-4.5
 engine:
   id: claude
   model-provider: github
-  model: claude-haiku-4.5
   bare: true
 strict: true
+imports:
+  - shared/reporting.md
 tools:
   github:
     mode: gh-proxy
@@ -27,6 +29,9 @@ safe-outputs:
     max: 1
     hide-older-comments: true
 timeout-minutes: 10
+sandbox:
+  agent:
+    id: awf
 ---
 
 # Smoke Test: Claude on GitHub Inference PR Summary

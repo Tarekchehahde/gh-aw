@@ -66,7 +66,7 @@ func TestValidateBashToolConfig(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected error for %s", tt.name)
 				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg, "Error message should contain expected text")
+					require.ErrorContains(t, err, tt.errorMsg, "Error message should contain expected text")
 				}
 			} else {
 				assert.NoError(t, err, "Expected no error for %s", tt.name)
@@ -137,7 +137,7 @@ func TestNewToolsWithInvalidBash(t *testing.T) {
 		// Validation should catch this
 		err := validateBashToolConfig(tools, "test-workflow")
 		require.Error(t, err, "Expected validation error")
-		assert.Contains(t, err.Error(), "anonymous syntax", "Error should mention anonymous syntax")
+		require.ErrorContains(t, err, "anonymous syntax", "Error should mention anonymous syntax")
 	})
 
 	t.Run("accepts valid bash configurations", func(t *testing.T) {
@@ -233,7 +233,7 @@ func TestValidateGitHubToolConfig(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected error for %s", tt.name)
 				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg, "Error message should contain expected text")
+					require.ErrorContains(t, err, tt.errorMsg, "Error message should contain expected text")
 				}
 			} else {
 				assert.NoError(t, err, "Expected no error for %s", tt.name)
@@ -265,30 +265,30 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			shouldError: false,
 		},
 		{
-			name: "valid guard policy with repos=all",
+			name: "valid guard policy with allowed-repos=all",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         "all",
+					"allowed-repos": "all",
 					"min-integrity": "unapproved",
 				},
 			},
 			shouldError: false,
 		},
 		{
-			name: "valid guard policy with repos=public",
+			name: "valid guard policy with allowed-repos=public",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         "public",
+					"allowed-repos": "public",
 					"min-integrity": "approved",
 				},
 			},
 			shouldError: false,
 		},
 		{
-			name: "valid guard policy with repos array ([]any)",
+			name: "valid guard policy with allowed-repos array ([]any)",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         []any{"owner/repo", "owner/*"},
+					"allowed-repos": []any{"owner/repo", "owner/*"},
 					"min-integrity": "merged",
 				},
 			},
@@ -298,14 +298,14 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			name: "valid guard policy with min-integrity=none",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         "all",
+					"allowed-repos": "all",
 					"min-integrity": "none",
 				},
 			},
 			shouldError: false,
 		},
 		{
-			name: "missing repos field defaults to all",
+			name: "missing allowed-repos field defaults to all",
 			toolsMap: map[string]any{
 				"github": map[string]any{
 					"min-integrity": "unapproved",
@@ -317,7 +317,7 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			name: "missing min-integrity field",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos": "all",
+					"allowed-repos": "all",
 				},
 			},
 			shouldError: true,
@@ -327,7 +327,7 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			name: "invalid min-integrity value",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         "all",
+					"allowed-repos": "all",
 					"min-integrity": "superuser",
 				},
 			},
@@ -335,10 +335,10 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			errorMsg:    "'github.min-integrity' must be one of",
 		},
 		{
-			name: "invalid repos string value",
+			name: "invalid allowed-repos string value",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         "private",
+					"allowed-repos": "private",
 					"min-integrity": "unapproved",
 				},
 			},
@@ -356,10 +356,10 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			shouldError: false,
 		},
 		{
-			name: "empty repos array",
+			name: "empty allowed-repos array",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         []any{},
+					"allowed-repos": []any{},
 					"min-integrity": "unapproved",
 				},
 			},
@@ -367,10 +367,10 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			errorMsg:    "'github.allowed-repos' array cannot be empty",
 		},
 		{
-			name: "repos array with uppercase pattern",
+			name: "allowed-repos array with uppercase pattern",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         []any{"Owner/repo"},
+					"allowed-repos": []any{"Owner/repo"},
 					"min-integrity": "unapproved",
 				},
 			},
@@ -378,10 +378,10 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			errorMsg:    "must be lowercase",
 		},
 		{
-			name: "repos array with invalid pattern format",
+			name: "allowed-repos array with invalid pattern format",
 			toolsMap: map[string]any{
 				"github": map[string]any{
-					"repos":         []any{"just-a-name"},
+					"allowed-repos": []any{"just-a-name"},
 					"min-integrity": "unapproved",
 				},
 			},
@@ -605,7 +605,7 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected error for %s", tt.name)
 				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg, "Error message should contain expected text")
+					require.ErrorContains(t, err, tt.errorMsg, "Error message should contain expected text")
 				}
 			} else {
 				assert.NoError(t, err, "Expected no error for %s", tt.name)
@@ -616,8 +616,10 @@ func TestValidateGitHubGuardPolicy(t *testing.T) {
 
 func TestValidateGitHubGuardPolicyLockdownWarning(t *testing.T) {
 	tests := []struct {
-		name     string
-		toolsMap map[string]any
+		name        string
+		toolsMap    map[string]any
+		shouldError bool
+		errorMsg    string
 	}{
 		{
 			name: "allowed-repos and min-integrity",
@@ -628,6 +630,29 @@ func TestValidateGitHubGuardPolicyLockdownWarning(t *testing.T) {
 					"min-integrity": "approved",
 				},
 			},
+			shouldError: false,
+		},
+		{
+			name: "deprecated repos alias and min-integrity",
+			toolsMap: map[string]any{
+				"github": map[string]any{
+					"lockdown":      true,
+					"repos":         "all",
+					"min-integrity": "approved",
+				},
+			},
+			shouldError: false,
+		},
+		{
+			name: "allowed-repos without min-integrity still fails under lockdown",
+			toolsMap: map[string]any{
+				"github": map[string]any{
+					"lockdown":      true,
+					"allowed-repos": "all",
+				},
+			},
+			shouldError: true,
+			errorMsg:    "'github.min-integrity' is required",
 		},
 		{
 			name: "blocked-users with min-integrity",
@@ -638,6 +663,7 @@ func TestValidateGitHubGuardPolicyLockdownWarning(t *testing.T) {
 					"blocked-users": []string{"spam-bot"},
 				},
 			},
+			shouldError: false,
 		},
 		{
 			name: "trusted-users with min-integrity",
@@ -648,6 +674,7 @@ func TestValidateGitHubGuardPolicyLockdownWarning(t *testing.T) {
 					"trusted-users": []any{"trusted-user"},
 				},
 			},
+			shouldError: false,
 		},
 		{
 			name: "approval-labels with min-integrity",
@@ -658,13 +685,22 @@ func TestValidateGitHubGuardPolicyLockdownWarning(t *testing.T) {
 					"approval-labels": []string{"human-reviewed"},
 				},
 			},
+			shouldError: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tools := NewTools(tt.toolsMap)
-			require.NoError(t, validateGitHubGuardPolicy(tools, "test-workflow"))
+			err := validateGitHubGuardPolicy(tools, "test-workflow")
+			if tt.shouldError {
+				require.Error(t, err)
+				if tt.errorMsg != "" {
+					require.ErrorContains(t, err, tt.errorMsg)
+				}
+				return
+			}
+			require.NoError(t, err)
 
 			compiler := NewCompiler()
 			stderrOutput := captureStderr(func() {
@@ -740,7 +776,7 @@ func TestValidateReposScopeWithStringSlice(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected error for %s", tt.name)
 				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg, "Error message should contain expected text")
+					require.ErrorContains(t, err, tt.errorMsg, "Error message should contain expected text")
 				}
 			} else {
 				assert.NoError(t, err, "Expected no error for %s", tt.name)
@@ -1036,7 +1072,7 @@ func TestValidateIntegrityReactions(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected error for: %s", tt.name)
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should mention: %s", tt.errorContains)
+					require.ErrorContains(t, err, tt.errorContains, "Error should mention: %s", tt.errorContains)
 				}
 			} else {
 				assert.NoError(t, err, "Expected no error for: %s", tt.name)
@@ -1154,6 +1190,79 @@ func TestGetDIFCProxyPolicyJSONWithReactions(t *testing.T) {
 			for _, s := range tt.expectedAbsent {
 				assert.NotContains(t, got, s, "policy JSON should NOT contain %q", s)
 			}
+		})
+	}
+}
+
+func TestValidateCLIProxyBashCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		toolsMap    map[string]any
+		shouldError bool
+		errorField  string
+	}{
+		{
+			name:        "cli-proxy enabled without bash setting is valid",
+			toolsMap:    map[string]any{"cli-proxy": true},
+			shouldError: false,
+		},
+		{
+			name:        "cli-proxy enabled with bash allowlist is valid",
+			toolsMap:    map[string]any{"bash": []any{"cat"}, "cli-proxy": true},
+			shouldError: false,
+		},
+		{
+			name:        "cli-proxy disabled with bash: false is valid",
+			toolsMap:    map[string]any{"bash": false, "cli-proxy": false},
+			shouldError: false,
+		},
+		{
+			name:        "bash false without cli-proxy key is valid outside strict mode",
+			toolsMap:    map[string]any{"bash": false},
+			shouldError: false,
+		},
+		{
+			name:        "cli-proxy enabled with bash: false is rejected",
+			toolsMap:    map[string]any{"bash": false, "cli-proxy": true},
+			shouldError: true,
+		},
+		{
+			name:        "cli-proxy enabled with empty bash allowlist is rejected",
+			toolsMap:    map[string]any{"bash": []any{}, "cli-proxy": true},
+			shouldError: true,
+		},
+		{
+			name:        "github gh-proxy with bash false is rejected",
+			toolsMap:    map[string]any{"bash": false, "cli-proxy": false, "github": map[string]any{"mode": "gh-proxy"}},
+			shouldError: true,
+			errorField:  "tools.github.mode",
+		},
+		{
+			name:        "github cli alias with bash false is rejected",
+			toolsMap:    map[string]any{"bash": false, "cli-proxy": false, "github": map[string]any{"mode": "cli"}},
+			shouldError: true,
+			errorField:  "tools.github.mode",
+		},
+		{
+			name:        "github local with bash false is valid",
+			toolsMap:    map[string]any{"bash": false, "cli-proxy": false, "github": map[string]any{"mode": "local"}},
+			shouldError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCLIProxyBashCompatibility(tt.toolsMap, "test-workflow")
+			if tt.shouldError {
+				require.Error(t, err)
+				errorField := tt.errorField
+				if errorField == "" {
+					errorField = "tools.cli-proxy"
+				}
+				assert.Contains(t, err.Error(), errorField)
+				return
+			}
+			assert.NoError(t, err)
 		})
 	}
 }

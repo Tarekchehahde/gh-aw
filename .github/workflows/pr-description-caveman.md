@@ -5,15 +5,14 @@ description: Rewrites a merged PR description with a structured, considered summ
 on:
   pull_request:
     types: [closed]
-if: github.event.pull_request.merged == true && !startsWith(github.event.pull_request.head.ref, 'signed/jsweep/')
+if: github.event.pull_request.merged == true && !startsWith(github.event.pull_request.head.ref, 'signed/jsweep/') && !startsWith(github.event.pull_request.head.ref, 'copilot/')
 permissions:
   contents: read
   pull-requests: read
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
+features:
+  gh-aw-detection: true
 
 strict: true
 tools:
@@ -68,7 +67,6 @@ safe-outputs:
     body: true
     title: false
     operation: replace
-    target: '*'
     max: 1
   noop:
 timeout-minutes: 15
@@ -125,14 +123,12 @@ Do not invoke `skill(description-synthesizer)` — use the inline sub-agent name
 
 ### Step 4 — Update the PR
 
-Write the synthesised body to `/tmp/gh-aw/agent/pr-body.json` as `{"body": "..."}`, then:
+Call `update_pull_request` exactly once with the final synthesised markdown body.
 
-```bash
-safeoutputs update_pull_request . < /tmp/gh-aw/agent/pr-body.json
-```
+Do NOT send probe/test/placeholder content (for example `"-"`) to check whether the tool works. If you cannot produce the final complete body, call `report_incomplete` and do not call `update_pull_request`.
 
 Do NOT pass `item_number`, `pr_number`, or any other PR identifier — the runtime infers the PR from the event context automatically.
-Call `update_pull_request` at most once. Do not retry unless the tool returns an explicit, recoverable error.
+Do not retry `update_pull_request` in this workflow run.
 
 If there are no meaningful changes, call `noop` instead.
 
@@ -141,7 +137,7 @@ If there are no meaningful changes, call `noop` instead.
 ## agent: `chunk-analyzer`
 ---
 description: Analyses one 400-line slice of a unified diff and extracts structured per-file change facts.
-model: small
+model: claude-haiku-4.5
 ---
 
 You receive a slice of a unified diff (`diff --git` format). Extract facts about every changed file found in this slice.

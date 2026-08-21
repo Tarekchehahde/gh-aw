@@ -47,12 +47,18 @@ func downloadFileFromGitHub(ctx context.Context, owner, repo, path, ref string) 
 	return downloadFileFromGitHubWithDepth(ctx, owner, repo, path, ref, 0, "")
 }
 
+// fetchRemoteFileContentFunc allows tests to inject API fetch behavior.
+var fetchRemoteFileContentFunc = fetchRemoteFileContent
+
+// downloadFileViaGitFunc allows tests to inject git fallback behavior.
+var downloadFileViaGitFunc = downloadFileViaGit
+
 func downloadFileFromGitHubWithDepth(ctx context.Context, owner, repo, path, ref string, symlinkDepth int, host string) ([]byte, error) {
-	client, err := createRESTClientForHost(host)
+	client, err := createRESTClientForHostFunc(host)
 	if err != nil {
-		if gitutil.IsAuthError(err.Error()) {
+		if errorutil.IsAuthError(err.Error()) {
 			remoteLog.Printf("REST client creation failed due to auth error, attempting git fallback for %s/%s/%s@%s: %v", owner, repo, path, ref, err)
-			content, gitErr := downloadFileViaGit(ctx, owner, repo, path, ref, host)
+			content, gitErr := downloadFileViaGitFunc(ctx, owner, repo, path, ref, host)
 			if gitErr != nil {
 				remoteLog.Printf("Git fallback also failed for %s/%s/%s@%s: %v", owner, repo, path, ref, gitErr)
 				return nil, fmt.Errorf("failed to fetch file content: %w", err)
@@ -68,13 +74,13 @@ func downloadFileFromGitHubWithDepth(ctx context.Context, owner, repo, path, ref
 		Name     string `json:"name"`
 	}
 
-	err = fetchRemoteFileContent(ctx, client, owner, repo, path, ref, &fileContent)
+	err = fetchRemoteFileContentFunc(ctx, client, owner, repo, path, ref, &fileContent)
 	if err != nil {
-		if gitutil.IsAuthError(err.Error()) {
+		if errorutil.IsAuthError(err.Error()) {
 			remoteLog.Printf("GitHub API authentication failed, attempting git fallback for %s/%s/%s@%s", owner, repo, path, ref)
-			content, gitErr := downloadFileViaGit(ctx, owner, repo, path, ref, host)
+			content, gitErr := downloadFileViaGitFunc(ctx, owner, repo, path, ref, host)
 			if gitErr != nil {
-				if host == "" || host == "github.com" {
+				if canUseUnauthenticatedPublicGitHubFallback(owner, repo, host) {
 					remoteLog.Printf("Git fallback also failed, attempting unauthenticated API for %s/%s/%s@%s", owner, repo, path, ref)
 					return downloadFileViaPublicAPI(ctx, owner, repo, path, ref)
 				}
@@ -293,11 +299,18 @@ func resolveAndValidateRemoteSymlinkBase(parentDir, target, dirPath string) (str
 func downloadFileViaGit(ctx context.Context, owner, repo, path, ref, host string) ([]byte, error) {
 	remoteLog.Printf("Attempting git fallback for %s/%s/%s@%s", owner, repo, path, ref)
 
+	if err := gitutil.ValidateGitRef(ref); err != nil {
+		return nil, fmt.Errorf("refusing git fallback: %w", err)
+	}
+	if err := gitutil.ValidateGitPath(path); err != nil {
+		return nil, fmt.Errorf("refusing git fallback: %w", err)
+	}
+
 	// First, try via raw.githubusercontent.com — no auth required for public repos and
 	// no dependency on git being installed.
 	// Only attempt raw URL for github.com repos (not GHE) since raw.githubusercontent.com
 	// only serves public GitHub content.
-	if host == "" || host == "github.com" {
+	if canUseUnauthenticatedPublicGitHubFallback(owner, repo, host) {
 		content, rawErr := downloadFileViaRawURL(ctx, owner, repo, path, ref)
 		if rawErr == nil {
 			return content, nil
@@ -315,10 +328,14 @@ func downloadFileViaGit(ctx context.Context, owner, repo, path, ref, host string
 	}
 	repoURL := fmt.Sprintf("%s/%s/%s.git", githubHost, owner, repo)
 
-	// git archive command: git archive --remote=<repo> <ref> <path>
+	// git archive command: git archive --remote=<repo> <ref> -- <path>
+	// The '--' end-of-options separator ensures ref and path are never parsed as
+	// git flags even if they begin with '-' (argument injection, CWE-88).
+	// ValidateGitRef/ValidateGitPath above guard against leading '-' and '..' at
+	// this layer; '--' is kept as defence-in-depth per the git(1) specification.
 	// #nosec G204 -- repoURL, ref, and path are from workflow import configuration authored by the
 	// developer; exec.CommandContext with separate args (not shell execution) prevents shell injection.
-	cmd := exec.CommandContext(ctx, "git", "archive", "--remote="+repoURL, ref, path)
+	cmd := exec.CommandContext(ctx, "git", "archive", "--remote="+repoURL, ref, "--", path)
 	archiveOutput, err := cmd.Output()
 	if err != nil {
 		// If git archive fails, try with git clone + git show as a fallback
@@ -372,52 +389,83 @@ func downloadFileViaRawURL(ctx context.Context, owner, repo, filePath, ref strin
 func downloadFileViaGitClone(ctx context.Context, owner, repo, path, ref, host string) ([]byte, error) {
 	remoteLog.Printf("Attempting git clone fallback for %s/%s/%s@%s", owner, repo, path, ref)
 
-	// Create a temporary directory for the shallow clone
-	tmpDir, err := os.MkdirTemp("", "gh-aw-git-clone-*")
+	if err := validateGitCloneFallbackInputs(ref, path); err != nil {
+		return nil, err
+	}
+	tmpDir, err := createGitCloneTempDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	var githubHost string
+	repoURL := getRepoGitURL(owner, repo, host)
+	if gitutil.IsValidFullSHACaseInsensitive(ref) {
+		if err := cloneAndCheckoutSHA(ctx, repoURL, tmpDir, ref); err != nil {
+			return nil, err
+		}
+	} else if err := cloneBranchOrTag(ctx, repoURL, tmpDir, ref); err != nil {
+		return nil, err
+	}
+
+	content, err := readFileFromClone(tmpDir, path)
+	if err != nil {
+		return nil, err
+	}
+
+	remoteLog.Printf("Successfully downloaded file via git clone: %s/%s/%s@%s", owner, repo, path, ref)
+	return content, nil
+}
+
+func validateGitCloneFallbackInputs(ref, path string) error {
+	if err := gitutil.ValidateGitRef(ref); err != nil {
+		return fmt.Errorf("refusing git clone fallback: %w", err)
+	}
+	if err := gitutil.ValidateGitPath(path); err != nil {
+		return fmt.Errorf("refusing git clone fallback: %w", err)
+	}
+	return nil
+}
+
+func createGitCloneTempDir() (string, error) {
+	tmpDir, err := os.MkdirTemp("", "gh-aw-git-clone-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	return tmpDir, nil
+}
+
+func getRepoGitURL(owner, repo, host string) string {
+	githubHost := GetGitHubHostForRepo(owner, repo)
 	if host != "" {
 		githubHost = "https://" + host
-	} else {
-		githubHost = GetGitHubHostForRepo(owner, repo)
 	}
-	repoURL := fmt.Sprintf("%s/%s/%s.git", githubHost, owner, repo)
+	return fmt.Sprintf("%s/%s/%s.git", githubHost, owner, repo)
+}
 
-	// Check if ref is a SHA (40 hex characters)
-	isSHA := len(ref) == 40 && gitutil.IsHexString(ref)
-
-	var cloneCmd *exec.Cmd
-	if isSHA {
-		// For SHA refs, we need to clone without --branch and then checkout the specific commit
-		// Clone with minimal depth and no branch specified
-		cloneCmd = exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--no-single-branch", repoURL, tmpDir)
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			// Try without --no-single-branch if the first attempt fails
-			remoteLog.Printf("Clone with --no-single-branch failed, trying full clone: %s", string(output))
-			cloneCmd = exec.CommandContext(ctx, "git", "clone", repoURL, tmpDir)
-			if output, err := cloneCmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("failed to clone repository: %w\nOutput: %s", err, string(output))
-			}
-		}
-
-		// Now checkout the specific commit
-		checkoutCmd := exec.CommandContext(ctx, "git", "-C", tmpDir, "checkout", ref)
-		if output, err := checkoutCmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("failed to checkout commit %s: %w\nOutput: %s", ref, err, string(output))
-		}
-	} else {
-		// For branch/tag refs, use --branch flag
-		cloneCmd = exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--branch", ref, repoURL, tmpDir)
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("failed to clone repository: %w\nOutput: %s", err, string(output))
+func cloneAndCheckoutSHA(ctx context.Context, repoURL, tmpDir, ref string) error {
+	if output, err := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--no-single-branch", repoURL, tmpDir).CombinedOutput(); err != nil {
+		remoteLog.Printf("Clone with --no-single-branch failed, trying full clone: %s", string(output))
+		if output, err := exec.CommandContext(ctx, "git", "clone", repoURL, tmpDir).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to clone repository: %w\nOutput: %s", err, string(output))
 		}
 	}
+	// ValidateGitRef above guarantees ref does not start with '-', so it remains a revision argument.
+	if output, err := exec.CommandContext(ctx, "git", "-C", tmpDir, "checkout", "--detach", ref).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to checkout commit %s: %w\nOutput: %s", ref, err, string(output))
+	}
+	return nil
+}
 
-	// Read the file from the cloned repository
+func cloneBranchOrTag(ctx context.Context, repoURL, tmpDir, ref string) error {
+	// For branch/tag refs, use --branch flag; the value is passed via a separate
+	// argument slot and cannot be confused with a flag because it follows --branch.
+	if output, err := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--branch", ref, repoURL, tmpDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to clone repository: %w\nOutput: %s", err, string(output))
+	}
+	return nil
+}
+
+func readFileFromClone(tmpDir, path string) ([]byte, error) {
 	filePath := filepath.Join(tmpDir, path)
 	if err := fileutil.ValidatePathWithinBase(tmpDir, filePath); err != nil {
 		return nil, fmt.Errorf("refusing to read file outside clone directory: %w", err)
@@ -426,7 +474,5 @@ func downloadFileViaGitClone(ctx context.Context, owner, repo, path, ref, host s
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file from cloned repository: %w", err)
 	}
-
-	remoteLog.Printf("Successfully downloaded file via git clone: %s/%s/%s@%s", owner, repo, path, ref)
 	return content, nil
 }

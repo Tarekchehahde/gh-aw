@@ -191,6 +191,30 @@ func TestCalculateHealthSummary(t *testing.T) {
 	assert.Len(t, summary.Workflows, 3, "Workflows array should have 3 entries")
 }
 
+func TestCalculateHealthSummaryExcludesIntentionalFailure(t *testing.T) {
+	// Intentional-failure workflows (e.g. credit-guardrail stress tests) must be excluded
+	// from fleet-health rollup counts so they do not depress the real-regression baseline.
+	workflowHealths := []WorkflowHealth{
+		{WorkflowName: "normal-a", SuccessRate: 90.0, BelowThresh: false},
+		{WorkflowName: "normal-b", SuccessRate: 75.0, BelowThresh: true},
+		// These are tagged intentional-failure: should not affect HealthyWorkflows / BelowThreshold.
+		{WorkflowName: "daily-credit-limit-test", SuccessRate: 0.0, BelowThresh: true, IntentionalFailure: true},
+		{WorkflowName: "daily-max-ai-credits-test", SuccessRate: 0.0, BelowThresh: true, IntentionalFailure: true},
+	}
+
+	summary := CalculateHealthSummary(workflowHealths, "Last 7 Days", 80.0)
+
+	// TotalWorkflows still counts all four (the table shows them).
+	assert.Equal(t, 4, summary.TotalWorkflows, "TotalWorkflows should include intentional-failure entries")
+
+	// Rollup counts must exclude the two intentional-failure workflows.
+	assert.Equal(t, 1, summary.HealthyWorkflows, "HealthyWorkflows should exclude intentional-failure workflows")
+	assert.Equal(t, 1, summary.BelowThreshold, "BelowThreshold should exclude intentional-failure workflows")
+
+	// The full workflows slice is preserved so callers can render the table.
+	assert.Len(t, summary.Workflows, 4, "Workflows slice should contain all entries")
+}
+
 func TestTrendDirectionString(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -254,6 +278,105 @@ func TestFormatTokens(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := console.FormatTokens(tt.tokens)
 			assert.Equal(t, tt.expected, result, "Formatted tokens should match")
+		})
+	}
+}
+
+func TestCalculateWorkflowHealthDriverExitClassification(t *testing.T) {
+	runs := []WorkflowRun{
+		{Conclusion: "success", Duration: 2 * time.Minute, Turns: 3, TurnsAvailable: true},
+		// driver-exit: failed with zero turns (TurnsAvailable confirms the count is real)
+		{Conclusion: "failure", Duration: 1 * time.Minute, Turns: 0, TurnsAvailable: true},
+		{Conclusion: "failure", Duration: 1 * time.Minute, Turns: 0, TurnsAvailable: true},
+		// agent-logic: failed but agent ran (turns > 0)
+		{Conclusion: "failure", Duration: 2 * time.Minute, Turns: 5, TurnsAvailable: true},
+	}
+
+	health := CalculateWorkflowHealth("test-workflow", runs, 80.0)
+
+	assert.Equal(t, 4, health.TotalRuns, "total runs should be 4")
+	assert.Equal(t, 1, health.SuccessCount, "success count should be 1")
+	assert.Equal(t, 3, health.FailureCount, "failure count should be 3")
+	assert.Equal(t, 2, health.DriverExitCount, "driver-exit count should be 2 (zero-turn failures)")
+	assert.Equal(t, 1, health.AgentLogicFailureCount, "agent-logic count should be 1 (non-zero-turn failure)")
+}
+
+func TestCalculateWorkflowHealthDriverExitCountZeroWhenNoFailures(t *testing.T) {
+	runs := []WorkflowRun{
+		{Conclusion: "success", Duration: 2 * time.Minute, Turns: 3},
+		{Conclusion: "success", Duration: 3 * time.Minute, Turns: 4},
+	}
+
+	health := CalculateWorkflowHealth("test-workflow", runs, 80.0)
+
+	assert.Equal(t, 0, health.DriverExitCount, "driver-exit count should be zero when all runs succeed")
+	assert.Equal(t, 0, health.AgentLogicFailureCount, "agent-logic count should be zero when all runs succeed")
+}
+
+func TestCalculateWorkflowHealthTurnsUnavailableSkipsClassification(t *testing.T) {
+	// Simulate the gh aw health path: GitHub API metadata only, no artifact logs,
+	// so TurnsAvailable is false for every run. Classification should be skipped and
+	// both DriverExitCount and AgentLogicFailureCount must stay at zero.
+	runs := []WorkflowRun{
+		{Conclusion: "success", Duration: 2 * time.Minute},
+		{Conclusion: "failure", Duration: 1 * time.Minute, Turns: 0, TurnsAvailable: false},
+		{Conclusion: "failure", Duration: 1 * time.Minute, Turns: 0, TurnsAvailable: false},
+	}
+
+	health := CalculateWorkflowHealth("test-workflow", runs, 80.0)
+
+	assert.Equal(t, 2, health.FailureCount, "failure count should still be 2")
+	assert.Equal(t, 0, health.DriverExitCount, "driver-exit count should be zero when TurnsAvailable=false")
+	assert.Equal(t, 0, health.AgentLogicFailureCount, "agent-logic count should be zero when TurnsAvailable=false")
+}
+
+func TestIsDriverExitFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		run      WorkflowRun
+		expected bool
+	}{
+		{
+			name:     "failure with zero turns is driver-exit",
+			run:      WorkflowRun{Conclusion: "failure", Turns: 0, TurnsAvailable: true},
+			expected: true,
+		},
+		{
+			name:     "timed_out with zero turns is driver-exit",
+			run:      WorkflowRun{Conclusion: "timed_out", Turns: 0, TurnsAvailable: true},
+			expected: true,
+		},
+		{
+			name:     "cancelled with zero turns is driver-exit",
+			run:      WorkflowRun{Conclusion: "cancelled", Turns: 0, TurnsAvailable: true},
+			expected: true,
+		},
+		{
+			name:     "failure with non-zero turns is agent-logic (not driver-exit)",
+			run:      WorkflowRun{Conclusion: "failure", Turns: 3, TurnsAvailable: true},
+			expected: false,
+		},
+		{
+			name:     "failure with zero turns but TurnsAvailable=false is unclassified",
+			run:      WorkflowRun{Conclusion: "failure", Turns: 0, TurnsAvailable: false},
+			expected: false,
+		},
+		{
+			name:     "success with zero turns is not driver-exit",
+			run:      WorkflowRun{Conclusion: "success", Turns: 0},
+			expected: false,
+		},
+		{
+			name:     "success with non-zero turns is not driver-exit",
+			run:      WorkflowRun{Conclusion: "success", Turns: 5},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isDriverExitFailure(tt.run)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

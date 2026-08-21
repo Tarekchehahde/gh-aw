@@ -26,6 +26,7 @@ network:
 
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   bash:
@@ -52,11 +53,11 @@ jobs:
       updates_summary: ${{ steps.check.outputs.updates_summary }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
       - name: Check for npm updates in docs
@@ -79,6 +80,9 @@ jobs:
 
           rm -f "$ncu_output"
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Update Astro

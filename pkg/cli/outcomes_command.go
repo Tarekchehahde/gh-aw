@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,7 +46,7 @@ This answers the question: "Did this workflow's actions actually help?"`,
 				return fmt.Errorf("invalid run ID %q: %w", args[0], err)
 			}
 
-			return RunOutcomes(OutcomesConfig{
+			return RunOutcomes(cmd.Context(), OutcomesConfig{
 				RunID:        runID,
 				Verbose:      verbose,
 				JSONOutput:   jsonOutput,
@@ -60,7 +59,7 @@ This answers the question: "Did this workflow's actions actually help?"`,
 
 	addJSONFlag(cmd)
 	addRepoFlag(cmd)
-	addOutputFlag(cmd, "")
+	addOutputFlag(cmd, defaultLogsOutputDir)
 	cmd.Flags().String("outcomes-dir", "", "Write outcome JSONL to this directory for OTLP export")
 	cmd.AddCommand(NewOutcomesHistorySubcommand())
 
@@ -86,7 +85,7 @@ type OutcomesData struct {
 }
 
 // RunOutcomes executes the outcomes evaluation for a single run.
-func RunOutcomes(config OutcomesConfig) error {
+func RunOutcomes(ctx context.Context, config OutcomesConfig) error {
 	outcomesLog.Printf("Evaluating outcomes for run %d", config.RunID)
 
 	// Resolve repo
@@ -134,8 +133,7 @@ func RunOutcomes(config OutcomesConfig) error {
 		if config.Verbose {
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Downloading artifacts for run %d...", config.RunID)))
 		}
-		ctx := context.Background()
-		err := downloadRunArtifacts(ctx, config.RunID, runDir, config.Verbose, owner, repoName, hostname, nil)
+		err := downloadRunArtifacts(ctx, downloadArtifactsOptions{runID: config.RunID, outputDir: runDir, verbose: config.Verbose, owner: owner, repo: repoName, hostname: hostname})
 		if err != nil {
 			return fmt.Errorf("failed to download artifacts for run %d: %w", config.RunID, err)
 		}
@@ -154,7 +152,10 @@ func RunOutcomes(config OutcomesConfig) error {
 				Items:   []OutcomeReport{},
 				Summary: OutcomeSummary{},
 			}
-			out, _ := json.MarshalIndent(data, "", "  ")
+			out, err := marshalIndentJSONOrWrap(data, "outcomes report")
+			if err != nil {
+				return err
+			}
 			fmt.Fprintln(os.Stdout, string(out))
 		}
 		return nil
@@ -165,8 +166,8 @@ func RunOutcomes(config OutcomesConfig) error {
 	}
 
 	// Run the evaluations
-	mapping := github.LoadObjectiveMappingFromConfig()
-	reports := EvaluateOutcomes(items, repo, mapping)
+	mapping := github.LoadObjectiveMapping()
+	reports := EvaluateOutcomes(ctx, items, repo, mapping)
 	outcomeSummary := ComputeOutcomeSummary(reports, mapping)
 
 	// Write outcome JSONL if requested (for OTLP export or downstream processing).
@@ -192,9 +193,9 @@ func RunOutcomes(config OutcomesConfig) error {
 			Items:    reports,
 			Summary:  outcomeSummary,
 		}
-		out, err := json.MarshalIndent(data, "", "  ")
+		out, err := marshalIndentJSONOrWrap(data, "outcomes report")
 		if err != nil {
-			return fmt.Errorf("failed to marshal JSON: %w", err)
+			return err
 		}
 		fmt.Fprintln(os.Stdout, string(out))
 		return nil

@@ -91,7 +91,7 @@ interface CloseDiscussionItem extends BaseSafeOutputItem {
 /**
  * JSONL item for closing a GitHub issue
  */
-interface CloseIssueItem extends BaseSafeOutputItem {
+interface CloseIssueItem extends BaseSafeOutputItem, IssueIntentMetadata {
   type: "close_issue";
   /** Comment body to add when closing the issue */
   body: string;
@@ -127,6 +127,15 @@ interface MarkPullRequestAsReadyForReviewItem extends BaseSafeOutputItem {
   reason: string;
   /** Optional pull request number (uses triggering PR if not provided) */
   pull_request_number?: number | string;
+}
+
+/**
+ * JSONL item for approving a pending workflow run from a fork pull request
+ */
+interface ApproveWorkflowRunItem extends BaseSafeOutputItem {
+  type: "approve_workflow_run";
+  /** Positive integer workflow run ID */
+  run_id: number | string;
 }
 
 /**
@@ -368,7 +377,7 @@ interface SetIssueFieldItem extends BaseSafeOutputItem, IssueIntentMetadata {
 /**
  * JSONL item for assigning a GitHub Copilot coding agent to an issue or project item
  */
-interface AssignToAgentItem extends BaseSafeOutputItem {
+interface AssignToAgentItem extends BaseSafeOutputItem, IssueIntentMetadata {
   type: "assign_to_agent";
   /** Issue number to assign agent to */
   issue_number: number | string;
@@ -496,6 +505,7 @@ type SafeOutputItem =
   | CloseIssueItem
   | ClosePullRequestItem
   | MarkPullRequestAsReadyForReviewItem
+  | ApproveWorkflowRunItem
   | AddCommentItem
   | CommentMemoryItem
   | CreatePullRequestItem
@@ -541,6 +551,7 @@ export {
   CloseIssueItem,
   ClosePullRequestItem,
   MarkPullRequestAsReadyForReviewItem,
+  ApproveWorkflowRunItem,
   AddCommentItem,
   CommentMemoryItem,
   CreatePullRequestItem,

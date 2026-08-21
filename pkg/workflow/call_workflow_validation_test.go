@@ -35,7 +35,7 @@ func TestValidateCallWorkflow_EmptyList(t *testing.T) {
 
 	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
 	require.Error(t, err, "Validation should fail for empty workflows list")
-	assert.Contains(t, err.Error(), "must specify at least one workflow", "Should mention the requirement")
+	require.ErrorContains(t, err, "must specify at least one workflow", "Should mention the requirement")
 }
 
 // TestValidateCallWorkflow_NoConfig tests that nil config passes validation
@@ -74,8 +74,8 @@ func TestValidateCallWorkflow_SelfReference(t *testing.T) {
 
 	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
 	require.Error(t, err, "Self-reference should fail validation")
-	assert.Contains(t, err.Error(), "self-reference not allowed", "Should mention self-reference")
-	assert.Contains(t, err.Error(), "gateway", "Should mention the workflow name")
+	require.ErrorContains(t, err, "self-reference not allowed", "Should mention self-reference")
+	require.ErrorContains(t, err, "gateway", "Should mention the workflow name")
 }
 
 // TestValidateCallWorkflow_WorkflowNotFound tests that a missing workflow fails validation
@@ -102,8 +102,8 @@ func TestValidateCallWorkflow_WorkflowNotFound(t *testing.T) {
 
 	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
 	require.Error(t, err, "Missing workflow should fail validation")
-	assert.Contains(t, err.Error(), "not found", "Should mention workflow not found")
-	assert.Contains(t, err.Error(), "nonexistent-worker", "Should mention the workflow name")
+	require.ErrorContains(t, err, "not found", "Should mention workflow not found")
+	require.ErrorContains(t, err, "nonexistent-worker", "Should mention the workflow name")
 }
 
 // TestValidateCallWorkflow_WorkflowWithoutWorkflowCall tests that a workflow missing
@@ -148,8 +148,8 @@ jobs:
 
 	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
 	require.Error(t, err, "Worker without workflow_call should fail validation")
-	assert.Contains(t, err.Error(), "workflow_call", "Should mention workflow_call trigger")
-	assert.Contains(t, err.Error(), "worker-a", "Should mention the workflow name")
+	require.ErrorContains(t, err, "workflow_call", "Should mention workflow_call trigger")
+	require.ErrorContains(t, err, "worker-a", "Should mention the workflow name")
 }
 
 // TestValidateCallWorkflow_ValidWorkflow tests that a valid worker passes validation
@@ -285,4 +285,50 @@ This is a worker workflow.
 
 	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
 	assert.NoError(t, err, ".md source with workflow_call should pass validation")
+}
+
+// TestValidateCallWorkflow_YAMLExtension tests that a workflow defined as a
+// plain .yaml file (instead of .yml) is correctly resolved and validated.
+func TestValidateCallWorkflow_YAMLExtension(t *testing.T) {
+	compiler := NewCompiler(WithVersion("1.0.0"))
+
+	tmpDir := t.TempDir()
+	awDir := filepath.Join(tmpDir, ".github", "aw")
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	err := os.MkdirAll(awDir, 0755)
+	require.NoError(t, err, "Failed to create aw directory")
+	err = os.MkdirAll(workflowsDir, 0755)
+	require.NoError(t, err, "Failed to create workflows directory")
+
+	// Create a worker workflow using the .yaml extension
+	workerYAML := `name: Worker A
+on:
+  workflow_call:
+    inputs:
+      payload:
+        type: string
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Working"
+`
+	err = os.WriteFile(filepath.Join(workflowsDir, "worker-a.yaml"), []byte(workerYAML), 0644)
+	require.NoError(t, err, "Failed to write worker .yaml file")
+
+	gatewayFile := filepath.Join(awDir, "gateway.md")
+
+	workflowData := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			CallWorkflow: &CallWorkflowConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{
+					Max: strPtr("1"),
+				},
+				Workflows: []string{"worker-a"},
+			},
+		},
+	}
+
+	err = compiler.validateCallWorkflow(workflowData, gatewayFile)
+	assert.NoError(t, err, "Validation should pass for a .yaml workflow target")
 }

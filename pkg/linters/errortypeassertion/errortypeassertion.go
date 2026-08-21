@@ -9,28 +9,30 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
+var pkgLog = logger.New("linters:errortypeassertion")
+
 // Analyzer is the error-type-assertion analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "errortypeassertion",
-	Doc:      "reports type assertions from error to concrete types; use errors.As for wrapped errors",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/errortypeassertion",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("errortypeassertion", "reports type assertions from error to concrete types; use errors.As for wrapped errors", run)
 
 func run(pass *analysis.Pass) (any, error) {
 	insp, err := astutil.Inspector(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "errortypeassertion")
+
+	pkgLog.Printf("analyzing package %s", pass.Pkg.Path())
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
+	if err != nil {
+		return nil, err
+	}
 
 	builtinErrorObj := types.Universe.Lookup("error")
 	if builtinErrorObj == nil {
@@ -43,9 +45,9 @@ func run(pass *analysis.Pass) (any, error) {
 	insp.Preorder([]ast.Node{(*ast.TypeAssertExpr)(nil), (*ast.TypeSwitchStmt)(nil)}, func(n ast.Node) {
 		switch node := n.(type) {
 		case *ast.TypeAssertExpr:
-			checkTypeAssertExpr(pass, noLintLinesByFile, builtinErrorType, node)
+			checkTypeAssertExpr(pass, noLintIndex, generatedFiles, builtinErrorType, node)
 		case *ast.TypeSwitchStmt:
-			checkTypeSwitchStmt(pass, noLintLinesByFile, builtinErrorType, node)
+			checkTypeSwitchStmt(pass, noLintIndex, generatedFiles, builtinErrorType, node)
 		}
 	})
 
@@ -53,14 +55,14 @@ func run(pass *analysis.Pass) (any, error) {
 }
 
 // checkTypeAssertExpr flags direct type assertions of the form err.(ConcreteType).
-func checkTypeAssertExpr(pass *analysis.Pass, noLintLinesByFile map[string]map[int]struct{}, builtinErrorType types.Type, typeAssert *ast.TypeAssertExpr) {
+func checkTypeAssertExpr(pass *analysis.Pass, noLintIndex nolint.DirectiveIndex, generatedFiles filecheck.GeneratedIndex, builtinErrorType types.Type, typeAssert *ast.TypeAssertExpr) {
 	// Type-switch guards have nil Type; skip them (handled by checkTypeSwitchStmt).
 	if typeAssert.Type == nil {
 		return
 	}
 
 	pos := pass.Fset.PositionFor(typeAssert.Pos(), false)
-	if filecheck.IsTestFile(pos.Filename) || nolint.HasDirective(pos, noLintLinesByFile) {
+	if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) || nolint.HasDirectiveForLinter(pos, noLintIndex, "errortypeassertion") {
 		return
 	}
 
@@ -81,6 +83,7 @@ func checkTypeAssertExpr(pass *analysis.Pass, noLintLinesByFile map[string]map[i
 		return
 	}
 
+	pkgLog.Printf("flagging error type assertion to %s at %s", assertedTo, pos)
 	pass.ReportRangef(
 		typeAssert,
 		"type assertion on error to %s bypasses wrapped errors; use errors.As instead",
@@ -90,7 +93,7 @@ func checkTypeAssertExpr(pass *analysis.Pass, noLintLinesByFile map[string]map[i
 
 // checkTypeSwitchStmt flags concrete-type case arms in type switches on error,
 // e.g. "case *os.PathError:" inside "switch err.(type)".
-func checkTypeSwitchStmt(pass *analysis.Pass, noLintLinesByFile map[string]map[int]struct{}, builtinErrorType types.Type, stmt *ast.TypeSwitchStmt) {
+func checkTypeSwitchStmt(pass *analysis.Pass, noLintIndex nolint.DirectiveIndex, generatedFiles filecheck.GeneratedIndex, builtinErrorType types.Type, stmt *ast.TypeSwitchStmt) {
 	x := typeSwitchX(stmt)
 	if x == nil {
 		return
@@ -110,7 +113,7 @@ func checkTypeSwitchStmt(pass *analysis.Pass, noLintLinesByFile map[string]map[i
 		}
 		for _, typeExpr := range cc.List {
 			pos := pass.Fset.PositionFor(typeExpr.Pos(), false)
-			if filecheck.IsTestFile(pos.Filename) || nolint.HasDirective(pos, noLintLinesByFile) {
+			if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) || nolint.HasDirectiveForLinter(pos, noLintIndex, "errortypeassertion") {
 				continue
 			}
 
@@ -122,6 +125,7 @@ func checkTypeSwitchStmt(pass *analysis.Pass, noLintLinesByFile map[string]map[i
 				continue
 			}
 
+			pkgLog.Printf("flagging error type switch case %s at %s", assertedTo, pos)
 			pass.ReportRangef(
 				typeExpr,
 				"type assertion on error to %s bypasses wrapped errors; use errors.As instead",

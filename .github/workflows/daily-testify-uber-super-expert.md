@@ -28,6 +28,7 @@ emoji: 🧪
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 name: Daily Testify Uber Super Expert
 strict: true
 timeout-minutes: 20
@@ -55,7 +56,7 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

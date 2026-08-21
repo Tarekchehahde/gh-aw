@@ -14,9 +14,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: codex
 strict: true
@@ -29,25 +26,7 @@ tools:
     mode: gh-proxy
     toolsets: [default, pull_requests]
   bash:
-    - "git diff:*"
-    - "git grep:*"
-    - "git log:*"
-    - "git show:*"
-    - "go test:*"
-    - "npm test:*"
-    - "npm run:*"
-    - "node:*"
-    - "find:*"
-    - "grep:*"
-    - "sed:*"
-    - "awk:*"
-    - "cat:*"
-    - "head:*"
-    - "tail:*"
-    - "ls:*"
-    - "mkdir:*"
-    - "echo:*"
-    - "xargs:*"
+    - "*"
   edit:
 safe-outputs:
   push-to-pull-request-branch:
@@ -71,6 +50,12 @@ safe-outputs:
     run-failure: "⚠️ [{workflow_name}]({run_url}) {status} while raising regression tests."
 imports:
   - shared/otlp.md
+  - shared/reporting.md
+evals:
+  - id: investigation-completed
+    question: Did the agent investigate the pull request and identify any root-cause issues or missing test coverage?
+  - id: tests-added-or-noop
+    question: Were regression tests added to the pull request branch, or was noop correctly called when no tests were needed?
 ---
 
 # Necromancer

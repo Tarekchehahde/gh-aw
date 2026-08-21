@@ -142,6 +142,39 @@ describe("redact_secrets.cjs", () => {
             expect(fs.readFileSync(path.join(tempDir, "test.mdx"), "utf8")).toBe("# MDX\nSecret: ***REDACTED***"),
             expect(fs.readFileSync(path.join(tempDir, "test.yml"), "utf8")).toBe("# YAML\nkey: ***REDACTED***"),
             expect(fs.readFileSync(path.join(tempDir, "test.jsonl"), "utf8")).toBe('{"key": "***REDACTED***"}'));
+        }),
+        it("should redact secrets from .patch files (exact-value and built-in credential patterns)", async () => {
+          const patchContent = [
+            "diff --git a/config.js b/config.js",
+            "--- a/config.js",
+            "+++ b/config.js",
+            "@@ -1,3 +1,3 @@",
+            "-const token = 'old';",
+            "+const token = 'my-patch-secret-value';",
+            " const url = 'https://api.example.com';",
+          ].join("\n");
+          const patchFile = path.join(tempDir, "aw-abcdef.patch");
+          fs.writeFileSync(patchFile, patchContent);
+          process.env.GH_AW_SECRET_NAMES = "PATCH_SECRET";
+          process.env.SECRET_PATCH_SECRET = "my-patch-secret-value";
+          const modifiedScript = redactScript.replace('findFiles("/tmp/gh-aw", targetExtensions)', `findFiles("${tempDir.replace(/\\/g, "\\\\")}", targetExtensions)`);
+          await eval(`(async () => { ${modifiedScript}; await main(); })()`);
+          const redacted = fs.readFileSync(patchFile, "utf8");
+          expect(redacted).not.toContain("my-patch-secret-value");
+          expect(redacted).toContain("***REDACTED***");
+        }),
+        it("should redact built-in credential patterns from .patch files", async () => {
+          const ghToken = "ghp_" + "A".repeat(36);
+          const patchContent = `diff --git a/creds.txt b/creds.txt\n+TOKEN=${ghToken}\n`;
+          const patchFile = path.join(tempDir, "aw-builtin.patch");
+          fs.writeFileSync(patchFile, patchContent);
+          process.env.GH_AW_SECRET_NAMES = "";
+          const modifiedScript = redactScript.replace('findFiles("/tmp/gh-aw", targetExtensions)', `findFiles("${tempDir.replace(/\\/g, "\\\\")}", targetExtensions)`);
+          await eval(`(async () => { ${modifiedScript}; await main(); })()`);
+          const redacted = fs.readFileSync(patchFile, "utf8");
+          expect(redacted).not.toContain(ghToken);
+          expect(redacted).toContain("***REDACTED***");
+          expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("GitHub Personal Access Token"));
         }));
     }),
     describe("built-in pattern detection", () => {
@@ -650,6 +683,39 @@ Custom secret: my-secret-123456789012`;
       expect(tokens).toContain("safe-output-token-xyz789");
     });
 
+    it("should extract Authorization tokens from Codex TOML configuration", () => {
+      const configPath = path.join(tempDir, "config.toml");
+      const token = "codex-gateway-token-xyz789";
+      const authHeader = ["Bearer", token].join(" ");
+      fs.writeFileSync(configPath, `[mcp_servers.github]\nurl = "http://127.0.0.1:8080/github"\nhttp_headers = { Authorization = "${authHeader}" }\n`);
+
+      const { extractMCPGatewayTokens } = require("./redact_secrets.cjs");
+      const tokens = extractMCPGatewayTokens([configPath]);
+      expect(tokens).toContain(authHeader);
+      expect(tokens).toContain(token);
+    });
+
+    it("should extract lowercase authorization keys from Codex TOML configuration", () => {
+      const configPath = path.join(tempDir, "config-lowercase.toml");
+      const token = "codex-lowercase-token-abc123";
+      const authHeader = ["Bearer", token].join(" ");
+      fs.writeFileSync(configPath, `[mcp_servers.github]\nhttp_headers = { authorization = "${authHeader}" }\n`);
+
+      const { extractMCPGatewayTokens } = require("./redact_secrets.cjs");
+      const tokens = extractMCPGatewayTokens([configPath]);
+      expect(tokens).toContain(authHeader);
+      expect(tokens).toContain(token);
+    });
+
+    it("should ignore short Authorization values even when bearer-prefixed", () => {
+      const configPath = path.join(tempDir, "config-short.toml");
+      const authHeader = ["Bearer", "abc"].join(" ");
+      fs.writeFileSync(configPath, `[mcp_servers.github]\nhttp_headers = { Authorization = "${authHeader}" }\n`);
+
+      const { extractMCPGatewayTokens } = require("./redact_secrets.cjs");
+      expect(extractMCPGatewayTokens([configPath])).toEqual([]);
+    });
+
     it("should extract both the full Bearer header value and the bare token", () => {
       const configDir = path.join(tempDir, "mcp-config");
       fs.mkdirSync(configDir, { recursive: true });
@@ -725,7 +791,7 @@ Custom secret: my-secret-123456789012`;
       expect(tokens).toEqual([]);
     });
 
-    it("should redact MCP gateway token from agent-stdio.log in main()", async () => {
+    it("should redact MCP gateway token from diagnostic logs in main()", async () => {
       const configDir = path.join(tempDir, "mcp-config");
       fs.mkdirSync(configDir, { recursive: true });
       const gatewayOutput = path.join(configDir, "gateway-output.json");
@@ -739,9 +805,12 @@ Custom secret: my-secret-123456789012`;
         })
       );
 
-      // Write a log file that contains the gateway token (simulating the leak)
-      const logFile = path.join(tempDir, "agent-stdio.log");
-      fs.writeFileSync(logFile, `{"type":"tool_result","content":"Authorization: ${gatewayToken}"}`);
+      const logsDir = path.join(tempDir, "mcp-logs");
+      fs.mkdirSync(logsDir, { recursive: true });
+      const diagnosticLogs = ["github.log", "mcp-gateway.log", "safeoutputs.log", "stderr.log"].map(name => path.join(logsDir, name));
+      for (const logFile of diagnosticLogs) {
+        fs.writeFileSync(logFile, `{"type":"tool_result","content":"session=${gatewayToken}"}`);
+      }
 
       let modifiedScript = redactScript
         .replace('findFiles("/tmp/gh-aw", targetExtensions)', `findFiles("${tempDir.replace(/\\/g, "\\\\")}", targetExtensions)`)
@@ -750,9 +819,11 @@ Custom secret: my-secret-123456789012`;
 
       await eval(`(async () => { ${modifiedScript}; await main(); })()`);
 
-      const redacted = fs.readFileSync(logFile, "utf8");
-      expect(redacted).not.toContain(gatewayToken);
-      expect(redacted).toContain("***REDACTED***");
+      for (const logFile of diagnosticLogs) {
+        const redacted = fs.readFileSync(logFile, "utf8");
+        expect(redacted).not.toContain(gatewayToken);
+        expect(redacted).toContain("***REDACTED***");
+      }
     });
   });
 });

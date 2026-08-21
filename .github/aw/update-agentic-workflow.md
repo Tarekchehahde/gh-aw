@@ -21,6 +21,8 @@ Load these additional files only when relevant:
 - [experiments.md](experiments.md)
 - [visual-regression.md](visual-regression.md)
 - [serena-tool.md](serena-tool.md)
+- [linter-workflows.md](linter-workflows.md)
+- [agent-runtime-instructions.md](agent-runtime-instructions.md) for changes involving Docker, gVisor, Docker sbx, ARC DinD, self-hosted runners, or `sandbox.agent.runtime-install`
 
 ## Scope
 
@@ -34,20 +36,17 @@ This prompt is for **updating existing workflows only**. For new workflows, use 
 
 ## First Decision: Frontmatter or Prompt Body?
 
-Use [workflow-editing.md](workflow-editing.md) as the source of truth.
-
-- frontmatter change → recompilation required
-- markdown-body-only change → no recompilation required for runtime behavior, but always compile to keep `.lock.yml` in sync
+Use [workflow-editing.md](workflow-editing.md) as the source of truth for when recompilation is required. Always compile after any edit to keep `.lock.yml` in sync, even for body-only changes.
 
 ## Update Rules
 
 - make the smallest possible change
 - preserve existing style and structure unless reorganization is required
 - do not rewrite unrelated frontmatter sections
-- keep the agent job read-only
 - when targeting the Copilot coding agent, recommend `permissions: { copilot-requests: write }` for Copilot authentication
-- use `safe-outputs:` for writes
 - prefer `toolsets:` for GitHub tools
+
+See [workflow-constraints.md](workflow-constraints.md) for the read-only security posture (keep the agent job read-only, route writes through `safe-outputs:`).
 
 ## Common Update Categories
 

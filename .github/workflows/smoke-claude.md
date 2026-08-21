@@ -24,6 +24,7 @@ name: Smoke Claude
 models:
   blocked: ["*opus*"]
 max-turns: 100
+model: claude-sonnet-4-6
 engine:
   id: claude
   bare: true
@@ -35,6 +36,8 @@ imports:
   - shared/github-mcp-app.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
+  - shared/reporting.md
 network:
   allowed:
     - defaults
@@ -42,7 +45,6 @@ network:
     - playwright
 sandbox:
   agent:
-    sudo: false
     config:
       filesystem:
         allowWrite:
@@ -140,8 +142,6 @@ features:
 ---
 
 # Smoke Test: Claude Engine Validation.
-
-**IMPORTANT: Keep all outputs extremely short and concise. Use single-line responses where possible. No verbose explanations.**
 
 ## Test Requirements
 

@@ -20,10 +20,13 @@
 // # Validation Pattern: Feature Detection with Caching
 //
 // Repository feature validation uses a caching pattern to amortize expensive API calls:
-//   - sync.Map for thread-safe cache storage
+//   - sync.Map for thread-safe, same-process cache storage
 //   - sync.Once for single-fetch guarantee
 //   - Atomic LoadOrStore for race-free caching
 //   - Separate logged cache to avoid duplicate success messages
+//   - go-gh's disk-backed HTTP response cache (EnableCache/CacheTTL) as a second layer,
+//     persisting results across separate CLI invocations (e.g. repeated runs in the same
+//     CI workflow), on top of the in-process sync.Map fast path
 //
 // # When to Add Validation Here
 //
@@ -41,6 +44,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -49,6 +53,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	"github.com/github/gh-aw/pkg/console"
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/syncutil"
 )
 
@@ -56,7 +61,14 @@ import (
 // (mirrors the copilot-billing probe timeout).
 const repositoryFeaturesTimeout = 3 * time.Second
 
-var repositoryFeaturesLog = newValidationLogger("repository_features")
+// repositoryFeaturesCacheTTL controls how long go-gh's disk-backed HTTP response cache
+// keeps repository feature lookups (discussions/issues enablement) valid. These settings
+// rarely change, so persisting results across process invocations (not just within a
+// single process's in-memory sync.Map cache below) meaningfully reduces redundant API
+// calls when the CLI is invoked repeatedly, e.g. across steps in the same CI workflow.
+const repositoryFeaturesCacheTTL = 5 * time.Minute
+
+var repositoryFeaturesLog = logger.New("workflow:repository_features_validation")
 
 // checkRepositoryHasDiscussionsQuery is a hardcoded static GraphQL query template used to check
 // if discussions are enabled for a repository. Declared as a named constant to make clear
@@ -66,12 +78,6 @@ const checkRepositoryHasDiscussionsQuery = `query($owner: String!, $name: String
 		hasDiscussionsEnabled
 	}
 }`
-
-// RepositoryFeatures holds cached information about repository capabilities
-type RepositoryFeatures struct {
-	HasDiscussions bool
-	HasIssues      bool
-}
 
 // Global cache for repository features and current repository info
 var (
@@ -145,7 +151,12 @@ func (c *Compiler) validateRepositoryFeatures(workflowData *WorkflowData) error 
 			}
 			// Continue to return aggregated errors even if this check fails
 		} else if !hasIssues {
-			issueErr := fmt.Errorf("workflow uses safe-outputs.create-issue but repository %s does not have issues enabled. Enable issues in repository settings or remove create-issue from safe-outputs", repo)
+			issueErr := NewValidationError(
+				"safe-outputs.create-issue",
+				repo,
+				"repository requires issues to be enabled when create-issue is configured",
+				"Enable issues in repository settings or remove create-issue from safe-outputs. Example:\nsafe-outputs:\n  add-comment: {}",
+			)
 			if returnErr := collector.Add(issueErr); returnErr != nil {
 				return returnErr // Fail-fast mode
 			}
@@ -178,12 +189,22 @@ func getCurrentRepositoryUncached() (string, error) {
 	// This works when in a git repository with GitHub remote and respects GH_REPO
 	repo, err := repository.Current()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current repository: %w", err)
+		return "", NewValidationError(
+			"repository",
+			"",
+			"current repository requires a GitHub remote or GH_REPO",
+			fmt.Sprintf("Run from a GitHub repository checkout or set GH_REPO. Example: GH_REPO=github/gh-aw gh aw compile workflow.md. Underlying error: %v", err),
+		)
 	}
 
 	// Validate that owner and name are not empty
 	if repo.Owner == "" || repo.Name == "" {
-		return "", fmt.Errorf("repository owner or name is empty (owner: %q, name: %q)", repo.Owner, repo.Name)
+		return "", NewValidationError(
+			"repository",
+			fmt.Sprintf("owner=%q name=%q", repo.Owner, repo.Name),
+			"repository owner and name must be non-empty",
+			"Use owner/repo format. Example: github/gh-aw",
+		)
 	}
 
 	repoName := fmt.Sprintf("%s/%s", repo.Owner, repo.Name)
@@ -198,7 +219,12 @@ func getRepositoryFeatures(repo string, verbose bool) (*RepositoryFeatures, erro
 		features, ok := cached.(*RepositoryFeatures)
 		if !ok {
 			repositoryFeaturesCache.Delete(repo)
-			return nil, fmt.Errorf("invalid repository feature cache entry for %s: expected *RepositoryFeatures, got %T", repo, cached)
+			return nil, NewValidationError(
+				"repository.features.cache",
+				repo,
+				"repository feature cache entry must contain *RepositoryFeatures",
+				fmt.Sprintf("Restart the process to rebuild the repository feature cache and retry. Example: gh aw compile workflow.md. Actual cache type: %T", cached),
+			)
 		}
 		repositoryFeaturesLog.Printf("Using cached repository features for: %s", repo)
 		return features, nil
@@ -212,14 +238,24 @@ func getRepositoryFeatures(repo string, verbose bool) (*RepositoryFeatures, erro
 	// Check discussions
 	hasDiscussions, err := checkRepositoryHasDiscussionsUncached(repo)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check discussions: %w", err)
+		return nil, NewValidationError(
+			"repository.discussions",
+			repo,
+			"repository discussions status requires a successful GitHub API lookup",
+			fmt.Sprintf("Ensure the repository exists and the token can read repository metadata. Example: gh auth status. Underlying error: %v", err),
+		)
 	}
 	features.HasDiscussions = hasDiscussions
 
 	// Check issues
 	hasIssues, err := checkRepositoryHasIssuesUncached(repo)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check issues: %w", err)
+		return nil, NewValidationError(
+			"repository.issues",
+			repo,
+			"repository issues status requires a successful GitHub API lookup",
+			fmt.Sprintf("Ensure the repository exists and the token can read repository metadata. Example: gh auth status. Underlying error: %v", err),
+		)
 	}
 	features.HasIssues = hasIssues
 
@@ -229,7 +265,12 @@ func getRepositoryFeatures(repo string, verbose bool) (*RepositoryFeatures, erro
 	actualFeatures, ok := actual.(*RepositoryFeatures)
 	if !ok {
 		repositoryFeaturesCache.Delete(repo)
-		return nil, fmt.Errorf("invalid repository feature cache entry for %s: expected *RepositoryFeatures, got %T", repo, actual)
+		return nil, NewValidationError(
+			"repository.features.cache",
+			repo,
+			"repository feature cache entry must contain *RepositoryFeatures",
+			fmt.Sprintf("Restart the process to rebuild the repository feature cache and retry. Example: gh aw compile workflow.md. Actual cache type: %T", actual),
+		)
 	}
 
 	repositoryFeaturesLog.Printf("Cached repository features for: %s (discussions: %v, issues: %v)", repo, actualFeatures.HasDiscussions, actualFeatures.HasIssues)
@@ -263,19 +304,39 @@ func checkRepositoryHasDiscussions(repo string, verbose bool) (bool, error) {
 	return features.HasDiscussions, nil
 }
 
-// checkRepositoryHasDiscussionsUncached checks if a repository has discussions enabled (no caching)
+// checkRepositoryHasDiscussionsUncached checks if a repository has discussions enabled, bypassing
+// only the in-process repositoryFeaturesCache/repositoryFeaturesLoggedCache layers.
+// The underlying go-gh client still uses disk-backed HTTP response caching when enabled.
 func checkRepositoryHasDiscussionsUncached(repo string) (bool, error) {
-	// Split repo into owner and name
-	parts := strings.SplitN(repo, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return false, fmt.Errorf("invalid repository format: %s. Expected format: owner/repo. Example: github/gh-aw", repo)
+	if err := validateRepositoryName(repo); err != nil {
+		return false, err
 	}
-	owner, name := parts[0], parts[1]
 
 	// Use native GraphQL client — no gh binary dependency, native context/cancel support.
-	client, err := api.DefaultGraphQLClient()
+	// EnableCache persists the (rarely-changing) discussions-enabled lookup to go-gh's
+	// disk-backed HTTP cache so repeated CLI invocations don't re-query the API.
+	client, err := api.NewGraphQLClient(api.ClientOptions{
+		EnableCache: true,
+		CacheTTL:    repositoryFeaturesCacheTTL,
+	})
 	if err != nil {
-		return false, fmt.Errorf("failed to create GraphQL client: %w", err)
+		return false, NewValidationError(
+			"repository.discussions.client",
+			repo,
+			"failed to create GraphQL client",
+			fmt.Sprintf("Ensure GitHub authentication is configured before checking discussions. Example: gh auth login. Underlying error: %v", err),
+		)
+	}
+	return checkRepositoryHasDiscussionsUncachedWithClient(repo, client)
+}
+
+// checkRepositoryHasDiscussionsUncachedWithClient is the testable core of
+// checkRepositoryHasDiscussionsUncached. It accepts an injectable GraphQL client so
+// unit tests can assert cache behavior without live credentials.
+func checkRepositoryHasDiscussionsUncachedWithClient(repo string, client *api.GraphQLClient) (bool, error) {
+	owner, name, err := parseRepositoryName(repo)
+	if err != nil {
+		return false, err
 	}
 
 	var response struct {
@@ -288,7 +349,12 @@ func checkRepositoryHasDiscussionsUncached(repo string) (bool, error) {
 	defer cancel()
 
 	if err := client.DoWithContext(ctx, checkRepositoryHasDiscussionsQuery, map[string]any{"owner": owner, "name": name}, &response); err != nil {
-		return false, fmt.Errorf("failed to query discussions status: %w", err)
+		return false, NewValidationError(
+			"repository.discussions",
+			repo,
+			"failed to query discussions status",
+			fmt.Sprintf("Ensure the repository exists and the token can read repository discussions metadata. Example: gh auth status. Underlying error: %v", err),
+		)
 	}
 
 	return response.Repository.HasDiscussionsEnabled, nil
@@ -303,12 +369,27 @@ func checkRepositoryHasIssues(repo string, verbose bool) (bool, error) {
 	return features.HasIssues, nil
 }
 
-// checkRepositoryHasIssuesUncached checks if a repository has issues enabled (no caching)
+// checkRepositoryHasIssuesUncached checks if a repository has issues enabled, bypassing
+// only the in-process repositoryFeaturesCache/repositoryFeaturesLoggedCache layers.
+// The underlying go-gh client still uses disk-backed HTTP response caching when enabled.
 func checkRepositoryHasIssuesUncached(repo string) (bool, error) {
-	// Create REST client
-	client, err := api.DefaultRESTClient()
+	if err := validateRepositoryName(repo); err != nil {
+		return false, err
+	}
+
+	// Create REST client. EnableCache persists the (rarely-changing) has-issues lookup to
+	// go-gh's disk-backed HTTP cache so repeated CLI invocations don't re-query the API.
+	client, err := api.NewRESTClient(api.ClientOptions{
+		EnableCache: true,
+		CacheTTL:    repositoryFeaturesCacheTTL,
+	})
 	if err != nil {
-		return false, fmt.Errorf("failed to create REST client: %w", err)
+		return false, NewValidationError(
+			"repository.issues.client",
+			repo,
+			"failed to create REST client",
+			fmt.Sprintf("Ensure GitHub authentication is configured before checking issues. Example: gh auth login. Underlying error: %v", err),
+		)
 	}
 	return checkRepositoryHasIssuesUncachedWithClient(repo, client)
 }
@@ -327,9 +408,33 @@ func checkRepositoryHasIssuesUncachedWithClient(repo string, client *api.RESTCli
 
 	// Fetch repository data using REST client with timeout context
 	var response RepositoryResponse
-	if err := client.DoWithContext(ctx, "GET", "repos/"+repo, nil, &response); err != nil {
-		return false, fmt.Errorf("failed to query repository: %w", err)
+	if err := client.DoWithContext(ctx, http.MethodGet, "repos/"+repo, nil, &response); err != nil {
+		return false, NewValidationError(
+			"repository.issues",
+			repo,
+			"failed to query repository",
+			fmt.Sprintf("Ensure the repository exists and the token can read repository metadata. Example: gh auth status. Underlying error: %v", err),
+		)
 	}
 
 	return response.HasIssues, nil
+}
+
+func validateRepositoryName(repo string) error {
+	_, _, err := parseRepositoryName(repo)
+	return err
+}
+
+func parseRepositoryName(repo string) (owner string, name string, err error) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", NewValidationError(
+			"repository",
+			repo,
+			"invalid repository format. Expected format: owner/repo. Example: github/gh-aw",
+			"Use an owner/repo repository name. Example: github/gh-aw",
+		)
+	}
+
+	return parts[0], parts[1], nil
 }

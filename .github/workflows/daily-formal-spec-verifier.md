@@ -19,6 +19,7 @@ tracker-id: daily-formal-spec-verifier
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 strict: true
 timeout-minutes: 25
 
@@ -33,7 +34,7 @@ imports:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
 tools:
   cli-proxy: true
   github:

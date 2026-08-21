@@ -18,13 +18,12 @@ permissions:
   issues: read
   pull-requests: read
 name: Smoke Pi
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 strict: true
 sandbox:
   agent:
-    sudo: false
     config:
       filesystem:
         allowWrite:
@@ -36,6 +35,7 @@ imports:
   - shared/gh.md
   - shared/reporting-otlp.md
   - shared/otlp.md
+  - shared/smoke-test-brevity.md
 network:
   allowed:
     - defaults
@@ -73,11 +73,6 @@ features:
 ---
 
 # Smoke Test: Pi Engine Validation
-
-**CRITICAL EFFICIENCY REQUIREMENTS:**
-- Keep ALL outputs extremely short and concise. Use single-line responses.
-- NO verbose explanations or unnecessary context.
-- Minimize file reading - only read what is absolutely necessary for the task.
 
 ## Test Requirements
 

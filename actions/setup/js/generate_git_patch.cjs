@@ -21,7 +21,10 @@ const {
   buildExcludePathspecs,
   computeIncrementalDiffSize,
   rewriteCrossRepoCreatePatches,
+  isAncestorCommit,
+  describeGitFailure,
 } = require("./git_patch_utils.cjs");
+const { normalizeCommitSHA } = require("./commit_sha_helpers.cjs");
 
 // sanitizeForFilename is re-exported below for backward compatibility with
 // existing callers that imported it from this module.
@@ -36,6 +39,18 @@ function debugLog(message) {
   if (debug === "*" || debug.includes("generate_git_patch") || debug.includes("patch")) {
     console.error(`[generate_git_patch] ${message}`);
   }
+}
+
+function embedBaseCommit(patchContent, baseCommitSha) {
+  const normalizedBaseCommitSha = normalizeCommitSHA(baseCommitSha);
+  if (!normalizedBaseCommitSha || typeof patchContent !== "string") {
+    return patchContent;
+  }
+  const firstNewline = patchContent.indexOf("\n");
+  if (firstNewline < 0) {
+    return patchContent;
+  }
+  return `${patchContent.slice(0, firstNewline + 1)}X-GH-AW-Base-Commit: ${normalizedBaseCommitSha}\n${patchContent.slice(firstNewline + 1)}`;
 }
 
 /**
@@ -106,7 +121,17 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
         patchPath,
       };
     }
-    if (!fs.statSync(candidate).isDirectory()) {
+    let candidateStat;
+    try {
+      candidateStat = fs.statSync(candidate);
+    } catch (err) {
+      return {
+        success: false,
+        error: `Failed to inspect workspacePath '${String(options.workspacePath)}': ${getErrorMessage(err)}`,
+        patchPath,
+      };
+    }
+    if (!candidateStat.isDirectory()) {
       return {
         success: false,
         error: `Invalid workspacePath '${String(options.workspacePath)}': path is not a directory`,
@@ -136,15 +161,22 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
   // Ensure /tmp/gh-aw directory exists
   const patchDir = path.dirname(patchPath);
   if (!fs.existsSync(patchDir)) {
-    fs.mkdirSync(patchDir, { recursive: true });
+    try {
+      fs.mkdirSync(patchDir, { recursive: true });
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to create directory ${patchDir}: ${getErrorMessage(err)}`, { cause: err });
+    }
   }
 
   let patchGenerated = false;
+  /** @type {any} */
   let errorMessage = null;
   // Track the resolved base commit SHA so consumers (e.g. create_pull_request fallback)
   // can use it directly. The From <sha> header in format-patch output contains the
   // *new* commit SHA which won't exist in the target checkout.
+  /** @type {any} */
   let baseCommitSha = null;
+  /** @type {any} */
   let resolvedTipRef = null;
 
   try {
@@ -160,8 +192,10 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
           debugLog(`Strategy 1: Using pinned SHA ${options.pinnedSha} (branch: ${branchName})`);
         } else {
           debugLog(`Strategy 1: Checking if branch '${branchName}' exists locally`);
-          // Check if the branch exists locally
-          execGitSync(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd });
+          // Check if the branch exists locally. This is a local-ref lookup only:
+          // it never touches the network, so a failure here always means "no such
+          // local branch" and never an auth/network problem.
+          execGitSync(["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd });
           debugLog(`Strategy 1: Branch '${branchName}' exists locally`);
         }
 
@@ -231,6 +265,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
 
           // If origin/<defaultBranch> is unavailable (e.g. credentials were cleaned),
           // fall back to the local base branch ref when it exists.
+          /** @type {any} */
           let defaultBranchRef = null;
           if (hasLocalDefaultBranch) {
             defaultBranchRef = `origin/${defaultBranch}`;
@@ -244,8 +279,38 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
             }
           }
 
-          if (defaultBranchRef) {
-            baseRef = execGitSync(["merge-base", "--", defaultBranchRef, tipRef], { cwd }).trim();
+          // When the workflow runs from a ref that is not contained in the default
+          // branch (the general case for a workflow_dispatch on a feature branch),
+          // the merge-base with the default branch is far behind the checked-out
+          // commit. Basing the patch there would include the dispatched branch's own
+          // commits instead of only the agent's, and on a partial clone it requires
+          // base-side blobs that were never fetched (the lazy fetch is unauthenticated
+          // and fails). GITHUB_SHA is the commit the agent started from and every
+          // object it needs is already present in the checkout.
+          const dispatchedSha = normalizeCommitSHA(githubSha);
+          const tipSha = execGitSync(["rev-parse", tipRef], { cwd }).trim();
+          if (defaultBranchRef && dispatchedSha && dispatchedSha !== tipSha && isAncestorCommit(dispatchedSha, tipRef, cwd) && !isAncestorCommit(dispatchedSha, defaultBranchRef, cwd)) {
+            baseRef = dispatchedSha;
+            debugLog(`Strategy 1 (full): GITHUB_SHA ${dispatchedSha} is not contained in ${defaultBranchRef} (non-default-branch run); using it as the patch base instead of the merge-base`);
+          } else if (defaultBranchRef) {
+            try {
+              baseRef = execGitSync(["merge-base", "--", defaultBranchRef, tipRef], { cwd }).trim();
+            } catch (mergeBaseError) {
+              // A shallow clone (or a `--depth` fetch that grafted history onto an
+              // otherwise complete clone) can make the merge-base unreachable.
+              // Surface that explicitly instead of the misleading "branch does not
+              // exist locally" message.
+              if (fs.existsSync(path.join(cwd || process.cwd(), ".git", "shallow"))) {
+                /** @type {any} */
+                const shallowCloneError = new Error(
+                  `${ERR_SYSTEM}: Could not compute merge-base between ${defaultBranchRef} and ${tipRef} because the repository is a shallow clone (.git/shallow exists). ` +
+                    "Deepen the clone (checkout.fetch-depth: 0) so the common ancestor is reachable."
+                );
+                shallowCloneError.isShallowCloneDiagnostic = true;
+                throw shallowCloneError;
+              }
+              throw mergeBaseError;
+            }
             debugLog(`Strategy 1 (full): Computed merge-base: ${baseRef}`);
           } else {
             // No remote refs available - fall through to Strategy 2
@@ -267,7 +332,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
           const patchContent = execGitSync(["format-patch", `${baseRef}..${tipRef}`, "--stdout", ...excludeArgs()], { cwd });
 
           if (patchContent && patchContent.trim()) {
-            fs.writeFileSync(patchPath, patchContent, "utf8");
+            fs.writeFileSync(patchPath, embedBaseCommit(patchContent, baseCommitSha), "utf8");
             patchGenerated = true;
             debugLog(`Strategy 1: SUCCESS - Generated patch with ${patchContent.split("\n").length} lines`);
           }
@@ -301,18 +366,52 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
           };
         }
       } catch (branchError) {
-        // Branch does not exist locally (or pinnedSha failed)
-        debugLog(`Strategy 1: Branch '${branchName}' does not exist locally - ${getErrorMessage(branchError)}`);
+        // Strategy 1 failed. Determine branch existence from local refs only so a
+        // network/auth failure (e.g. a lazy blob fetch on a partial clone) is never
+        // reported as a missing local branch.
+        let branchExistsLocally = false;
+        try {
+          execGitSync(["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd, suppressLogs: true });
+          branchExistsLocally = true;
+        } catch {
+          // Branch really is absent from the local refs
+        }
+        const branchErrorMessage = describeGitFailure(getErrorMessage(branchError), cwd);
+        if (branchExistsLocally) {
+          debugLog(`Strategy 1: Failed to generate patch for branch '${branchName}' (branch exists locally) - ${branchErrorMessage}`);
+        } else {
+          debugLog(`Strategy 1: Branch '${branchName}' does not exist locally - ${branchErrorMessage}`);
+        }
+        // Shallow-clone diagnostics (thrown explicitly from the merge-base block
+        // above, marked with isShallowCloneDiagnostic) must reach callers immediately —
+        // falling through to Strategy 2 or 3 would produce a misleading "No changes
+        // to commit" result instead. Other ERR_SYSTEM-prefixed errors (e.g. an
+        // expected "branch not found" failure from rev-parse) must still
+        // fall through to the later strategies.
+        if (branchError && branchError.isShallowCloneDiagnostic) {
+          return {
+            success: false,
+            error: getErrorMessage(branchError),
+            patchPath: patchPath,
+          };
+        }
         if (options.pinnedSha) {
           // SECURITY: When pinnedSha is set, fail closed — do not fall through to
           // other strategies that would resolve a different commit.
           return {
             success: false,
-            error: `Pinned SHA ${options.pinnedSha} failed to generate patch: ${getErrorMessage(branchError)}`,
+            error: `Pinned SHA ${options.pinnedSha} failed to generate patch: ${branchErrorMessage}`,
             patchPath: patchPath,
           };
         }
         if (mode === "incremental") {
+          if (branchExistsLocally) {
+            return {
+              success: false,
+              error: `Cannot generate incremental patch for branch ${branchName} in checkout '${cwd}': ${branchErrorMessage}`,
+              patchPath: patchPath,
+            };
+          }
           return {
             success: false,
             error:
@@ -371,7 +470,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
               const patchContent = execGitSync(["format-patch", `${githubSha}..HEAD`, "--stdout", ...excludeArgs()], { cwd });
 
               if (patchContent && patchContent.trim()) {
-                fs.writeFileSync(patchPath, patchContent, "utf8");
+                fs.writeFileSync(patchPath, embedBaseCommit(patchContent, baseCommitSha), "utf8");
                 patchGenerated = true;
                 debugLog(`Strategy 2: SUCCESS - Generated patch with ${patchContent.split("\n").length} lines`);
               }
@@ -413,7 +512,9 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
               // Choose the closest merge-base across all remote refs.
               // for-each-ref output is lexicographic, so "first ref" is arbitrary and can
               // point to stale branches that produce oversized patches.
+              /** @type {any} */
               let bestBaseCommit = null;
+              /** @type {any} */
               let bestBaseRef = null;
               let bestCommitCount = Number.POSITIVE_INFINITY;
               for (const ref of remoteRefs) {
@@ -452,7 +553,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
                 const patchContent = execGitSync(["format-patch", `${bestBaseCommit}..${branchName}`, "--stdout", ...excludeArgs()], { cwd });
 
                 if (patchContent && patchContent.trim()) {
-                  fs.writeFileSync(patchPath, patchContent, "utf8");
+                  fs.writeFileSync(patchPath, embedBaseCommit(patchContent, baseCommitSha), "utf8");
                   patchGenerated = true;
                   debugLog(`Strategy 3: SUCCESS - Generated patch with ${patchContent.split("\n").length} lines`);
                 }
@@ -475,7 +576,12 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
 
   // Check if patch was generated and has content
   if (patchGenerated && fs.existsSync(patchPath)) {
-    let patchContent = fs.readFileSync(patchPath, "utf8");
+    let patchContent;
+    try {
+      patchContent = fs.readFileSync(patchPath, "utf8");
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to read file ${patchPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     if (options.targetTreeCwd && options.targetTreeCwd !== cwd) {
       const rewritten = rewriteCrossRepoCreatePatches(patchContent, {
         agentCwd: cwd,
@@ -528,6 +634,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
     let diffBaseForSize = baseCommitSha;
     if (mode === "incremental" && baseCommitSha && resolvedTipRef && defaultBranch) {
       try {
+        /** @type {any} */
         let baseBranchRemoteRef = null;
         try {
           execGitSync(["show-ref", "--verify", "--quiet", `refs/remotes/origin/${defaultBranch}`], { cwd });
@@ -576,6 +683,7 @@ async function generateGitPatch(branchName, baseBranch, options = {}) {
       }
     }
 
+    /** @type {any} */
     let diffSize = null;
     if (mode === "incremental" && diffBaseForSize && resolvedTipRef) {
       diffSize = computeIncrementalDiffSize({
@@ -614,4 +722,5 @@ module.exports = {
   getPatchPathForBranchInRepo,
   sanitizeBranchNameForPatch,
   sanitizeRepoSlugForPatch,
+  embedBaseCommit,
 };

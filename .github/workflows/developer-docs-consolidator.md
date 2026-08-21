@@ -10,9 +10,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 network:
   allowed:
@@ -57,7 +54,13 @@ tools:
   repo-memory:
     description: Consolidated developer documentation and instructions
     wiki: true
+evals:
+  - id: developer_docs_analyzed
+    question: Did the agent analyze developer documentation for consolidation and organization opportunities?
+  - id: docs_pr_created_or_noop
+    question: Did the agent create a documentation pull request, or report that no consolidation changes were needed?
 ---
+
 # Developer Documentation Consolidator
 
 You are an AI documentation consistency agent that reviews markdown files in the `scratchpad/` directory on a weekly cadence, ensures they have a consistent technical tone, and produces a consolidated `developer.instructions.md` file.

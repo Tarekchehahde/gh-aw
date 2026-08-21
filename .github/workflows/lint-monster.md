@@ -12,14 +12,11 @@ permissions:
   discussions: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 tracker-id: lint-monster
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 strict: true
 timeout-minutes: 45
 tools:
@@ -28,10 +25,7 @@ tools:
     mode: gh-proxy
     toolsets: [default, issues, discussions]
   bash:
-    - "cat /tmp/gh-aw/agent/golint-custom.log"
-    - "cat /tmp/gh-aw/agent/lint-diagnostics.txt"
-    - "cat /tmp/gh-aw/agent/skill-index.txt"
-    - "cat .github/skills/go-linters/SKILL.md"
+    - "*"
 steps:
   - name: Run custom lint pre-check
     id: lint_scan
@@ -70,6 +64,7 @@ safe-outputs:
   update-issue:
     max: 10
     title-prefix: "[lint-monster] "
+    target: "*"
   assign-to-agent:
     max: 3
     target: "*"
@@ -84,6 +79,7 @@ safe-outputs:
 
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -127,7 +123,7 @@ Convert fused guidance into clear, actionable instructions that Copilot can exec
    - Use the current lint run as the single source of truth for the current function-length finding count.
    - Search open and recent closed `lint-monster` issues for matching function-length tracking work before creating anything new.
    - Pick one authoritative issue (prefer an existing open issue if it already tracks the same backlog); otherwise create one new consolidated tracking issue.
-   - If an authoritative issue already exists, use `update_issue` to refresh it with the current count, affected paths, and a checklist of next slices to refactor.
+   - If an authoritative issue already exists, use `update_issue` (passing its `issue_number` explicitly, since this workflow is schedule-triggered and has no triggering issue context) to refresh it with the current count, affected paths, and a checklist of next slices to refactor.
    - For any older open duplicates that cover the same function-length backlog, close them with `close_issue` using a pointer comment to the authoritative issue.
 4. For each selected group:
    - Create or update one issue summarizing findings (paths, representative diagnostics, expected outcome).

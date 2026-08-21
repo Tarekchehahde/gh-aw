@@ -339,6 +339,39 @@ safe-outputs:
     labels: [ai-generated]
 ```
 
+### Cascading Safe-Output Message Failures (Process Safe Outputs step)
+
+**Symptoms**:
+- `Process Safe Outputs` reports multiple failed messages in one run
+- One failed `update_pull_request` message includes a 403 workflows-permission warning
+- Other failed messages (for example `add_comment`) include `Bad credentials`
+
+**What this means**:
+- Do not assume all safe-output failures share one root cause.
+- A 403 workflows-permission error on `update_pull_request` can be expected/non-fatal in some workflows.
+- A 401-style `Bad credentials` error on other messages is a separate authentication failure that needs its own fix.
+
+**Diagnostic steps**:
+
+```bash
+# Summarize failed safe-output messages and types
+gh aw audit <run-id>
+
+# Include additional artifacts when diagnosis needs more context
+gh aw audit <run-id> --artifacts usage,github-api,mcp,agent
+
+# Escalate to full artifact collection for hard-to-classify failures
+gh aw audit <run-id> --artifacts all
+
+# Inspect full failing job logs to classify each message failure
+gh run view <run-id> --job=<job-id> --log
+```
+
+- Triage each failed message by its own HTTP status code and tool/action name.
+- Check `permissions:` for missing scopes when 403 errors appear.
+- Compare the "failed message count" against the individual failed message lines to confirm whether there are multiple independent failures.
+- If several credential failures cluster together in time, investigate token freshness/expiry and token source for the run.
+
 ### Network Access Errors
 
 **Symptoms**:
@@ -493,4 +526,4 @@ gh aw compile --actionlint --zizmor --poutine
 - [Workflow Health Monitoring Runbook](../../aw/runbooks/workflow-health.md) - Step-by-step investigation procedures
 - [Common Issues Reference](../../../docs/src/content/docs/troubleshooting/common-issues.md) - Frequently encountered issues
 - [Error Reference](../../../docs/src/content/docs/troubleshooting/errors.md) - Error codes and solutions
-- [GitHub MCP Server Documentation](../../../skills/github-mcp-server/SKILL.md) - Tool configuration reference
+- [GitHub MCP Server Documentation](../github-mcp-server/SKILL.md) - Tool configuration reference

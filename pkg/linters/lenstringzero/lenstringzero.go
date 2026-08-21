@@ -9,85 +9,74 @@ import (
 	"go/token"
 	"go/types"
 
-	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
-
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"golang.org/x/tools/go/analysis"
 )
 
-var Analyzer = &analysis.Analyzer{
-	Name: "lenstringzero",
-	Doc: "reports len(s) == 0, len(s) != 0, and equivalent relational comparisons " +
-		"(len(s) > 0, len(s) >= 1, len(s) < 1, len(s) <= 0) on string values " +
-		"that should use == \"\" or != \"\" instead",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/lenstringzero",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("lenstringzero", "reports len(s) == 0, len(s) != 0, and equivalent relational comparisons "+
+	"(len(s) > 0, len(s) >= 1, len(s) < 1, len(s) <= 0) on string values "+
+	"that should use == \"\" or != \"\" instead", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "lenstringzero")
 	lenStringAliases := collectLenStringAliases(pass)
-
 	nodeFilter := []ast.Node{(*ast.BinaryExpr)(nil)}
-
-	insp.Preorder(nodeFilter, func(n ast.Node) {
-		expr, ok := n.(*ast.BinaryExpr)
-		if !ok {
-			return
-		}
-		switch expr.Op {
-		case token.EQL, token.NEQ, token.GTR, token.GEQ, token.LSS, token.LEQ:
-		default:
-			return
-		}
-
-		pos := pass.Fset.PositionFor(expr.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
-			return
-		}
-		if nolint.HasDirective(pos, noLintLinesByFile) {
-			return
-		}
-
-		lenArg, isDirect, normalOp, lit, matched := matchLenLiteralExpr(pass, expr, lenStringAliases)
-		if !matched {
-			return
-		}
-
-		fixOp, cmpVerb, valid := resolveFixOp(normalOp, lit)
-		if !valid {
-			return
-		}
-
-		t := pass.TypesInfo.TypeOf(lenArg)
-		if t == nil {
-			return
-		}
-		basic, ok := t.Underlying().(*types.Basic)
-		if !ok || basic.Kind() != types.String {
-			return
-		}
-
-		var fixes []analysis.SuggestedFix
-		if isDirect {
-			fixes = buildLenStringFix(pass, expr, lenArg, fixOp)
-		}
-		pass.Report(analysis.Diagnostic{
-			Pos:            expr.Pos(),
-			End:            expr.End(),
-			Message:        fmt.Sprintf(`use s %s "" to check for %s string instead of len(s) %s %d`, fixOp, cmpVerb, normalOp, lit),
-			SuggestedFixes: fixes,
-		})
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
+		analyzeLenStringExpr(pass, n, generatedFiles, noLintIndex, lenStringAliases)
 	})
+}
 
-	return nil, nil
+// analyzeLenStringExpr checks whether a binary expression is a len(s) comparison
+// with 0 or 1 that should use == "" or != "" instead.
+func analyzeLenStringExpr(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex, lenStringAliases map[types.Object]ast.Expr) {
+	expr, ok := n.(*ast.BinaryExpr)
+	if !ok {
+		return
+	}
+	switch expr.Op {
+	case token.EQL, token.NEQ, token.GTR, token.GEQ, token.LSS, token.LEQ:
+	default:
+		return
+	}
+	pos := pass.Fset.PositionFor(expr.Pos(), false)
+	if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
+		return
+	}
+	if nolint.HasDirectiveForLinter(pos, noLintIndex, "lenstringzero") {
+		return
+	}
+	lenArg, isDirect, normalOp, lit, matched := matchLenLiteralExpr(pass, expr, lenStringAliases)
+	if !matched {
+		return
+	}
+	fixOp, cmpVerb, valid := resolveFixOp(normalOp, lit)
+	if !valid {
+		return
+	}
+	t := pass.TypesInfo.TypeOf(lenArg)
+	if t == nil {
+		return
+	}
+	basic, ok := t.Underlying().(*types.Basic)
+	if !ok || basic.Kind() != types.String {
+		return
+	}
+	var fixes []analysis.SuggestedFix
+	if isDirect {
+		fixes = buildLenStringFix(pass, expr, lenArg, fixOp)
+	}
+	pass.Report(analysis.Diagnostic{
+		Pos:            expr.Pos(),
+		End:            expr.End(),
+		Message:        fmt.Sprintf(`use s %s "" to check for %s string instead of len(s) %s %d`, fixOp, cmpVerb, normalOp, lit),
+		SuggestedFixes: fixes,
+	})
 }
 
 // matchLenLiteralExpr tries to match len(s)/alias OP literal or literal OP len(s)/alias.

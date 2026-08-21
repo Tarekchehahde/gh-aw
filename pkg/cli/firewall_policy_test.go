@@ -13,16 +13,17 @@ import (
 )
 
 func TestDomainMatchesRule(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		host     string
-		rule     PolicyRule
+		rule     FirewallPolicyRule
 		expected bool
 	}{
 		{
 			name: "exact match without port",
 			host: "github.com",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{"github.com"},
 			},
 			expected: true,
@@ -30,7 +31,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "exact match with port",
 			host: "github.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{"github.com"},
 			},
 			expected: true,
@@ -38,7 +39,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "wildcard match - subdomain",
 			host: "api.github.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: true,
@@ -46,7 +47,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "wildcard match - base domain",
 			host: "github.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: true,
@@ -54,7 +55,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "wildcard match - deep subdomain",
 			host: "api.v2.github.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: true,
@@ -62,7 +63,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "no match - different domain",
 			host: "evil.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: false,
@@ -70,7 +71,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "no match - suffix collision",
 			host: "notgithub.com:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: false,
@@ -78,7 +79,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "case insensitive match",
 			host: "API.GitHub.COM:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com"},
 			},
 			expected: true,
@@ -86,7 +87,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "multiple domains in rule",
 			host: "npmjs.org:443",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{".github.com", "npmjs.org"},
 			},
 			expected: true,
@@ -94,7 +95,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "no match - empty domains",
 			host: "example.com",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				Domains: []string{},
 			},
 			expected: false,
@@ -102,7 +103,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "regex match - IP pattern",
 			host: "192.168.1.1",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				ACLName: "dst_ipv4_regex",
 				Domains: []string{`^192\.168\.`},
 			},
@@ -111,7 +112,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "regex match - metachar detection",
 			host: "test.example.com",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				ACLName: "some_acl",
 				Domains: []string{`^.*\.example\.com$`},
 			},
@@ -120,7 +121,7 @@ func TestDomainMatchesRule(t *testing.T) {
 		{
 			name: "regex no match",
 			host: "other.com",
-			rule: PolicyRule{
+			rule: FirewallPolicyRule{
 				ACLName: "dst_ipv4_regex",
 				Domains: []string{`^192\.168\.`},
 			},
@@ -137,7 +138,8 @@ func TestDomainMatchesRule(t *testing.T) {
 }
 
 func TestFindMatchingRule(t *testing.T) {
-	rules := []PolicyRule{
+	t.Parallel()
+	rules := []FirewallPolicyRule{
 		{
 			ID:       "allow-github",
 			Order:    1,
@@ -211,7 +213,8 @@ func TestFindMatchingRule(t *testing.T) {
 }
 
 func TestProtocolMatching(t *testing.T) {
-	rules := []PolicyRule{
+	t.Parallel()
+	rules := []FirewallPolicyRule{
 		{
 			ID:       "allow-https-only",
 			Order:    1,
@@ -247,6 +250,7 @@ func TestProtocolMatching(t *testing.T) {
 }
 
 func TestIsEntryHTTPS(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isEntryHTTPS(AuditLogEntry{Method: "CONNECT"}), "CONNECT should be HTTPS")
 	assert.True(t, isEntryHTTPS(AuditLogEntry{Method: "connect"}), "connect (lowercase) should be HTTPS")
 	assert.False(t, isEntryHTTPS(AuditLogEntry{Method: "GET"}), "GET should not be HTTPS")
@@ -254,6 +258,7 @@ func TestIsEntryHTTPS(t *testing.T) {
 }
 
 func TestIsEntryAllowed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		entry    AuditLogEntry
@@ -276,6 +281,7 @@ func TestIsEntryAllowed(t *testing.T) {
 }
 
 func TestContainsRegexMeta(t *testing.T) {
+	t.Parallel()
 	assert.True(t, containsRegexMeta(`^192\.168`), "Should detect caret")
 	assert.True(t, containsRegexMeta(`foo.*bar`), "Should detect asterisk")
 	assert.True(t, containsRegexMeta(`[0-9]+`), "Should detect brackets")
@@ -284,6 +290,7 @@ func TestContainsRegexMeta(t *testing.T) {
 }
 
 func TestLoadPolicyManifest(t *testing.T) {
+	t.Parallel()
 	t.Run("valid manifest", func(t *testing.T) {
 		dir := t.TempDir()
 		manifestPath := filepath.Join(dir, "policy-manifest.json")
@@ -291,7 +298,7 @@ func TestLoadPolicyManifest(t *testing.T) {
 		manifest := PolicyManifest{
 			Version:     1,
 			GeneratedAt: "2026-01-01T00:00:00Z",
-			Rules: []PolicyRule{
+			Rules: []FirewallPolicyRule{
 				{ID: "rule-b", Order: 2, Action: "deny", Domains: []string{".evil.com"}, Description: "Block evil"},
 				{ID: "rule-a", Order: 1, Action: "allow", Domains: []string{".github.com"}, Description: "Allow GitHub"},
 			},
@@ -321,7 +328,7 @@ func TestLoadPolicyManifest(t *testing.T) {
 		ports := "8080,9090"
 		manifest := PolicyManifest{
 			Version:           1,
-			Rules:             []PolicyRule{},
+			Rules:             []FirewallPolicyRule{},
 			HostAccessEnabled: true,
 			AllowHostPorts:    &ports,
 		}
@@ -353,6 +360,7 @@ func TestLoadPolicyManifest(t *testing.T) {
 }
 
 func TestParseAuditJSONL(t *testing.T) {
+	t.Parallel()
 	t.Run("valid JSONL", func(t *testing.T) {
 		dir := t.TempDir()
 		jsonlPath := filepath.Join(dir, "audit.jsonl")
@@ -414,10 +422,11 @@ not valid json
 }
 
 func TestEnrichWithPolicyRules(t *testing.T) {
+	t.Parallel()
 	manifest := &PolicyManifest{
 		Version:     1,
 		GeneratedAt: "2026-01-01T00:00:00Z",
-		Rules: []PolicyRule{
+		Rules: []FirewallPolicyRule{
 			{
 				ID:          "allow-github",
 				Order:       1,
@@ -518,7 +527,7 @@ func TestEnrichWithPolicyRules(t *testing.T) {
 		// any allow rule should be classified as (unattributed-allow), not (implicit-deny)
 		limitedManifest := &PolicyManifest{
 			Version: 1,
-			Rules: []PolicyRule{
+			Rules: []FirewallPolicyRule{
 				{ID: "allow-github", Order: 1, Action: "allow", ACLName: "allowed_domains", Protocol: "both", Domains: []string{".github.com"}, Description: "Allow GitHub"},
 			},
 		}
@@ -551,6 +560,7 @@ func TestEnrichWithPolicyRules(t *testing.T) {
 }
 
 func TestDetectFirewallAuditArtifacts(t *testing.T) {
+	t.Parallel()
 	t.Run("sandbox/firewall/audit path", func(t *testing.T) {
 		dir := t.TempDir()
 		auditDir := filepath.Join(dir, "sandbox", "firewall", "audit")
@@ -685,11 +695,12 @@ func TestDetectFirewallAuditArtifacts(t *testing.T) {
 
 		_, _, err := detectFirewallAuditArtifacts(dir)
 		require.Error(t, err, "Should return an error when run dir is unreadable")
-		assert.Contains(t, err.Error(), "detectFirewallAuditArtifacts", "Error should identify the function")
+		require.ErrorContains(t, err, "detectFirewallAuditArtifacts", "Error should identify the function")
 	})
 }
 
 func TestAnalyzeFirewallPolicy(t *testing.T) {
+	t.Parallel()
 	t.Run("full enrichment", func(t *testing.T) {
 		dir := t.TempDir()
 		auditDir := filepath.Join(dir, "sandbox", "firewall", "audit")
@@ -699,7 +710,7 @@ func TestAnalyzeFirewallPolicy(t *testing.T) {
 		manifest := PolicyManifest{
 			Version:     1,
 			GeneratedAt: "2026-01-01T00:00:00Z",
-			Rules: []PolicyRule{
+			Rules: []FirewallPolicyRule{
 				{ID: "allow-github", Order: 1, Action: "allow", ACLName: "allowed_domains", Protocol: "both", Domains: []string{".github.com"}, Description: "Allow GitHub"},
 				{ID: "deny-all", Order: 2, Action: "deny", ACLName: "all", Protocol: "both", Domains: []string{}, Description: "Block all other traffic"},
 			},
@@ -732,7 +743,7 @@ func TestAnalyzeFirewallPolicy(t *testing.T) {
 
 		manifest := PolicyManifest{
 			Version:        1,
-			Rules:          []PolicyRule{{ID: "r1", Order: 1, Action: "allow", Domains: []string{".example.com"}}},
+			Rules:          []FirewallPolicyRule{{ID: "r1", Order: 1, Action: "allow", Domains: []string{".example.com"}}},
 			SSLBumpEnabled: true,
 		}
 		manifestData, err := json.Marshal(manifest)
@@ -751,4 +762,64 @@ func TestAnalyzeFirewallPolicy(t *testing.T) {
 		require.NoError(t, err, "Should not error when no artifacts found")
 		assert.Nil(t, analysis, "Should return nil when no artifacts found")
 	})
+}
+
+func TestDomainMatchesRegex(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		domain   string
+		patterns []string
+		expected bool
+	}{
+		{
+			name:     "valid pattern that matches",
+			domain:   "api.github.com",
+			patterns: []string{`^api\.github\.com$`},
+			expected: true,
+		},
+		{
+			name:     "valid pattern that does not match",
+			domain:   "evil.com",
+			patterns: []string{`^api\.github\.com$`},
+			expected: false,
+		},
+		{
+			name:     "invalid pattern is skipped and returns false",
+			domain:   "github.com",
+			patterns: []string{`[invalid`},
+			expected: false,
+		},
+		{
+			name:     "invalid pattern skipped, valid second pattern matches",
+			domain:   "github.com",
+			patterns: []string{`[invalid`, `^github\.com$`},
+			expected: true,
+		},
+		{
+			name:     "invalid pattern skipped, no other pattern matches",
+			domain:   "github.com",
+			patterns: []string{`[invalid`, `^other\.com$`},
+			expected: false,
+		},
+		{
+			name:     "empty patterns list returns false",
+			domain:   "github.com",
+			patterns: []string{},
+			expected: false,
+		},
+		{
+			name:     "wildcard regex pattern",
+			domain:   "anything.example.com",
+			patterns: []string{`^.*\.example\.com$`},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := domainMatchesRegex(tt.domain, tt.patterns)
+			assert.Equal(t, tt.expected, result, "domainMatchesRegex(%q, %v) should return %v", tt.domain, tt.patterns, tt.expected)
+		})
+	}
 }

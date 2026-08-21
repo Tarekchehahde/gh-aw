@@ -46,7 +46,6 @@ func TestCompileWorkflows(t *testing.T) {
 				Validate:             false,
 				Watch:                false,
 				WorkflowDir:          "",
-				SkipInstructions:     false,
 				NoEmit:               false,
 				Purge:                false,
 				TrialMode:            false,
@@ -73,7 +72,6 @@ func TestCompileWorkflowsPurgeFlag(t *testing.T) {
 			Validate:             false,
 			Watch:                false,
 			WorkflowDir:          "",
-			SkipInstructions:     false,
 			NoEmit:               false,
 			Purge:                true,
 			TrialMode:            false,
@@ -115,7 +113,6 @@ func TestCompileWorkflowsPurgeFlag(t *testing.T) {
 			Validate:             false,
 			Watch:                false,
 			WorkflowDir:          "",
-			SkipInstructions:     false,
 			NoEmit:               false,
 			Purge:                true,
 			TrialMode:            false,
@@ -168,7 +165,6 @@ This is a test workflow to verify the --no-emit flag functionality.`
 		Validate:             false,
 		Watch:                false,
 		WorkflowDir:          "",
-		SkipInstructions:     false,
 		NoEmit:               false,
 		Purge:                false,
 		TrialMode:            false,
@@ -195,7 +191,6 @@ This is a test workflow to verify the --no-emit flag functionality.`
 		Validate:             false,
 		Watch:                false,
 		WorkflowDir:          "",
-		SkipInstructions:     false,
 		NoEmit:               true,
 		Purge:                false,
 		TrialMode:            false,
@@ -222,7 +217,11 @@ func TestRemoveWorkflows(t *testing.T) {
 }
 
 func TestStatusWorkflows(t *testing.T) {
-	err := StatusWorkflows("test-pattern", false, false, "", "", "")
+	// Change to the repository root so that the local .github/workflows
+	// directory is found regardless of the test binary's working directory.
+	chdirToRepoRoot(t)
+
+	err := StatusWorkflows(t.Context(), "test-pattern", false, false, "", "", "")
 
 	// Should not error since it's a stub implementation
 	if err != nil {
@@ -271,6 +270,7 @@ func TestRunWorkflowsOnGitHub(t *testing.T) {
 }
 
 func TestNormalizeWorkflowID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -330,6 +330,7 @@ func TestNormalizeWorkflowID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := normalizeWorkflowID(tt.input)
 			if result != tt.expected {
 				t.Errorf("normalizeWorkflowID(%q) = %q, expected %q", tt.input, result, tt.expected)
@@ -376,7 +377,6 @@ Test workflow for command existence.`
 				Validate:             false,
 				Watch:                false,
 				WorkflowDir:          "",
-				SkipInstructions:     false,
 				NoEmit:               true, // Don't emit lock files to save time
 				Purge:                false,
 				TrialMode:            false,
@@ -385,8 +385,8 @@ Test workflow for command existence.`
 			_, err := CompileWorkflows(context.Background(), config)
 			return err
 		}, false, "CompileWorkflows"},
-		{func() error { return RemoveWorkflows("nonexistent", false, "") }, false, "RemoveWorkflows"},                // Should handle missing directory gracefully
-		{func() error { return StatusWorkflows("nonexistent", false, false, "", "", "") }, false, "StatusWorkflows"}, // Should handle missing directory gracefully
+		{func() error { return RemoveWorkflows("nonexistent", false, "") }, false, "RemoveWorkflows"},                             // Should handle missing directory gracefully
+		{func() error { return StatusWorkflows(t.Context(), "nonexistent", false, false, "", "", "") }, false, "StatusWorkflows"}, // Should handle missing directory gracefully
 		{func() error {
 			return RunWorkflowOnGitHub(context.Background(), "", RunOptions{})
 		}, true, "RunWorkflowOnGitHub"}, // Should error with empty workflow name
@@ -909,6 +909,7 @@ This workflow uses an include.
 
 // TestCalculateTimeRemaining tests the calculateTimeRemaining function
 func TestCalculateTimeRemaining(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		stopTimeStr string
@@ -928,6 +929,7 @@ func TestCalculateTimeRemaining(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := calculateTimeRemaining(tt.stopTimeStr)
 			if result != tt.expected {
 				t.Errorf("calculateTimeRemaining(%q) = %q, want %q", tt.stopTimeStr, result, tt.expected)
@@ -937,6 +939,7 @@ func TestCalculateTimeRemaining(t *testing.T) {
 
 	// Test with future time - this will test the logic but the exact result depends on current time
 	t.Run("future time formatting", func(t *testing.T) {
+		t.Parallel()
 		// Create a time 2 hours and 30 minutes in the future
 		// Add a small buffer to account for execution time
 		futureTime := time.Now().Add(2*time.Hour + 30*time.Minute + 1*time.Second)
@@ -957,6 +960,7 @@ func TestCalculateTimeRemaining(t *testing.T) {
 
 	// Test with past time
 	t.Run("past time - expired", func(t *testing.T) {
+		t.Parallel()
 		// Create a time 1 hour in the past
 		pastTime := time.Now().Add(-1 * time.Hour)
 		stopTimeStr := pastTime.Format("2006-01-02 15:04:05")
@@ -985,13 +989,13 @@ func TestRunWorkflowOnGitHubWithEnable(t *testing.T) {
 func TestGetWorkflowStatus(t *testing.T) {
 
 	// Test with non-existent workflow
-	_, err := getWorkflowStatus("nonexistent-workflow", "", false)
+	_, err := getWorkflowStatus(t.Context(), "nonexistent-workflow", "", false)
 	if err == nil {
 		t.Error("getWorkflowStatus should return error for non-existent workflow")
 	}
 
 	// Test with empty workflow name
-	_, err = getWorkflowStatus("", "", false)
+	_, err = getWorkflowStatus(t.Context(), "", "", false)
 	if err == nil {
 		t.Error("getWorkflowStatus should return error for empty workflow name")
 	}

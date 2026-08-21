@@ -235,6 +235,13 @@ func (c *Compiler) fetchAndParseActionYAML(actionName string, config *SafeOutput
 				// Cache the fetched inputs and description so subsequent compilations are
 				// deterministic even when the network is unavailable.
 				if actionYAML != nil && data.ActionCache != nil {
+					seedSHA := fetchRef
+					if !gitutil.IsValidFullSHA(seedSHA) {
+						seedSHA = extractSHAFromPinnedRef(resolvedRef)
+					}
+					if gitutil.IsValidFullSHA(seedSHA) {
+						data.ActionCache.Set(ref.Repo, ref.Ref, seedSHA)
+					}
 					if actionYAML.Inputs != nil {
 						data.ActionCache.SetInputs(ref.Repo, ref.Ref, actionYAML.Inputs)
 					}
@@ -526,6 +533,13 @@ func (c *Compiler) buildActionSteps(data *WorkflowData) []string {
 		steps = append(steps, fmt.Sprintf("      - name: %s\n", displayName))
 		steps = append(steps, fmt.Sprintf("        id: action_%s\n", normalizedName))
 		steps = append(steps, fmt.Sprintf("        if: steps.process_safe_outputs.outputs.%s != ''\n", outputKey))
+		// Inject zizmor ignore annotation before uses: lines from unverified action creators.
+		for _, prefix := range unverifiedCreatorActionPrefixes {
+			if strings.HasPrefix(actionRef, prefix) {
+				steps = append(steps, "        # zizmor: ignore[github_action_from_unverified_creator_used]\n")
+				break
+			}
+		}
 		steps = append(steps, fmt.Sprintf("        uses: %s\n", actionRef))
 
 		// Build optional env: block for per-action environment variables

@@ -23,11 +23,9 @@ engine:
 
 imports:
   - shared/otlp.md
-sandbox:
-  agent:
-    sudo: false
 tools:
   cli-proxy: true
+  bash: ["cat", "ls", "find", "grep", "head", "tail", "wc", "git", "jq *"]
   github:
     mode: gh-proxy
     toolsets: [pull_requests, repos, issues]
@@ -116,6 +114,11 @@ steps:
       echo "✓ Wrote contributing-guidelines-truncated.md"
 features:
   gh-aw-detection: true
+evals:
+  - id: prs-evaluated
+    question: Did the agent dispatch PRs to the contribution-checker subagent and produce evaluation results for each PR?
+  - id: report-created
+    question: Was a report issue created summarizing PR compliance with the contributing guidelines?
 ---
 
 ## Target Repository
@@ -153,7 +156,7 @@ Read the contents of `contributing-guidelines-truncated.md` from the workspace r
 
 Call the contribution-checker subagent for each PR with this prompt:
 
-Use `model: small` for every contribution-checker subagent call.
+Use `model: claude-haiku-4.5` for every contribution-checker subagent call.
 
 ```
 The CONTRIBUTING.md content for this repository is attached below (already truncated to 2000 chars by the pre-agent step).

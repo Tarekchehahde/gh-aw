@@ -1,9 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
+import http from "http";
 import os from "os";
 import path from "path";
 
-import { ensureSafeOutputsTools, formatResponse, hasStdinJsonPayload, parseToolArgs, readStdinSync, shouldShowToolHelpForEmptyArgs, showHelp, showToolHelp, writeStdoutAndFlush } from "./mcp_cli_bridge.cjs";
+import {
+  ensureSafeOutputsTools,
+  auditLog,
+  ensureAuditDir,
+  formatResponse,
+  getToolCallTimeoutMs,
+  hasStdinJsonPayload,
+  main,
+  parseToolArgs,
+  readStdinSync,
+  shouldShowToolHelpForEmptyArgs,
+  showHelp,
+  showToolHelp,
+  tryExtractJsonFieldFromStdin,
+  unescapeCliStringArg,
+  writeStdoutAndFlush,
+} from "./mcp_cli_bridge.cjs";
 
 describe("mcp_cli_bridge.cjs", () => {
   let originalCore;
@@ -20,7 +37,9 @@ describe("mcp_cli_bridge.cjs", () => {
       info: vi.fn(),
       warning: vi.fn(),
       error: vi.fn(),
-      setFailed: vi.fn(),
+      setFailed: vi.fn(() => {
+        process.exitCode = 1;
+      }),
     };
     process.exitCode = 0;
     stdoutChunks = [];
@@ -190,10 +209,32 @@ describe("mcp_cli_bridge.cjs", () => {
     }
   });
 
-  it("shows help instead of calling safeoutputs tools with an empty args object", () => {
-    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {})).toBe(true);
-    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", { title: "Bug report" })).toBe(false);
-    expect(shouldShowToolHelpForEmptyArgs("other-server", {})).toBe(false);
+  it("allows zero-argument tools to proceed — only shows help when required fields are declared", () => {
+    // Empty schema (zero-input custom tool) — must NOT show help; empty call is valid
+    const emptySchemaTools = { inputSchema: { type: "object", properties: {}, additionalProperties: false } };
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, emptySchemaTools)).toBe(false);
+
+    // Optional-only tool (required array absent) — must NOT show help
+    const optionalOnlyTool = { inputSchema: { type: "object", properties: { flag: { type: "boolean" } } } };
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, optionalOnlyTool)).toBe(false);
+
+    // Optional-only tool (required array present but empty) — must NOT show help
+    const emptyRequiredTool = { inputSchema: { required: [] } };
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, emptyRequiredTool)).toBe(false);
+
+    // Tool with required fields and empty args — MUST show help (probe detection)
+    const requiredFieldTool = { inputSchema: { required: ["title"] } };
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, requiredFieldTool)).toBe(true);
+
+    // Missing matchedTool (e.g. unknown tool) — treated as no-required; must NOT show help
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, null)).toBe(false);
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", {}, undefined)).toBe(false);
+
+    // Non-empty args are never affected
+    expect(shouldShowToolHelpForEmptyArgs("safeoutputs", { title: "Bug report" }, requiredFieldTool)).toBe(false);
+
+    // Non-safeoutputs servers are never affected
+    expect(shouldShowToolHelpForEmptyArgs("other-server", {}, requiredFieldTool)).toBe(false);
   });
 
   it("coerces scientific notation when schema properties are unavailable", () => {
@@ -212,6 +253,131 @@ describe("mcp_cli_bridge.cjs", () => {
       start_date: "-1d",
       workflow_name: "daily-issues-report",
     });
+  });
+
+  it("uses default 120s timeout for non-logs tools", () => {
+    expect(getToolCallTimeoutMs("audit", {})).toBe(120000);
+  });
+
+  it("writes owner-only audit metadata without arguments, responses, or errors", () => {
+    const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-audit-"));
+    const sentinel = "sentinel-secret";
+    try {
+      ensureAuditDir(auditDir);
+      auditLog(
+        "server/../name",
+        {
+          event: "tools_call_done",
+          tool: "example",
+          statusCode: 200,
+          elapsedMs: 12,
+          argumentBytes: 42,
+          arguments: { apiKey: sentinel },
+          response: { secret: sentinel },
+          error: sentinel,
+        },
+        auditDir
+      );
+
+      const files = fs.readdirSync(auditDir);
+      expect(files).toEqual(["server_.._name.jsonl"]);
+      const logPath = path.join(auditDir, files[0]);
+      const record = JSON.parse(fs.readFileSync(logPath, "utf8"));
+      expect(record).toMatchObject({
+        server: "server/../name",
+        event: "tools_call_done",
+        tool: "example",
+        statusCode: 200,
+        elapsedMs: 12,
+        argumentBytes: 42,
+      });
+      expect(record).not.toHaveProperty("arguments");
+      expect(record).not.toHaveProperty("response");
+      expect(record).not.toHaveProperty("error");
+      expect(fs.statSync(auditDir).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(logPath).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(logPath, "utf8")).not.toContain(sentinel);
+    } finally {
+      fs.rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes audit records older than the 24-hour retention window", () => {
+    const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-audit-"));
+    const staleLog = path.join(auditDir, "stale.jsonl");
+    const currentLog = path.join(auditDir, "current.jsonl");
+    try {
+      fs.writeFileSync(staleLog, "{}\n");
+      fs.writeFileSync(currentLog, "{}\n");
+      const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      fs.utimesSync(staleLog, staleTime, staleTime);
+
+      ensureAuditDir(auditDir);
+
+      expect(fs.existsSync(staleLog)).toBe(false);
+      expect(fs.existsSync(currentLog)).toBe(true);
+    } finally {
+      fs.rmSync(auditDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a longer timeout for logs calls without explicit timeout (default count=100, no filter)", () => {
+    // effectiveCount=100, base=ceil(100/40)=3, no workflow_name → max(5,3)=5 minutes
+    expect(getToolCallTimeoutMs("logs", {})).toBe(315000);
+  });
+
+  it("scales logs timeout from count when no explicit timeout is set (count=250, no filter)", () => {
+    // effectiveCount=250, base=ceil(250/40)=7, no workflow_name → max(5,7)=7 minutes
+    expect(getToolCallTimeoutMs("logs", { count: 250 })).toBe(435000);
+  });
+
+  it("scales logs timeout from count with workflow_name filter (count=250, filtered)", () => {
+    // effectiveCount=250, base=ceil(250/40)=7, workflow_name present → 7 minutes (no min floor applied)
+    expect(getToolCallTimeoutMs("logs", { count: 250, workflow_name: "ci" })).toBe(435000);
+  });
+
+  it("clamps count-based timeout to global minimum for small filtered counts", () => {
+    // effectiveCount=40, base=ceil(40/40)=1, workflow_name present → 1 minute → 75000ms < 120000ms → clamped
+    expect(getToolCallTimeoutMs("logs", { count: 40, workflow_name: "ci" })).toBe(120000);
+  });
+
+  it("applies 5-minute no-filter floor for small unfiltered counts", () => {
+    // effectiveCount=40, base=1, no workflow_name → max(5,1)=5 minutes
+    expect(getToolCallTimeoutMs("logs", { count: 40 })).toBe(315000);
+  });
+
+  it("applies 5-minute floor when engine filter is present, even with workflow_name", () => {
+    // effectiveCount=40, base=1, workflow_name present but engine present too → max(5,1)=5 minutes
+    expect(getToolCallTimeoutMs("logs", { count: 40, workflow_name: "ci", engine: "claude" })).toBe(315000);
+  });
+
+  it("applies 5-minute floor when engine filter is present without workflow_name", () => {
+    // effectiveCount=40, base=1, no workflow_name, engine present → max(5,1)=5 minutes
+    expect(getToolCallTimeoutMs("logs", { count: 40, engine: "claude" })).toBe(315000);
+  });
+
+  it("uses logs timeout argument with bridge buffer when provided", () => {
+    // timeout=10min, floor=5min (default count=100, no filter) → max(120000, 315000, 615000) = 615000
+    expect(getToolCallTimeoutMs("logs", { timeout: 10 })).toBe(615000);
+  });
+
+  it("floors small explicit timeout to the count-derived minimum", () => {
+    // timeout=2.5min → explicit=165000ms; floor=5min → 315000ms; floor wins
+    expect(getToolCallTimeoutMs("logs", { timeout: 2.5 })).toBe(315000);
+  });
+
+  it("caps explicit timeout at LOGS_TOOL_MAX_EXPLICIT_TIMEOUT_MINUTES (60)", () => {
+    // timeout=999min → clamped to 60min → 3615000ms; floor=315000ms; capped value wins
+    expect(getToolCallTimeoutMs("logs", { timeout: 999 })).toBe(3615000);
+  });
+
+  it("rejects non-numeric timeout types and falls back to count-derived timeout", () => {
+    // typeof-check rejects strings and booleans even when Number() would accept them
+    expect(getToolCallTimeoutMs("logs", { timeout: 0 })).toBe(315000);
+    expect(getToolCallTimeoutMs("logs", { timeout: -5 })).toBe(315000);
+    expect(getToolCallTimeoutMs("logs", { timeout: "invalid" })).toBe(315000);
+    expect(getToolCallTimeoutMs("logs", { timeout: "5" })).toBe(315000);
+    expect(getToolCallTimeoutMs("logs", { timeout: true })).toBe(315000);
   });
 
   it("treats MCP result envelopes with isError=true as errors", async () => {
@@ -603,22 +769,34 @@ describe("mcp_cli_bridge.cjs", () => {
       expect(args).toEqual({});
     });
 
-    it("falls through to empty args when stdinContent is empty string", () => {
-      const { args } = parseToolArgs(["."], {}, "");
-
-      expect(args).toEqual({});
+    it("throws a parse error when explicit JSON payload mode receives empty stdin", () => {
+      expect(() => parseToolArgs(["."], {}, "")).toThrow(/stdin is not valid JSON/i);
+      expect(() => parseToolArgs(["."], {}, "")).toThrow(/requested with '\.'/i);
     });
 
-    it("falls through to normal parsing when stdinContent is not valid JSON", () => {
+    it("throws a parse error when explicit JSON payload mode receives invalid JSON", () => {
       const schemaProperties = { body: { type: "string" } };
 
-      const { args } = parseToolArgs(["."], schemaProperties, "not json at all");
-
-      expect(args).toEqual({});
+      expect(() => parseToolArgs(["."], schemaProperties, "not json at all")).toThrow(/stdin is not valid JSON/i);
+      expect(() => parseToolArgs(["."], schemaProperties, "not json at all")).toThrow(/requested with '\.'/i);
     });
 
-    it("falls through when JSON is an array rather than an object", () => {
-      const { args } = parseToolArgs(["."], {}, '["a","b","c"]');
+    it("throws when JSON payload mode receives non-object JSON", () => {
+      expect(() => parseToolArgs(["."], {}, '["a","b","c"]')).toThrow(/payload must be an object/i);
+    });
+
+    it("throws a parse error when no-flag piped stdin payload is invalid JSON", () => {
+      expect(() => parseToolArgs([], {}, "{invalid json")).toThrow(/stdin is not valid JSON/i);
+      expect(() => parseToolArgs([], {}, "{invalid json")).toThrow(/from piped stdin with no flags/i);
+    });
+
+    it("throws a parse error when no-flag piped stdin payload is whitespace-only", () => {
+      expect(() => parseToolArgs([], {}, "   \n   ")).toThrow(/stdin is not valid JSON/i);
+      expect(() => parseToolArgs([], {}, "   \n   ")).toThrow(/from piped stdin with no flags/i);
+    });
+
+    it("falls through to empty args for no-flag mode when stdin is truly empty", () => {
+      const { args } = parseToolArgs([], {}, "");
 
       expect(args).toEqual({});
     });
@@ -697,6 +875,254 @@ describe("mcp_cli_bridge.cjs", () => {
     });
   });
 
+  describe("per-field stdin mode with JSON stdin — field extraction", () => {
+    it("extracts matching field from JSON stdin when --body . is used (space-separated)", () => {
+      // Root cause of gh-aw-workshop#2118: agent piped JSON payload and used --body .
+      // expecting the body field to be extracted, but the entire JSON string ended up as body.
+      const schemaProperties = { title: { type: "string" }, body: { type: "string" } };
+      const stdinContent = '{"title":"Fix bug","body":"This PR fixes the issue."}';
+
+      const { args } = parseToolArgs(["--title", "Fix bug", "--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ title: "Fix bug", body: "This PR fixes the issue." });
+    });
+
+    it("extracts matching field from JSON stdin when --body=. is used (equals-separated)", () => {
+      const schemaProperties = { title: { type: "string" }, body: { type: "string" } };
+      const stdinContent = '{"title":"Fix bug","body":"Details here."}';
+
+      const { args } = parseToolArgs(["--title", "Fix bug", "--body=."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ title: "Fix bug", body: "Details here." });
+    });
+
+    it("extracts both title and body when --title . --body . used with JSON stdin", () => {
+      const schemaProperties = { title: { type: "string" }, body: { type: "string" } };
+      const stdinContent = '{"title":"Fix: Bug #123","body":"This PR fixes bug #123."}';
+
+      const { args } = parseToolArgs(["--title", ".", "--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ title: "Fix: Bug #123", body: "This PR fixes bug #123." });
+    });
+
+    it("falls back to raw stdin when JSON does not contain the target key", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const stdinContent = '{"other_field":"value"}';
+
+      const { args } = parseToolArgs(["--body", "."], schemaProperties, stdinContent);
+
+      // No 'body' key in JSON → use raw stdin content
+      expect(args).toEqual({ body: stdinContent });
+    });
+
+    it("falls back to raw stdin when stdin is not a JSON object", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const stdinContent = "This is a long body from stdin.";
+
+      const { args } = parseToolArgs(["--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ body: stdinContent });
+    });
+
+    it("falls back to raw stdin when stdin is a JSON array", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const stdinContent = '["item1","item2"]';
+
+      const { args } = parseToolArgs(["--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ body: stdinContent });
+    });
+
+    it("falls back to raw stdin when stdin is invalid JSON", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const stdinContent = '{"body": not-valid-json}';
+
+      const { args } = parseToolArgs(["--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ body: stdinContent });
+    });
+
+    it("resolves dash/underscore aliased JSON key to canonical schema key", () => {
+      const schemaProperties = { issue_number: { type: "integer" } };
+      const stdinContent = '{"issue-number":42}';
+
+      const { args } = parseToolArgs(["--issue_number", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ issue_number: 42 });
+    });
+
+    it("preserves non-string JSON values extracted from stdin (e.g. boolean, number)", () => {
+      const schemaProperties = { draft: { type: "boolean" }, count: { type: "integer" } };
+      const stdinContent = '{"draft":true,"count":5}';
+
+      const { args: draftArgs } = parseToolArgs(["--draft", "."], schemaProperties, stdinContent);
+      const { args: countArgs } = parseToolArgs(["--count", "."], schemaProperties, stdinContent);
+
+      expect(draftArgs).toEqual({ draft: true });
+      expect(countArgs).toEqual({ count: 5 });
+    });
+
+    it("handles multiline JSON payload with --body . correctly", () => {
+      const schemaProperties = { title: { type: "string" }, body: { type: "string" } };
+      const stdinContent = `{
+  "title": "Fix bug",
+  "body": "### Summary\\n\\nDetails here."
+}`;
+
+      const { args } = parseToolArgs(["--title", "Fix bug", "--body", "."], schemaProperties, stdinContent);
+
+      expect(args).toEqual({ title: "Fix bug", body: "### Summary\n\nDetails here." });
+    });
+  });
+
+  describe("tryExtractJsonFieldFromStdin", () => {
+    it("extracts a field value from a JSON object string", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const result = tryExtractJsonFieldFromStdin(
+        '{"title":"Fix","body":"PR description"}',
+        "body",
+        schemaProperties,
+        new Map([
+          ["title", "title"],
+          ["body", "body"],
+        ]),
+        new Set()
+      );
+      expect(result).toBe("PR description");
+    });
+
+    it("returns undefined when the key is absent from the JSON", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const result = tryExtractJsonFieldFromStdin('{"title":"Fix"}', "body", schemaProperties, new Map([["title", "title"]]), new Set());
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined for non-object JSON (array)", () => {
+      const result = tryExtractJsonFieldFromStdin('["a","b"]', "body", {}, new Map(), new Set());
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined for invalid JSON", () => {
+      const result = tryExtractJsonFieldFromStdin("{not valid}", "body", {}, new Map(), new Set());
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined for plain text (not starting with {)", () => {
+      const result = tryExtractJsonFieldFromStdin("plain text", "body", {}, new Map(), new Set());
+      expect(result).toBeUndefined();
+    });
+
+    it("preserves null value extracted from JSON stdin (does not fall back to raw stdin)", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const result = tryExtractJsonFieldFromStdin('{"body":null}', "body", schemaProperties, new Map([["body", "body"]]), new Set());
+      expect(result).toBeNull();
+    });
+
+    it("preserves false boolean extracted from JSON stdin", () => {
+      const schemaProperties = { draft: { type: "boolean" } };
+      const result = tryExtractJsonFieldFromStdin('{"draft":false}', "draft", schemaProperties, new Map([["draft", "draft"]]), new Set());
+      expect(result).toBe(false);
+    });
+
+    it("preserves 0 number extracted from JSON stdin", () => {
+      const schemaProperties = { count: { type: "number" } };
+      const result = tryExtractJsonFieldFromStdin('{"count":0}', "count", schemaProperties, new Map([["count", "count"]]), new Set());
+      expect(result).toBe(0);
+    });
+  });
+
+  describe("unescapeCliStringArg", () => {
+    it("converts \\n to an actual newline", () => {
+      expect(unescapeCliStringArg("Hello\\nWorld")).toBe("Hello\nWorld");
+    });
+
+    it("converts \\t to a tab character", () => {
+      expect(unescapeCliStringArg("col1\\tcol2")).toBe("col1\tcol2");
+    });
+
+    it("converts \\r to a carriage return", () => {
+      expect(unescapeCliStringArg("line1\\rline2")).toBe("line1\rline2");
+    });
+
+    it("converts \\b to a backspace character", () => {
+      expect(unescapeCliStringArg("abc\\bdef")).toBe("abc\bdef");
+    });
+
+    it("converts \\f to a form-feed character", () => {
+      expect(unescapeCliStringArg("page1\\fpage2")).toBe("page1\fpage2");
+    });
+
+    it("converts \\\\ to a single backslash", () => {
+      expect(unescapeCliStringArg("path\\\\to\\\\file")).toBe("path\\to\\file");
+    });
+
+    it("converts \\uXXXX escapes to their Unicode code points", () => {
+      expect(unescapeCliStringArg("quote:\\u2019")).toBe("quote:’");
+    });
+
+    it("converts \\\\n to a literal backslash followed by n (not a newline)", () => {
+      // \\n in the CLI arg should become \n (backslash + n), not a newline
+      expect(unescapeCliStringArg("Hello\\\\nWorld")).toBe("Hello\\nWorld");
+    });
+
+    it("leaves unknown escape sequences unchanged", () => {
+      expect(unescapeCliStringArg("value\\xunknown")).toBe("value\\xunknown");
+    });
+
+    it("handles multiple escape sequences in the same string", () => {
+      expect(unescapeCliStringArg("line1\\nline2\\nline3")).toBe("line1\nline2\nline3");
+    });
+
+    it("returns a plain string unchanged when no escape sequences are present", () => {
+      expect(unescapeCliStringArg("no escapes here")).toBe("no escapes here");
+    });
+  });
+
+  describe("parseToolArgs — body-like string escape unescaping", () => {
+    it("unescapes \\n in body CLI flag arguments", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const { args } = parseToolArgs(["--body", "Hello\\nWorld"], schemaProperties);
+      expect(args).toEqual({ body: "Hello\nWorld" });
+    });
+
+    it("unescapes \\n in body --key=value arguments", () => {
+      const schemaProperties = { body: { type: "string" } };
+      const { args } = parseToolArgs(["--body=Hello\\nWorld"], schemaProperties);
+      expect(args).toEqual({ body: "Hello\nWorld" });
+    });
+
+    it("unescapes \\n for nullable draft body fields", () => {
+      const schemaProperties = { draft_body: { type: ["string", "null"] } };
+      const { args } = parseToolArgs(["--draft-body", "line1\\nline2"], schemaProperties);
+      expect(args).toEqual({ draft_body: "line1\nline2" });
+    });
+
+    it("does not unescape generic string fields like paths", () => {
+      const schemaProperties = { path: { type: "string" } };
+      const { args } = parseToolArgs(["--path", "C:\\temp\\new_file"], schemaProperties);
+      expect(args).toEqual({ path: "C:\\temp\\new_file" });
+    });
+
+    it("does not unescape \\n when schema type is integer", () => {
+      // A value with \n for an integer field should not be unescaped (it would fail coercion anyway)
+      const schemaProperties = { count: { type: "integer" } };
+      const { args } = parseToolArgs(["--count", "5\\n"], schemaProperties);
+      // "5\n" is not a valid integer, falls through to rawValue
+      expect(args).toEqual({ count: "5\\n" });
+    });
+
+    it("produces actual newlines in body fields matching JSON stdin mode behaviour", () => {
+      // Verify that --body "title\n\nbody" (CLI flags) gives the same result as
+      // JSON stdin with {"body":"title\n\nbody"}
+      const schemaProperties = { body: { type: ["string", "null"] } };
+
+      const { args: cliArgs } = parseToolArgs(["--body", "title\\n\\nbody"], schemaProperties);
+      const { args: jsonArgs } = parseToolArgs(["."], schemaProperties, '{"body":"title\\n\\nbody"}');
+
+      expect(cliArgs).toEqual(jsonArgs);
+    });
+  });
+
   describe("writeStdoutAndFlush", () => {
     it("resolves immediately when stdout.write returns true (no backpressure)", async () => {
       // The beforeEach mock captures chunks and returns true (no backpressure).
@@ -708,6 +1134,7 @@ describe("mcp_cli_bridge.cjs", () => {
 
     it("waits for drain event when stdout.write returns false (pipe buffer full)", async () => {
       // Arrange: stdout.write returns false (simulates full pipe buffer like a ~64KiB payload)
+      /** @type {any} */
       let drainCb = null;
       stdoutSpy.mockImplementation(chunk => {
         stdoutChunks.push(String(chunk));
@@ -752,6 +1179,7 @@ describe("mcp_cli_bridge.cjs", () => {
         return false; // signal backpressure
       });
       const error = new Error("EPIPE");
+      /** @type {any} */
       let errorCb = null;
       const onceStub = vi.spyOn(process.stdout, "once").mockImplementation((event, cb) => {
         if (event === "error") {
@@ -778,6 +1206,7 @@ describe("mcp_cli_bridge.cjs", () => {
       // returning false would allow subsequent core.info calls to reach stderr
       // while stdout was still buffering, corrupting combined output.
       const callOrder = [];
+      /** @type {any} */
       let drainCb = null;
 
       stdoutSpy.mockImplementation(chunk => {
@@ -821,6 +1250,281 @@ describe("mcp_cli_bridge.cjs", () => {
       } finally {
         onceStub.mockRestore();
       }
+    });
+  });
+
+  describe("main — zero-argument tool routing via local MCP server", () => {
+    /** @type {import("http").Server} */
+    let server;
+    /** @type {string} */
+    let serverUrl;
+    /** @type {object[]} */
+    let recordedBodies;
+    /** @type {string} */
+    let toolsFile;
+    /** @type {string[]} */
+    let savedArgv;
+
+    /** @type {Array<{name: string, description: string, inputSchema: object}>} */
+    const zeroInputTools = [
+      {
+        name: "dispatch_code_factory",
+        description: "Record a dispatch code factory safe-output item",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    ];
+
+    /** @type {Array<{name: string, description: string, inputSchema: object}>} */
+    const requiredInputTools = [
+      {
+        name: "create_issue",
+        description: "Create an issue",
+        inputSchema: {
+          type: "object",
+          properties: { title: { type: "string" } },
+          required: ["title"],
+          additionalProperties: false,
+        },
+      },
+    ];
+
+    /**
+     * Start a minimal MCP HTTP server that records request bodies and returns
+     * appropriate responses for each protocol step.
+     *
+     * @returns {Promise<void>}
+     */
+    async function startMcpServer() {
+      recordedBodies = [];
+      server = await new Promise(resolve => {
+        const s = http.createServer((req, res) => {
+          let body = "";
+          req.on("data", chunk => {
+            body += chunk;
+          });
+          req.on("end", () => {
+            let parsed;
+            try {
+              parsed = JSON.parse(body);
+            } catch {
+              parsed = {};
+            }
+            recordedBodies.push(parsed);
+
+            res.setHeader("Content-Type", "application/json");
+
+            if (parsed.method === "initialize") {
+              res.setHeader("mcp-session-id", "test-session-001");
+              res.end(JSON.stringify({ jsonrpc: "2.0", id: parsed.id, result: { capabilities: {} } }));
+            } else if (parsed.method === "tools/call") {
+              res.end(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: parsed.id,
+                  result: { content: [{ type: "text", text: "ok" }] },
+                })
+              );
+            } else {
+              // notifications/initialized, ping, etc.
+              res.end(JSON.stringify({ jsonrpc: "2.0", result: {} }));
+            }
+          });
+        });
+        s.listen(0, "127.0.0.1", () => resolve(s));
+      });
+
+      const addr = /** @type {import("net").AddressInfo} */ server.address();
+      serverUrl = `http://127.0.0.1:${addr.port}`;
+    }
+
+    beforeEach(async () => {
+      savedArgv = process.argv;
+      await startMcpServer();
+    });
+
+    afterEach(async () => {
+      process.argv = savedArgv;
+      if (toolsFile && fs.existsSync(toolsFile)) {
+        fs.unlinkSync(toolsFile);
+      }
+      await new Promise(resolve => server.close(resolve));
+    });
+
+    /**
+     * Write a tools file and configure process.argv for a main() call.
+     *
+     * @param {object[]} tools
+     * @param {string[]} userArgs
+     */
+    function setupMainCall(tools, userArgs) {
+      toolsFile = path.join(os.tmpdir(), `test-bridge-tools-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+      fs.writeFileSync(toolsFile, JSON.stringify(tools));
+      process.argv = ["node", "mcp_cli_bridge.cjs", "--server-name", "safeoutputs", "--server-url", serverUrl, "--tools-file", toolsFile, "--api-key", "test-key", ...userArgs];
+    }
+
+    it("reaches MCP tools/call with {} for a zero-input tool (bare invocation)", async () => {
+      setupMainCall(zeroInputTools, ["dispatch_code_factory"]);
+
+      await main();
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeDefined();
+      expect(toolsCallBody.params.name).toBe("dispatch_code_factory");
+      expect(toolsCallBody.params.arguments).toEqual({});
+    });
+
+    it("does not include tool argument values in live logs", async () => {
+      const sentinel = "sentinel-tool-argument";
+      setupMainCall(requiredInputTools, ["create_issue", "--title", sentinel]);
+
+      await main();
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody.params.arguments).toEqual({ title: sentinel });
+      expect(JSON.stringify(global.core.info.mock.calls)).not.toContain(sentinel);
+    });
+
+    it("reaches MCP tools/call with {} for a zero-input tool (piped {} via . sentinel)", async () => {
+      setupMainCall(zeroInputTools, ["dispatch_code_factory", "."]);
+
+      // Simulate piped `{}` via the . sentinel with stdinContent = "{}"
+      const readStdinSyncSpy = vi.spyOn(/** @type {any} */ require("./mcp_cli_bridge.cjs"), "readStdinSync");
+      // readStdinSync is a module-level function already called inside main(); we need
+      // to intercept at the module level. Since we cannot easily do that here, simulate
+      // the piped-stdin path by using process.stdin.isTTY = undefined so hasStdinJsonPayload
+      // returns true for the empty-args path, and by spying on fs.readSync to return "{}".
+      const origIsTTY = process.stdin.isTTY;
+      // @ts-ignore
+      process.stdin.isTTY = undefined;
+
+      const fsReadSyncSpy = vi.spyOn(fs, "readSync").mockImplementationOnce((_fd, buf, _offset, length) => {
+        const encoded = Buffer.from("{}");
+        encoded.copy(/** @type {Buffer} */ buf, 0, 0, Math.min(encoded.length, length));
+        return Math.min(encoded.length, length);
+      });
+      fsReadSyncSpy.mockImplementationOnce(() => 0); // EOF on second read
+
+      try {
+        setupMainCall(zeroInputTools, ["dispatch_code_factory"]);
+        await main();
+
+        const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+        expect(toolsCallBody).toBeDefined();
+        expect(toolsCallBody.params.name).toBe("dispatch_code_factory");
+        expect(toolsCallBody.params.arguments).toEqual({});
+      } finally {
+        process.stdin.isTTY = origIsTTY;
+        fsReadSyncSpy.mockRestore();
+        readStdinSyncSpy.mockRestore?.();
+      }
+    });
+
+    it("shows help and does NOT reach MCP tools/call for a required-input tool called with no args", async () => {
+      setupMainCall(requiredInputTools, ["create_issue"]);
+
+      await main();
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeUndefined();
+
+      expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("No arguments provided for 'create_issue'"));
+    });
+
+    it("fails with JSON parse diagnostics instead of help when '.' payload is invalid JSON", async () => {
+      setupMainCall(requiredInputTools, ["create_issue", "."]);
+
+      const fsReadSyncSpy = vi.spyOn(fs, "readSync").mockImplementationOnce((_fd, buf, _offset, length) => {
+        const encoded = Buffer.from('{"title":"broken "json"}');
+        encoded.copy(/** @type {Buffer} */ buf, 0, 0, Math.min(encoded.length, length));
+        return Math.min(encoded.length, length);
+      });
+      fsReadSyncSpy.mockImplementationOnce(() => 0); // EOF
+
+      try {
+        await expect(main()).resolves.toBeUndefined();
+      } finally {
+        fsReadSyncSpy.mockRestore();
+      }
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeUndefined();
+      expect(global.core.warning).not.toHaveBeenCalledWith(expect.stringContaining("No arguments provided for 'create_issue'"));
+      expect(stderrChunks.join("")).toContain("stdin is not valid JSON");
+      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Argument parsing failed"));
+    });
+
+    it("fails with JSON parse diagnostics instead of help when '.' payload is whitespace-only", async () => {
+      setupMainCall(requiredInputTools, ["create_issue", "."]);
+
+      const fsReadSyncSpy = vi.spyOn(fs, "readSync").mockImplementationOnce((_fd, buf, _offset, length) => {
+        const encoded = Buffer.from("   \n   ");
+        encoded.copy(/** @type {Buffer} */ buf, 0, 0, Math.min(encoded.length, length));
+        return Math.min(encoded.length, length);
+      });
+      fsReadSyncSpy.mockImplementationOnce(() => 0); // EOF
+
+      try {
+        await expect(main()).resolves.toBeUndefined();
+      } finally {
+        fsReadSyncSpy.mockRestore();
+      }
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeUndefined();
+      expect(global.core.warning).not.toHaveBeenCalledWith(expect.stringContaining("No arguments provided for 'create_issue'"));
+      expect(stderrChunks.join("")).toContain("stdin is not valid JSON");
+      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Argument parsing failed"));
+    });
+
+    it("fails with JSON parse diagnostics for no-flag whitespace-only piped stdin", async () => {
+      const origIsTTY = process.stdin.isTTY;
+      // @ts-ignore
+      process.stdin.isTTY = undefined;
+      setupMainCall(requiredInputTools, ["create_issue"]);
+
+      const fsReadSyncSpy = vi.spyOn(fs, "readSync").mockImplementationOnce((_fd, buf, _offset, length) => {
+        const encoded = Buffer.from("   \n   ");
+        encoded.copy(/** @type {Buffer} */ buf, 0, 0, Math.min(encoded.length, length));
+        return Math.min(encoded.length, length);
+      });
+      fsReadSyncSpy.mockImplementationOnce(() => 0); // EOF
+
+      try {
+        await expect(main()).resolves.toBeUndefined();
+      } finally {
+        process.stdin.isTTY = origIsTTY;
+        fsReadSyncSpy.mockRestore();
+      }
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeUndefined();
+      expect(global.core.warning).not.toHaveBeenCalledWith(expect.stringContaining("No arguments provided for 'create_issue'"));
+      expect(stderrChunks.join("")).toContain("stdin is not valid JSON");
+      expect(global.core.setFailed).toHaveBeenCalledWith(expect.stringContaining("Argument parsing failed"));
+    });
+
+    it("still shows help for no-flag piped stdin when stdin is truly empty", async () => {
+      const origIsTTY = process.stdin.isTTY;
+      // @ts-ignore
+      process.stdin.isTTY = undefined;
+      setupMainCall(requiredInputTools, ["create_issue"]);
+
+      const fsReadSyncSpy = vi.spyOn(fs, "readSync").mockImplementationOnce(() => 0); // EOF immediately
+
+      try {
+        await main();
+      } finally {
+        process.stdin.isTTY = origIsTTY;
+        fsReadSyncSpy.mockRestore();
+      }
+
+      const toolsCallBody = recordedBodies.find(b => b.method === "tools/call");
+      expect(toolsCallBody).toBeUndefined();
+      expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("No arguments provided for 'create_issue'"));
     });
   });
 });

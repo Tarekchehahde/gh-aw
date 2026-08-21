@@ -14,6 +14,7 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
   - shared/otlp.md
 tools:
@@ -61,9 +62,6 @@ steps:
       EOF
 
 
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # Mergefest - Merge Main into Pull Request Branch

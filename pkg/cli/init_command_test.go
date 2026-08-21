@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/github/gh-aw/pkg/testutil"
+	"github.com/spf13/pflag"
 )
 
 func TestNewInitCommand(t *testing.T) {
@@ -92,8 +93,8 @@ func TestNewInitCommand(t *testing.T) {
 		t.Error("Expected 'codespaces' flag to be defined")
 		return
 	}
-	if !strings.Contains(codespaceFlag.Usage, "or use with an empty value for the current repo only") {
-		t.Errorf("Expected codespaces flag help text to include article fixes, got %q", codespaceFlag.Usage)
+	if !strings.Contains(codespaceFlag.Usage, "or use without a value for the current repo only") {
+		t.Errorf("Expected codespaces flag help text to mention value-optional usage, got %q", codespaceFlag.Usage)
 	}
 
 	// String flags without NoOptDefVal require an explicit value
@@ -101,9 +102,9 @@ func TestNewInitCommand(t *testing.T) {
 		t.Errorf("Expected codespaces flag default to be '', got %q", codespaceFlag.DefValue)
 	}
 
-	// Verify NoOptDefVal is empty (flag always requires an explicit value, avoids string[=" "] in help)
-	if codespaceFlag.NoOptDefVal != "" {
-		t.Errorf("Expected codespaces flag NoOptDefVal to be '' (empty), got %q", codespaceFlag.NoOptDefVal)
+	// Verify NoOptDefVal is set so --codespaces can be used without a value
+	if codespaceFlag.NoOptDefVal == "" {
+		t.Errorf("Expected codespaces flag NoOptDefVal to be non-empty (optional value), got %q", codespaceFlag.NoOptDefVal)
 	}
 
 	// Check create-pull-request flags
@@ -122,6 +123,55 @@ func TestNewInitCommand(t *testing.T) {
 	// Verify --pr flag is hidden
 	if !prFlag.Hidden {
 		t.Error("Expected 'pr' flag to be hidden")
+	}
+}
+
+func TestInitCommandCodespacesFlagParsing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantValue string
+		wantArgs  []string
+	}{
+		{
+			name:      "bare flag uses no-opt default",
+			args:      []string{"--codespaces"},
+			wantValue: " ",
+			wantArgs:  nil,
+		},
+		{
+			name:      "equals form consumes explicit value",
+			args:      []string{"--codespaces=repo1,repo2"},
+			wantValue: "repo1,repo2",
+			wantArgs:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := NewInitCommand()
+			flagSet := pflag.NewFlagSet("init", pflag.ContinueOnError)
+			flagSet.AddFlagSet(cmd.Flags())
+
+			if err := flagSet.Parse(tt.args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", tt.args, err)
+			}
+
+			gotValue, err := flagSet.GetString("codespaces")
+			if err != nil {
+				t.Fatalf("GetString(codespaces) failed: %v", err)
+			}
+			if gotValue != tt.wantValue {
+				t.Fatalf("codespaces value = %q, want %q", gotValue, tt.wantValue)
+			}
+			if gotArgs := flagSet.Args(); !equalStrings(gotArgs, tt.wantArgs) {
+				t.Fatalf("remaining args = %v, want %v", gotArgs, tt.wantArgs)
+			}
+		})
 	}
 }
 
@@ -161,6 +211,18 @@ func TestInitCommandHelp(t *testing.T) {
 	}
 }
 
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestInitCommandInteractiveModeDetection(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +242,7 @@ func TestInitCommandInteractiveModeDetection(t *testing.T) {
 	}
 }
 
-func TestInitCommandCreatesCustomAgentByDefault(t *testing.T) {
+func TestInitCommandRequiresCopilotEngineForCopilotArtifacts(t *testing.T) {
 	tmpDir := testutil.TempDir(t, "test-*")
 
 	originalDir, err := os.Getwd()
@@ -212,12 +274,40 @@ func TestInitCommandCreatesCustomAgentByDefault(t *testing.T) {
 	}
 
 	agentPath := filepath.Join(".github", "agents", "agentic-workflows.md")
+	if _, err := os.Stat(agentPath); !os.IsNotExist(err) {
+		t.Errorf("Expected Agentic Workflows custom agent file to not be created by default")
+	}
+	if _, err := os.Stat(filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")); err != nil {
+		t.Errorf("Expected dispatcher skill file to be created by default: %v", err)
+	}
+	if _, err := os.Stat(mcpConfigFilePath); !os.IsNotExist(err) {
+		t.Error("Expected .github/mcp.json to not be created by default")
+	}
+	if _, err := os.Stat(filepath.Join(".github", "workflows", "copilot-setup-steps.yml")); !os.IsNotExist(err) {
+		t.Error("Expected copilot-setup-steps.yml to not be created by default")
+	}
+
+	cmd = NewInitCommand()
+	cmd.SetArgs([]string{"--engine", "copilot"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("init --engine copilot failed: %v", err)
+	}
+
 	agentContent, err := os.ReadFile(agentPath)
 	if err != nil {
 		t.Fatalf("Expected Agentic Workflows custom agent file to be created at %s: %v", agentPath, err)
 	}
 	if !strings.Contains(string(agentContent), "name: Agentic Workflows") {
 		t.Error("Expected Agentic Workflows custom agent file to use the Agentic Workflows name")
+	}
+	if _, err := os.Stat(filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")); err != nil {
+		t.Errorf("Expected dispatcher skill file with --engine copilot: %v", err)
+	}
+	if _, err := os.Stat(mcpConfigFilePath); err != nil {
+		t.Errorf("Expected .github/mcp.json with --engine copilot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(".github", "workflows", "copilot-setup-steps.yml")); err != nil {
+		t.Errorf("Expected copilot-setup-steps.yml with --engine copilot: %v", err)
 	}
 }
 
@@ -249,8 +339,8 @@ func TestInitRepositoryBasic(t *testing.T) {
 		t.Fatalf("Failed to set git user.email: %v", err)
 	}
 
-	// Test basic init with MCP enabled by default (mcp=true, noMcp=false behavior)
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	// Test basic init with the Copilot engine and MCP enabled.
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) failed: %v", err)
 	}
@@ -267,20 +357,20 @@ func TestInitRepositoryBasic(t *testing.T) {
 		t.Fatalf("Failed to read .gitattributes: %v", err)
 	}
 
-	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true merge=ours"
+	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true"
 	if !strings.Contains(string(content), expectedEntry) {
 		t.Errorf("Expected .gitattributes to contain %q", expectedEntry)
 	}
 
-	// Verify MCP files were created by default
+	// Verify Copilot MCP files were created.
 	mcpConfigPath := mcpConfigFilePath
 	if _, err := os.Stat(mcpConfigPath); os.IsNotExist(err) {
-		t.Error("Expected .github/mcp.json to be created by default")
+		t.Error("Expected .github/mcp.json to be created for the Copilot engine")
 	}
 
 	setupStepsPath := filepath.Join(".github", "workflows", "copilot-setup-steps.yml")
 	if _, err := os.Stat(setupStepsPath); os.IsNotExist(err) {
-		t.Error("Expected .github/workflows/copilot-setup-steps.yml to be created by default")
+		t.Error("Expected .github/workflows/copilot-setup-steps.yml to be created for the Copilot engine")
 	}
 
 	skillPath := filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")
@@ -329,7 +419,7 @@ func TestInitRepositoryWithMCP(t *testing.T) {
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
 	// Test init with MCP explicitly enabled (same as default)
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) with MCP failed: %v", err)
 	}
@@ -372,7 +462,7 @@ func TestInitRepositoryWithNoMCP(t *testing.T) {
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
 	// Test init with --no-mcp flag (mcp=false)
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: false, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: false, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) with --no-mcp failed: %v", err)
 	}
@@ -423,7 +513,7 @@ func TestInitRepositoryWithNoSkill(t *testing.T) {
 	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 	_ = exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	err = InitRepository(InitOptions{Verbose: false, Skill: false, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: false, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository() with no skill failed: %v", err)
 	}
@@ -458,7 +548,7 @@ func TestInitRepositoryWithNoAgent(t *testing.T) {
 	_ = exec.Command("git", "config", "user.name", "Test User").Run()
 	_ = exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: false, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: false, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository() with no agent failed: %v", err)
 	}
@@ -498,8 +588,8 @@ func TestInitRepositoryWithNonCopilotEngineSkipsCopilotArtifacts(t *testing.T) {
 		t.Fatalf("InitRepository with --engine claude failed: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")); err == nil {
-		t.Error("Expected dispatcher skill file to NOT be created for non-Copilot engine")
+	if _, err := os.Stat(filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")); err != nil {
+		t.Errorf("Expected dispatcher skill file to be created for non-Copilot engine: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(".github", "agents", "agentic-workflows.md")); err == nil {
 		t.Error("Expected Agentic Workflows custom agent file to NOT be created for non-Copilot engine")
@@ -545,7 +635,7 @@ func TestInitRepositoryRemovesLegacyDispatcherAgentFile(t *testing.T) {
 		t.Fatalf("Failed to create legacy agent file: %v", err)
 	}
 
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository() failed: %v", err)
 	}
@@ -585,9 +675,10 @@ func TestInitRepositoryWithMCPBackwardCompatibility(t *testing.T) {
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
 	// Test init with deprecated --mcp flag for backward compatibility (mcp=true)
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
-	if err != nil {
-		t.Fatalf("InitRepository(, false, false, false, nil) with deprecated --mcp flag failed: %v", err)
+	cmd := NewInitCommand()
+	cmd.SetArgs([]string{"--engine", "copilot", "--mcp"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("init --engine copilot --mcp failed: %v", err)
 	}
 
 	// Verify .github/mcp.json was created
@@ -627,7 +718,7 @@ func TestInitRepositoryVerbose(t *testing.T) {
 	exec.Command("git", "config", "user.name", "Test User").Run()
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	// Test verbose mode with MCP enabled by default (should not error, just produce more output)
+	// Test verbose mode (should not error, just produce more output).
 	err = InitRepository(InitOptions{Verbose: true, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) in verbose mode failed: %v", err)
@@ -688,14 +779,14 @@ func TestInitRepositoryIdempotent(t *testing.T) {
 	exec.Command("git", "config", "user.name", "Test User").Run()
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	// Run init twice with MCP enabled by default
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	// Run init twice with Copilot engine options.
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("First InitRepository(, false, false, false, nil) failed: %v", err)
 	}
 
 	// Second run should be idempotent
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("Second InitRepository(, false, false, false, nil) failed: %v", err)
 	}
@@ -706,7 +797,7 @@ func TestInitRepositoryIdempotent(t *testing.T) {
 		t.Fatalf("Failed to read .gitattributes: %v", err)
 	}
 
-	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true merge=ours"
+	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true"
 
 	// Count occurrences - should only appear once
 	count := strings.Count(string(content), expectedEntry)
@@ -740,12 +831,12 @@ func TestInitRepositoryWithMCPIdempotent(t *testing.T) {
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
 	// Run init with MCP twice
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("First InitRepository(, false, false, false, nil) with MCP failed: %v", err)
 	}
 
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("Second InitRepository(, false, false, false, nil) with MCP failed: %v", err)
 	}
@@ -786,8 +877,8 @@ func TestInitRepositoryCreatesDirectories(t *testing.T) {
 	exec.Command("git", "config", "user.name", "Test User").Run()
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	// Run init with MCP
-	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
+	// Run init with Copilot MCP
+	err = InitRepository(InitOptions{Verbose: false, Engine: "copilot", Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) failed: %v", err)
 	}
@@ -844,7 +935,7 @@ func TestInitRepositoryErrorHandling(t *testing.T) {
 		t.Fatalf("Failed to change to temp directory: %v", err)
 	}
 
-	// Test init without git repo (with MCP enabled by default)
+	// Test init without a git repository.
 	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 
 	// Should handle error gracefully or return error
@@ -887,7 +978,7 @@ func TestInitRepositoryWithExistingFiles(t *testing.T) {
 		t.Fatalf("Failed to create existing .gitattributes: %v", err)
 	}
 
-	// Run init with MCP enabled by default
+	// Run init with default options.
 	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: false, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) failed: %v", err)
@@ -906,7 +997,7 @@ func TestInitRepositoryWithExistingFiles(t *testing.T) {
 		t.Error("Expected existing content to be preserved")
 	}
 
-	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true merge=ours"
+	expectedEntry := ".github/workflows/*.lock.yml linguist-generated=true"
 	if !strings.Contains(contentStr, expectedEntry) {
 		t.Error("Expected new entry to be added")
 	}
@@ -936,7 +1027,7 @@ func TestInitRepositoryWithCodespace(t *testing.T) {
 	exec.Command("git", "config", "user.name", "Test User").Run()
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	// Test init with --codespaces flag (with MCP enabled by default and additional repos)
+	// Test init with --codespaces and additional repositories.
 	additionalRepos := []string{"org/repo1", "owner/repo2"}
 	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: additionalRepos, CodespaceEnabled: true, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
@@ -1002,7 +1093,7 @@ func TestInitCommandWithCodespacesNoArgs(t *testing.T) {
 	exec.Command("git", "config", "user.name", "Test User").Run()
 	exec.Command("git", "config", "user.email", "test@example.com").Run()
 
-	// Test init with --codespaces flag (no additional repos, MCP enabled by default)
+	// Test init with --codespaces and no additional repositories.
 	err = InitRepository(InitOptions{Verbose: false, Skill: true, Agent: true, MCP: true, CodespaceRepos: []string{}, CodespaceEnabled: true, Completions: false, CreatePR: false, RootCmd: nil})
 	if err != nil {
 		t.Fatalf("InitRepository(, false, false, false, nil) with codespaces (no args) failed: %v", err)

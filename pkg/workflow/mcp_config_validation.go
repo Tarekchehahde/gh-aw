@@ -18,12 +18,13 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/setutil"
 	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
-var mcpValidationLog = newValidationLogger("mcp_config")
+var mcpValidationLog = logger.New("workflow:mcp_config_validation")
 
 // builtInToolNames is the canonical set of recognized built-in tool names for the tools: section.
 // Any key in tools: that is not in this set is a compile error.
@@ -172,6 +173,7 @@ func getRawMCPConfig(toolConfig map[string]any) (map[string]any, error) {
 		"description":    {}, // for cache-memory
 		"retention-days": {   // for cache-memory
 		},
+		"required": {}, // startup connectivity criticality for MCP servers
 	}
 
 	// Check new format: direct fields in tool config

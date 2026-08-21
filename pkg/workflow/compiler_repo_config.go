@@ -1,7 +1,9 @@
 package workflow
 
 import (
+	"fmt"
 	"maps"
+	"os"
 	"strings"
 )
 
@@ -17,6 +19,19 @@ func (c *Compiler) loadRepoConfig() (*RepoConfig, error) {
 	c.repoConfigLoaded = true
 	if c.repoConfigErr != nil {
 		repoConfigLog.Printf("loadRepoConfig: failed to load repo config: %v", c.repoConfigErr)
+		fmt.Fprintln(
+			os.Stderr,
+			formatCompilerMessage(
+				RepoConfigFileName,
+				"warning",
+				fmt.Sprintf(
+					"failed to load aw.json; compilation will continue with defaults, and action_failure_issue_expires will fall back to %d hours where applicable: %v",
+					DefaultActionFailureIssueExpiresHours,
+					c.repoConfigErr,
+				),
+			),
+		)
+		c.IncrementWarningCount()
 	} else {
 		repoConfigLog.Print("loadRepoConfig: repo config loaded successfully")
 	}
@@ -31,6 +46,24 @@ func (c *Compiler) getCompiledProjectUTCOffset() string {
 		return ""
 	}
 	return strings.TrimSpace(repoConfig.UTC)
+}
+
+// getContainerPinMappings returns a container-pin mapping table from aw.json,
+// or nil when the file is absent, contains no mappings, or fails to load.
+// Each ContainerPinTarget entry is combined into a single "image@digest" string
+// for use by the internal resolution machinery. Callers may freely mutate the
+// returned map.
+func (c *Compiler) getContainerPinMappings() map[string]string {
+	repoConfig, err := c.loadRepoConfig()
+	if err != nil || repoConfig == nil || len(repoConfig.ContainerPins) == 0 {
+		return nil
+	}
+	repoConfigLog.Printf("getContainerPinMappings: loaded %d container-pin mapping(s) from aw.json", len(repoConfig.ContainerPins))
+	cp := make(map[string]string, len(repoConfig.ContainerPins))
+	for k, v := range repoConfig.ContainerPins {
+		cp[k] = v.Image + "@" + v.Digest
+	}
+	return cp
 }
 
 // getActionPinMappings returns a defensive copy of the action-pin mapping table

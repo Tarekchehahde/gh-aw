@@ -12,6 +12,202 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestGitHubMCPToolsPromptBoundsCodeScanningAlertQueries verifies that the
+// github_mcp_tools_prompt.md file includes the required guardrail instructing
+// agents to always bound list_code_scanning_alerts calls with state: open and
+// severity: critical,high. Unbounded queries produce oversized responses that
+// break downstream workflow runs.
+func TestGitHubMCPToolsPromptBoundsCodeScanningAlertQueries(t *testing.T) {
+	promptPath := filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_prompt.md")
+	data, err := os.ReadFile(promptPath)
+	require.NoError(t, err, "should be able to read github_mcp_tools_prompt.md")
+
+	content := string(data)
+
+	assert.Contains(t, content, "list_code_scanning_alerts",
+		"prompt should mention list_code_scanning_alerts to set agent expectations")
+	assert.Contains(t, content, "state: open",
+		"prompt should require state: open to bound list_code_scanning_alerts queries")
+	assert.Contains(t, content, "severity: critical,high",
+		"prompt should require severity: critical,high to bound list_code_scanning_alerts queries")
+}
+
+// TestGitHubMCPToolsWithSafeOutputsPromptBoundsCodeScanningAlertQueries verifies that
+// the github_mcp_tools_with_safeoutputs_prompt.md file includes the same guardrail.
+func TestGitHubMCPToolsWithSafeOutputsPromptBoundsCodeScanningAlertQueries(t *testing.T) {
+	promptPath := filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_with_safeoutputs_prompt.md")
+	data, err := os.ReadFile(promptPath)
+	require.NoError(t, err, "should be able to read github_mcp_tools_with_safeoutputs_prompt.md")
+
+	content := string(data)
+
+	assert.Contains(t, content, "list_code_scanning_alerts",
+		"prompt should mention list_code_scanning_alerts to set agent expectations")
+	assert.Contains(t, content, "state: open",
+		"prompt should require state: open to bound list_code_scanning_alerts queries")
+	assert.Contains(t, content, "severity: critical,high",
+		"prompt should require severity: critical,high to bound list_code_scanning_alerts queries")
+}
+
+// TestGitHubMCPToolsPromptHasFieldSelectionGuidance verifies that both prompt files
+// contain guidance about the fields parameter introduced in GitHub MCP server 1.6.0.
+// Field selection allows agents to request only the fields they need, significantly
+// reducing response size for list/search tools.
+func TestGitHubMCPToolsPromptHasFieldSelectionGuidance(t *testing.T) {
+	promptFiles := []string{
+		filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_prompt.md"),
+		filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_with_safeoutputs_prompt.md"),
+	}
+
+	for _, promptPath := range promptFiles {
+		t.Run(filepath.Base(promptPath), func(t *testing.T) {
+			data, err := os.ReadFile(promptPath)
+			require.NoError(t, err, "should be able to read %s", promptPath)
+
+			content := string(data)
+
+			assert.Contains(t, content, "fields",
+				"prompt should mention fields parameter for response size reduction")
+			assert.Contains(t, content, "list_pull_requests",
+				"prompt should reference list_pull_requests as a tool that supports fields")
+			assert.Contains(t, content, "1.6.0",
+				"prompt should reference the GitHub MCP server version that introduced fields")
+		})
+	}
+}
+
+// TestGitHubMCPToolsPromptHasPartialFileReadGuidance verifies that both prompt
+// files steer agents away from unbounded single-file get_file_contents calls.
+func TestGitHubMCPToolsPromptHasPartialFileReadGuidance(t *testing.T) {
+	promptFiles := []string{
+		filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_prompt.md"),
+		filepath.Join("..", "..", "actions", "setup", "md", "github_mcp_tools_with_safeoutputs_prompt.md"),
+	}
+
+	for _, promptPath := range promptFiles {
+		t.Run(filepath.Base(promptPath), func(t *testing.T) {
+			data, err := os.ReadFile(promptPath)
+			require.NoError(t, err, "should be able to read %s", promptPath)
+
+			content := string(data)
+
+			assert.Contains(t, content, "`fields` only reduces directory listings",
+				"prompt should clarify get_file_contents fields do not reduce single-file content")
+			assert.Contains(t, content, "fields: [name, type, size, path]",
+				"prompt should recommend metadata-only directory listings before file reads")
+			assert.Contains(t, content, "Partial file reads",
+				"prompt should include explicit partial-content guidance")
+			assert.Contains(t, content, "bounded excerpt",
+				"prompt should recommend bounded excerpts for headers or sections")
+		})
+	}
+}
+
+// TestSafeOutputsPromptDoesNotRequireCLI verifies that the base safe-output
+// guidance remains transport-neutral. Some workflows expose safeoutputs as MCP
+// tools rather than CLI commands, so CLI-only guidance can cause agents to
+// finish without emitting any safe-output items.
+func TestSafeOutputsPromptDoesNotRequireCLI(t *testing.T) {
+	promptPath := filepath.Join("..", "..", "actions", "setup", "md", "safe_outputs_prompt.md")
+	data, err := os.ReadFile(promptPath)
+	require.NoError(t, err, "should be able to read safe_outputs_prompt.md")
+
+	content := string(data)
+
+	assert.Contains(t, content, "Call the tool names listed in `<safe-output-tools>` directly",
+		"safe-output prompt should instruct agents to call configured safe-output tools")
+	assert.Contains(t, content, "if a separate `<mcp-clis>` section says `safeoutputs` is available on `PATH`, you may use that CLI form instead",
+		"safe-output prompt should describe CLI usage as optional because CLI mounting is optional")
+}
+
+// TestComposedPromptSafeOutputsGuidanceStaysTransportNeutral verifies that
+// later prompt fragments (like mcp_cli_tools_prompt.md) do not override direct
+// safe-output tool guidance in the final composed prompt.
+func TestComposedPromptSafeOutputsGuidanceStaysTransportNeutral(t *testing.T) {
+	compiler := &Compiler{}
+	data := &WorkflowData{
+		SafeOutputs: &SafeOutputsConfig{
+			NoOp: &NoOpConfig{},
+		},
+	}
+
+	sections := compiler.collectPromptSections(data)
+	require.NotEmpty(t, sections, "should collect prompt sections")
+
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	promptDir := filepath.Clean(filepath.Join(wd, "..", "..", "actions", "setup", "md"))
+
+	var composed strings.Builder
+	for _, section := range sections {
+		content := section.Content
+		if section.IsFile {
+			fileBytes, readErr := os.ReadFile(filepath.Clean(filepath.Join(promptDir, section.Content)))
+			require.NoError(t, readErr, "should read prompt fragment %s", section.Content)
+			content = string(fileBytes)
+		}
+
+		for key, value := range section.EnvVars {
+			content = strings.ReplaceAll(content, "__"+key+"__", value)
+		}
+
+		composed.WriteString(content)
+		composed.WriteString("\n")
+	}
+
+	finalPrompt := composed.String()
+	assert.Contains(t, finalPrompt, "Call the tool names listed in `<safe-output-tools>` directly",
+		"final composed prompt should preserve direct safe-output tool guidance")
+	assert.NotContains(t, finalPrompt, "For `safeoutputs` and `mcpscripts`, always use the CLI commands above.",
+		"final composed prompt should not require safeoutputs CLI usage unconditionally")
+	assert.Contains(t, finalPrompt, "For `safeoutputs`, call the tool names listed in `<safe-output-tools>` directly; the `safeoutputs` CLI commands above are an optional equivalent transport.",
+		"final composed prompt should keep safeoutputs CLI guidance optional when safe-output tools are available")
+}
+
+// TestGitHubMCPToolsPromptIncludedForCodeSecurityToolset verifies that when a
+// workflow uses the code_security GitHub toolset the generated lock file references
+// one of the github_mcp_tools prompt files (which carry the list_code_scanning_alerts
+// guardrail). This is a regression test for unbounded alert queries.
+func TestGitHubMCPToolsPromptIncludedForCodeSecurityToolset(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gh-aw-code-scanning-prompt-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	testFile := filepath.Join(tmpDir, "test-workflow.md")
+	testContent := `---
+on: push
+engine: claude
+permissions:
+  security-events: read
+tools:
+  github:
+    toolsets: [code_security]
+---
+
+# Test Workflow with Code Security Toolset
+
+List open critical code scanning alerts.
+`
+	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
+
+	compiler := NewCompiler()
+	require.NoError(t, compiler.CompileWorkflow(testFile))
+
+	lockFile := strings.TrimSuffix(testFile, ".md") + ".lock.yml"
+	lockContent, err := os.ReadFile(lockFile)
+	require.NoError(t, err)
+
+	lockStr := string(lockContent)
+
+	// The generated workflow must reference one of the github_mcp_tools prompt files
+	// (plain or with_safeoutputs variant) so the list_code_scanning_alerts guardrail
+	// is injected at runtime. Both variants carry the same guardrail.
+	hasGitHubMCPPrompt := strings.Contains(lockStr, githubMCPToolsPromptFile) ||
+		strings.Contains(lockStr, githubMCPToolsWithSafeOutputsPromptFile)
+	assert.True(t, hasGitHubMCPPrompt,
+		"lock file should reference a github_mcp_tools prompt file when code_security toolset is active")
+}
+
 // TestGeneratedWorkflowsValidatePromptStep tests that all generated workflows
 // include the prompt validation step
 func TestGeneratedWorkflowsValidatePromptStep(t *testing.T) {

@@ -18,7 +18,7 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 
 tools:
   github:
@@ -28,6 +28,11 @@ tools:
   edit:
   web-fetch:
 safe-outputs:
+  data:
+    finding_type: string
+    severity: string
+    confidence: string
+    file: string
   messages:
     footer: "> 🔒 *Security review by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
     run-started: "🔍 [{workflow_name}]({run_url}) is analyzing this {event_type} for security implications..."
@@ -39,6 +44,11 @@ imports:
   - shared/security-analysis-base.md
 
   - shared/otlp.md
+evals:
+  - id: security_review_posted
+    question: Did the agent post a security review comment or finding on the pull request?
+  - id: findings_specific
+    question: Does the agent output describe specific, concrete security concerns tied to the pull request changes rather than generic advice?
 ---
 
 # Security Review Agent 🔒

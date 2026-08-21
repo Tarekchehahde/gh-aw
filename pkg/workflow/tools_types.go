@@ -366,6 +366,95 @@ type GitHubToolConfig struct {
 	// and MCPG >= v0.2.18.
 	// Valid values: "approved", "unapproved", "merged"
 	EndorserMinIntegrity string `yaml:"endorser-min-integrity,omitempty"`
+	// PrivateToPublicFlows opts out of cross-visibility protections for private→public data flows.
+	// Accepts either the string "allow" (blanket opt-out) or a []string of MCP server IDs
+	// (selective exemption for those servers only).
+	//   - "allow" → compiler emits gateway.forcePublicRepos: false; rejected in strict mode.
+	//   - []string → compiler emits gateway.sinkVisibilityExemptServers with the listed IDs.
+	// See MCP Gateway Specification Section 10.9.
+	PrivateToPublicFlows any `yaml:"-"`
+
+	// BoundedQueries configures the AWF bounded-query subsystem for cross-repository
+	// private data access. When set, the agent may answer finite, pre-approved questions
+	// about the listed repositories without receiving raw source code.
+	// Requires the AWF sandbox (sandbox.agent.id: awf) and AWF v0.27.44+.
+	BoundedQueries *BoundedQueriesConfig `yaml:"bounded-queries,omitempty"`
+}
+
+// BoundedQueryRuntime identifies the isolated backend used for each bounded-query invocation.
+type BoundedQueryRuntime = string
+
+const (
+	BoundedQueryRuntimeDocker BoundedQueryRuntime = "docker"
+	BoundedQueryRuntimeGVisor BoundedQueryRuntime = "gvisor"
+	BoundedQueryRuntimeSbx    BoundedQueryRuntime = "sbx"
+)
+
+// BoundedQueriesConfig configures the AWF bounded-query subsystem, which allows the agent
+// to answer finite, pre-approved questions about private repositories without receiving
+// raw source content. The presence of this block enables the feature.
+//
+// Example frontmatter:
+//
+//	tools:
+//	  github:
+//	    bounded-queries:
+//	      private-repos:
+//	        - repo: my-org/internal-service
+//	          sensitivity: internal
+//	      runtime: docker
+//	      timeout: 30
+//	      memory-limit: 512m
+//	      interpreter: python3
+//	      max-invocations: 32
+type BoundedQueriesConfig struct {
+	// PrivateRepos is the list of private repositories that the agent may query.
+	// At least one entry is required when bounded-queries is configured.
+	// Each entry must have a valid "owner/repo" slug and a sensitivity classification.
+	PrivateRepos []*BoundedQueryPrivateRepo `yaml:"private-repos,omitempty"`
+
+	// Runtime is the container runtime used to execute bounded-query scripts.
+	// Optional; when omitted AWF uses its default runtime.
+	// Supported values: "docker", "gvisor", "sbx".
+	// This is independent from sandbox.agent.runtime. AWF creates a fresh
+	// backend-specific sandbox for every query and never falls back to another runtime.
+	Runtime BoundedQueryRuntime `yaml:"runtime,omitempty"`
+
+	// Timeout is the maximum execution time in seconds for a single bounded-query invocation.
+	// Optional; when omitted AWF uses its default timeout.
+	// Must be a positive integer in the range 1–540.
+	// A pointer distinguishes "not set" (nil) from an explicitly set zero, which is rejected.
+	Timeout *int `yaml:"timeout,omitempty"`
+
+	// MemoryLimit is the memory limit for bounded-query container execution (e.g. "512m", "1g").
+	// Optional; when omitted AWF uses its default memory limit.
+	MemoryLimit string `yaml:"memory-limit,omitempty"`
+
+	// Interpreter is the script interpreter for bounded-query execution (e.g. "python3").
+	// Optional; when omitted AWF uses its default interpreter.
+	Interpreter string `yaml:"interpreter,omitempty"`
+
+	// MaxInvocations is the maximum number of bounded-query invocations allowed per run.
+	// Optional; when omitted AWF uses its default.
+	// Must be a positive integer in the range 1–10000.
+	// A pointer distinguishes "not set" (nil) from an explicitly set zero, which is rejected.
+	MaxInvocations *int `yaml:"max-invocations,omitempty"`
+
+	// ParseError records a type mismatch or structural error encountered during YAML parsing.
+	// Non-empty when bounded-queries or private-repos had an unexpected type in the frontmatter.
+	// The compiler treats a non-empty ParseError as a hard validation error.
+	ParseError string `yaml:"-"`
+}
+
+// BoundedQueryPrivateRepo describes one private repository approved for bounded-query access.
+type BoundedQueryPrivateRepo struct {
+	// Repo is the "owner/repo" slug of the private repository.
+	// Must not contain GitHub Actions expressions.
+	Repo string `yaml:"repo"`
+
+	// Sensitivity is the confidentiality classification for this repository.
+	// Accepted values: "public", "internal", "confidential", "sealed".
+	Sensitivity string `yaml:"sensitivity"`
 }
 
 // PlaywrightToolConfig represents the configuration for the Playwright tool
@@ -466,8 +555,18 @@ type MCPGatewayRuntimeConfig struct {
 	KeepaliveInterval    int               `yaml:"keepalive-interval,omitempty"`     // Keepalive ping interval in seconds for HTTP MCP backends (0=default 1500s, -1=disabled, >0=custom)
 	SessionTimeout       string            `yaml:"session-timeout,omitempty"`        // Session timeout for MCP gateway sessions as a Go duration string (e.g. "4h", "30m"); empty = gateway default (precedence: stdin config > MCP_GATEWAY_SESSION_TIMEOUT env var > built-in default 6h)
 	ToolTimeout          string            `yaml:"tool-timeout,omitempty"`           // Timeout for individual MCP tool calls as a Go duration string (e.g. "2m", "30s"); empty = gateway built-in default (60s)
+	StartupTimeout       int               `yaml:"-"`                                // Startup timeout in seconds for all MCP backends; always emitted to override gateway's built-in 30s default (gh-aw default: 120s, from tools.startup-timeout)
 	OTLPEndpoint         string            `yaml:"-"`                                // OTLP collector endpoint (derived from observability.otlp, not user-settable)
 	OTLPHeaders          string            `yaml:"-"`                                // Raw OTLP HTTP headers string (derived from observability.otlp, not user-settable)
+	// ForcePublicRepos controls the gateway's runtime public-repo override.
+	// When set to a pointer to false, the compiler emits "forcePublicRepos": false in the gateway
+	// JSON config, disabling the runtime check that restricts repos to "public" when the
+	// workflow runs in a public repository. Set from tools.github.private-to-public-flows: allow.
+	ForcePublicRepos *bool `yaml:"-"`
+	// SinkVisibilityExemptServers is the list of MCP server IDs exempt from default
+	// sink-visibility="public" enforcement. Emitted as gateway.sinkVisibilityExemptServers.
+	// Set from tools.github.private-to-public-flows: [server-ids...].
+	SinkVisibilityExemptServers []string `yaml:"-"`
 }
 
 // HasTool checks if a tool is present in the configuration

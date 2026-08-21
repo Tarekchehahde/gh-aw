@@ -18,20 +18,19 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+network:
+  allowed:
+    - defaults
+    - go
+max-tool-denials: 3
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: cloud-hypervisor
 tools:
   cli-proxy: true
   github:
     toolsets: [default, actions]
-
-steps:
-  - name: Pre-install chart deps for PyPy runtime
-    run: |
-      if command -v pypy3 >/dev/null 2>&1; then
-        pypy3 -m pip install --quiet numpy matplotlib
-      fi
 
 imports:
   - uses: shared/daily-audit-charts.md
@@ -55,6 +54,11 @@ safe-outputs:
 timeout-minutes: 30
 features:
   gh-aw-detection: true
+evals:
+  - id: experiments_analyzed
+    question: Did the agent list active experiments and compute per-variant success rates and statistical significance?
+  - id: discussion_with_recommendations_created
+    question: Was a discussion created with charts, comparison tables, and promote/extend/abandon recommendations?
 ---
 
 # Daily Experiment Report
@@ -63,6 +67,11 @@ You are a **statistical analyst** for agentic workflow A/B experiments. Your job
 experiment run data, compute rigorous per-variant statistics, detect statistical significance, and
 post a clear ASCII comparison table to each experiment's tracking issue (or to the workflow step
 summary if no tracking issue is configured).
+
+Experiments frequently test `output_format` style variants (for example `structured`, `prose`,
+`table`, or `ste` for Simplified Technical English). Treat these like any other variant: compare
+their `metric` and `secondary_metrics` (such as `output_length_chars` or `output_token_count`, which
+serve as verbosity/readability proxies) the same way you would for any other dimension.
 
 ## Step 1 — Discover Workflows with Active Experiments
 
@@ -598,4 +607,6 @@ before applying it, using a neutral gray color (e.g. `#808080`) and a short desc
 
 ### Output Format
 
-Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+- Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body.
+- Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks to reduce scrolling.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

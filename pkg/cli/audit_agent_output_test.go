@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,11 +27,12 @@ func hasFindingByCategory(findings []Finding, category string) bool {
 
 // TestKeyFindingsGeneration verifies key findings are generated correctly
 func TestKeyFindingsGeneration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		run           WorkflowRun
 		metrics       MetricsData
-		errors        []ErrorInfo
+		errors        []ValidationIssue
 		mcpFailures   []MCPFailureReport
 		missingTools  []MissingToolReport
 		expectedCount int
@@ -49,7 +51,7 @@ func TestKeyFindingsGeneration(t *testing.T) {
 				ErrorCount: 3,
 				TokenUsage: 1000,
 			},
-			errors: []ErrorInfo{
+			errors: []ValidationIssue{
 				{Type: "error", Message: "Test error 1"},
 				{Type: "error", Message: "Test error 2"},
 				{Type: "error", Message: "Test error 3"},
@@ -101,6 +103,7 @@ func TestKeyFindingsGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			processedRun := ProcessedRun{
 				Run:          tt.run,
 				MCPFailures:  tt.mcpFailures,
@@ -137,6 +140,7 @@ func TestKeyFindingsGeneration(t *testing.T) {
 
 // TestRecommendationsGeneration verifies recommendations are generated correctly
 func TestRecommendationsGeneration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		run              WorkflowRun
@@ -197,6 +201,7 @@ func TestRecommendationsGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			processedRun := ProcessedRun{
 				Run:          tt.run,
 				MCPFailures:  tt.mcpFailures,
@@ -235,6 +240,7 @@ func TestRecommendationsGeneration(t *testing.T) {
 
 // TestPerformanceMetricsGeneration verifies performance metrics are calculated correctly
 func TestPerformanceMetricsGeneration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name                  string
 		run                   WorkflowRun
@@ -282,7 +288,7 @@ func TestPerformanceMetricsGeneration(t *testing.T) {
 				Duration: 5 * time.Minute,
 			},
 			firewallAnalysis: &FirewallAnalysis{
-				TotalRequests: 25,
+				AnalysisBase: AnalysisBase{TotalRequests: 25},
 			},
 			expectNetworkRequests: true,
 		},
@@ -290,6 +296,7 @@ func TestPerformanceMetricsGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			processedRun := ProcessedRun{
 				Run:              tt.run,
 				FirewallAnalysis: tt.firewallAnalysis,
@@ -319,6 +326,7 @@ func TestPerformanceMetricsGeneration(t *testing.T) {
 
 // TestAuditDataJSONStructure verifies the JSON structure includes all new fields
 func TestAuditDataJSONStructure(t *testing.T) {
+	t.Parallel()
 	// Create comprehensive audit data
 	run := WorkflowRun{
 		DatabaseID:   123456,
@@ -358,7 +366,7 @@ func TestAuditDataJSONStructure(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 
 	// Marshal to JSON
 	jsonBytes, err := json.MarshalIndent(auditData, "", "  ")

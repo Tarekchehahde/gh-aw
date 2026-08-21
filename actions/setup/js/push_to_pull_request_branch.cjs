@@ -3,6 +3,7 @@
 
 /** @type {typeof import("fs")} */
 const fs = require("fs");
+const path = require("path");
 const { generateStagedPreview } = require("./staged_preview.cjs");
 const { isStagedMode } = require("./safe_output_helpers.cjs");
 const { pushSignedCommits } = require("./push_signed_commits.cjs");
@@ -17,10 +18,11 @@ const { createAuthenticatedGitHubClient } = require("./handler_auth.cjs");
 const { checkFileProtection, checkFileProtectionPostApply } = require("./manifest_file_helpers.cjs");
 const { buildWorkflowRunUrl } = require("./workflow_metadata_helpers.cjs");
 const { renderTemplateFromFile, buildProtectedFileList, getPromptPath } = require("./messages_core.cjs");
-const { ensureFullHistoryForBundle, extractBundlePrerequisiteCommits, isShallowOrSparseCheckout, linearizeRangeAsCommit } = require("./git_helpers.cjs");
-const { normalizeCommitSHA } = require("./commit_sha_helpers.cjs");
+const { withGitHubHostToken } = require("./git_auth_helpers.cjs");
+const { ensureFullHistoryForBundle, extractBundlePrerequisiteCommits, isShallowOrSparseCheckout, linearizeRangeAsCommit, ensureSafeDirectoryTrust } = require("./git_helpers.cjs");
+const { extractPatchBaseCommit } = require("./commit_sha_helpers.cjs");
 const { findRepoCheckout } = require("./find_repo_checkout.cjs");
-const { getThreatDetectedMarker } = require("./threat_detection_warning.cjs");
+const { getThreatWarningPresentation } = require("./threat_detection_warning.cjs");
 const { attachExecutionState } = require("./safe_output_execution_metadata.cjs");
 const { resolveTransportPaths } = require("./resolve_transport_paths.cjs");
 
@@ -112,11 +114,53 @@ function parsePositiveInteger(value) {
  * @returns {Promise<string[]>}
  */
 async function getBundlePreApplyFiles(exec, gitOptions, rangeBaseRef, bundleRef) {
-  const bundleDiffResult = await exec.getExecOutput("git", ["diff", "--name-only", "--no-renames", `${rangeBaseRef}..${bundleRef}`], gitOptions);
-  return bundleDiffResult.stdout
-    .split("\n")
-    .map(f => f.trim())
-    .filter(Boolean);
+  const bundleDiffResult = await exec.getExecOutput("git", ["diff", "--name-only", "--no-renames", "-z", `${rangeBaseRef}..${bundleRef}`], gitOptions);
+  return bundleDiffResult.stdout.split("\0").filter(Boolean);
+}
+
+async function fetchBundlePrerequisites(exec, core, gitAuthEnv, baseGitOpts, prerequisiteCommits, logPrefix = "") {
+  core.warning(`${logPrefix}bundle fetch failed due to ${prerequisiteCommits.length} missing prerequisite commit(s); fetching prerequisites from origin and retrying`);
+  core.info(`${logPrefix}fetching ${prerequisiteCommits.length} prerequisite commit(s) from origin`);
+  // Use --filter=blob:none only when the local repo is already shallow or sparse —
+  // in a full clone we already have all blobs and must not convert the repo to a
+  // partial clone (which would trigger lazy blob fetches on later operations).
+  const prereqGitOpts = { env: { ...process.env, ...gitAuthEnv }, ...baseGitOpts };
+  const useBlobFilter = await isShallowOrSparseCheckout(exec, prereqGitOpts);
+  const prerequisiteFetchArgs = useBlobFilter ? ["fetch", "--filter=blob:none", "origin", ...prerequisiteCommits] : ["fetch", "origin", ...prerequisiteCommits];
+  if (useBlobFilter) {
+    core.info(`${logPrefix}using --filter=blob:none for prerequisite fetch (shallow or sparse checkout detected)`);
+  }
+  await exec.exec("git", prerequisiteFetchArgs, prereqGitOpts);
+  core.info(`${logPrefix}fetched prerequisite commits from origin successfully`);
+}
+
+/**
+ * Measure the expanded blob size of files changed by the applied agent commits.
+ * Deleted files contribute zero bytes because no new content is being introduced.
+ *
+ * @param {Record<string, unknown>} gitOptions
+ * @param {string[]} files
+ * @returns {number}
+ */
+function getChangedBlobSizeBytes(gitOptions, files) {
+  let total = 0;
+  const cwd = typeof gitOptions.cwd === "string" && gitOptions.cwd ? gitOptions.cwd : process.cwd();
+  const resolvedCwd = path.resolve(cwd);
+  for (const file of files) {
+    const filePath = path.resolve(resolvedCwd, file);
+    if (filePath !== resolvedCwd && !filePath.startsWith(`${resolvedCwd}${path.sep}`)) {
+      continue;
+    }
+    try {
+      const stats = fs.statSync(filePath);
+      if (stats.isFile()) {
+        total += stats.size;
+      }
+    } catch {
+      // Deleted files have no expanded content to add to the limit.
+    }
+  }
+  return total;
 }
 
 /**
@@ -142,10 +186,12 @@ function isWorkflowsScopeRejection(stderr) {
  *
  * Uses `origin/${baseBranch}` as the exclusion baseline so that commits already on the
  * PR's target branch (which GitHub has already accepted) are excluded.  Falls back to
- * `origin/HEAD` when `baseBranch` is not available, and to an empty array (no workflow
- * changes detected) when the baseline ref is not resolvable or the git command fails —
- * in that case the push is still attempted and any real 'workflows' scope rejection will
- * be caught and surfaced as the typed error downstream.
+ * `origin/HEAD` when `baseBranch` is not available.  In shallow PR checkouts where the
+ * named remote ref is not fetched, falls back to `GITHUB_BASE_SHA` (always present as a
+ * commit object in GitHub Actions `pull_request` events).  Returns an empty array only
+ * when all baselines are exhausted — in that case the push is still attempted and any
+ * real 'workflows' scope rejection will be caught and surfaced as the typed error
+ * downstream.
  *
  * Note: `origin/${baseBranch}` and `origin/HEAD` are intentionally different baselines
  * for their respective layers.  `origin/${baseBranch}` limits detection to commits the
@@ -160,34 +206,49 @@ function isWorkflowsScopeRejection(stderr) {
  * @returns {Promise<string[]>} Unique workflow file paths found in the branch history
  */
 async function detectWorkflowFileChanges(exec, gitOptions, baseBranch, coreLogger) {
-  const baseline = baseBranch && baseBranch.trim() ? `origin/${baseBranch}` : "origin/HEAD";
-  try {
-    const result = await exec.getExecOutput("git", ["log", "--name-only", "--pretty=format:", "HEAD", "--not", baseline, "--", ".github/workflows/"], { ...gitOptions, ignoreReturnCode: true });
-    if (result.exitCode !== 0) {
-      // Non-zero exit means the baseline ref was not resolvable or git failed;
-      // treat as no workflow changes so the push proceeds and any real scope
-      // rejection surfaces downstream.
-      coreLogger.debug(`detectWorkflowFileChanges: git log exited ${result.exitCode} (baseline '${baseline}' may be unavailable); skipping pre-flight`);
-      return [];
-    }
-    return [
-      ...new Set(
-        result.stdout
-          .split("\n")
-          .map(f => f.trim())
-          .filter(Boolean)
-      ),
-    ];
-  } catch (err) {
-    coreLogger.debug(`detectWorkflowFileChanges: git log threw (baseline '${baseline}'); skipping pre-flight: ${getErrorMessage(err)}`);
-    return [];
+  const primary = baseBranch && baseBranch.trim() ? `origin/${baseBranch}` : "origin/HEAD";
+  const baselines = [primary];
+  const githubBaseSha = process.env.GITHUB_BASE_SHA;
+  if (githubBaseSha && githubBaseSha.trim()) {
+    baselines.push(githubBaseSha.trim());
   }
+
+  for (const baseline of baselines) {
+    try {
+      const result = await exec.getExecOutput("git", ["log", "--name-only", "--pretty=format:", "HEAD", "--not", baseline, "--", ".github/workflows/"], { ...gitOptions, ignoreReturnCode: true });
+      if (result.exitCode !== 0) {
+        // Non-zero exit means the baseline ref was not resolvable (e.g. shallow clone
+        // without the named remote ref fetched); try the next fallback.
+        coreLogger.debug(`detectWorkflowFileChanges: git log exited ${result.exitCode} (baseline '${baseline}' may be unavailable); trying next fallback`);
+        continue;
+      }
+      const files = [
+        ...new Set(
+          result.stdout
+            .split("\n")
+            .map(f => f.trim())
+            .filter(Boolean)
+        ),
+      ];
+      if (baseline !== primary) {
+        coreLogger.debug(`detectWorkflowFileChanges: used fallback baseline '${baseline}'; found ${files.length} workflow file(s)`);
+      }
+      return files;
+    } catch (err) {
+      coreLogger.debug(`detectWorkflowFileChanges: git log threw (baseline '${baseline}'): ${getErrorMessage(err)}; trying next fallback`);
+    }
+  }
+
+  coreLogger.debug(`detectWorkflowFileChanges: all baselines exhausted; skipping pre-flight`);
+  return [];
 }
 
 /**
  * Performs a pre-flight workflow-scope check before pushing a new branch ref.
- * Returns the typed error object when the branch history contains workflow file changes
- * and `allowWorkflows` is false; returns null when the push may proceed.
+ * Returns a non-fatal skip result when the branch history contains workflow file changes
+ * but the agent's own changeset has none (scope requirement originates from pre-existing
+ * commits).  Returns a hard typed error only when the agent itself staged workflow files.
+ * Returns null when the push may proceed.
  *
  * Extracts the duplicated guard that appears in both the review-branch and
  * fallback-branch push paths so future changes only need to be made in one place.
@@ -198,13 +259,21 @@ async function detectWorkflowFileChanges(exec, gitOptions, baseBranch, coreLogge
  * @param {string | undefined} baseBranch - PR base branch name passed through to detectWorkflowFileChanges
  * @param {string} context - Short label for the push path (e.g. "Review branch", "Fallback branch")
  * @param {typeof core} coreLogger - Actions core logger
- * @returns {Promise<{ success: false, error_type: string, error: string } | null>}
+ * @param {string[] | undefined} agentChangedFiles - Files from the agent's post-apply diff; used to distinguish agent vs pre-existing workflow changes.
+ *   Pass `undefined` when the distinction cannot be made — the function will fall back to the original hard-error behavior.
+ * @returns {Promise<{ success: false, error_type: string, error: string } | { success: false, skipped: true, error: string } | null>}
  */
-async function runWorkflowScopePreflightCheck(exec, gitOptions, allowWorkflows, baseBranch, context, coreLogger) {
+async function runWorkflowScopePreflightCheck(exec, gitOptions, allowWorkflows, baseBranch, context, coreLogger, agentChangedFiles) {
   if (allowWorkflows) return null;
   const workflowFiles = await detectWorkflowFileChanges(exec, gitOptions, baseBranch, coreLogger);
   if (workflowFiles.length > 0) {
     coreLogger.info(`Pre-flight check: branch history contains workflow file changes (${workflowFiles.join(", ")}). Failing before push attempt.`);
+    if (agentChangedFiles !== undefined) {
+      const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+      if (agentWorkflowFiles.length === 0) {
+        return buildWorkflowsScopeSkip(context, coreLogger);
+      }
+    }
     return buildWorkflowsScopeError(`${context} pre-flight`, coreLogger);
   }
   return null;
@@ -226,6 +295,25 @@ function buildWorkflowsScopeError(context, coreLogger) {
     error_type: "workflows_scope_required",
     error: `${context} push rejected: the branch includes changes to workflow files (.github/workflows/**) requiring the 'workflows' scope. The token used for the safe-outputs checkout does not have this scope. Fix: configure 'push-to-pull-request-branch.allow-workflows: true' with a GitHub App in 'safe-outputs.github-app', or exclude workflow files from the changeset.`,
   };
+}
+
+/**
+ * Builds a non-fatal skip result and emits a warning when the branch history requires
+ * the 'workflows' scope but the scope requirement originates from pre-existing commits
+ * rather than the agent's own changeset.
+ *
+ * @param {string} context - Short label identifying the push path (e.g. "Review branch", "Fallback branch")
+ * @param {typeof core} coreLogger - Actions core logger
+ * @returns {{ success: false, skipped: true, error: string }}
+ */
+function buildWorkflowsScopeSkip(context, coreLogger) {
+  const message =
+    `${context}: branch history contains workflow file changes (.github/workflows/**) requiring the 'workflows' scope, ` +
+    `but the agent's own changeset does not include workflow files — the scope requirement originates from pre-existing commits. ` +
+    `Skipping push to avoid a scope rejection. ` +
+    `To allow pushing workflow file changes, configure 'push-to-pull-request-branch.allow-workflows: true' with a GitHub App in 'safe-outputs.github-app'.`;
+  coreLogger.warning(message);
+  return { success: false, skipped: true, error: message };
 }
 
 /**
@@ -254,6 +342,13 @@ async function main(config = {}) {
   const { defaultTargetRepo, allowedRepos } = resolveTargetRepoConfig(config);
   const githubClient = await createAuthenticatedGitHubClient(config);
 
+  // Ensure the workspace is trusted in the bridge process (Process Safe Outputs step).
+  // The bridge runs outside the Docker container as a potentially different user/HOME,
+  // so the in-container `git config --global safe.directory` may not be visible here.
+  // Using GIT_CONFIG_* env vars avoids relying on ~/.gitconfig and covers cases where
+  // the conditional "Configure Git credentials" step was skipped or HOME differs.
+  ensureSafeDirectoryTrust(process.env.GITHUB_WORKSPACE || process.cwd());
+
   // Git network operations authenticate using the credentials actions/checkout
   // persisted into .git/config for the safe_outputs job (persist-credentials: true,
   // using the resolved push token). We intentionally do NOT inject an additional
@@ -266,6 +361,8 @@ async function main(config = {}) {
   // Base branch from config (if set) - used only for logging at factory level
   // Dynamic base branch resolution happens per-message after resolving the actual target repo
   const configBaseBranch = config.base_branch || null;
+  const configuredHeadRepo = typeof config["head-repo"] === "string" ? config["head-repo"].trim() : "";
+  const headGitHubToken = typeof config["head-github-token"] === "string" ? config["head-github-token"].trim() : "";
 
   // Check if we're in staged mode (either globally or per-handler config)
   const isStaged = isStagedMode(config);
@@ -291,6 +388,9 @@ async function main(config = {}) {
   core.info(`Max patch size: ${maxSizeKb} KB`);
   core.info(`Max count: ${maxCount || "unlimited"}`);
   core.info(`Default target repo: ${defaultTargetRepo}`);
+  if (configuredHeadRepo) {
+    core.info(`Configured head repo: ${configuredHeadRepo}`);
+  }
   if (allowedRepos.size > 0) {
     core.info(`Allowed repos: ${[...allowedRepos].join(", ")}`);
   }
@@ -353,7 +453,12 @@ async function main(config = {}) {
       }
     }
 
-    let patchContent = fs.readFileSync(patchFilePath, "utf8");
+    let patchContent;
+    try {
+      patchContent = fs.readFileSync(patchFilePath, "utf8");
+    } catch (err) {
+      throw new Error(`Failed to read file ${patchFilePath}: ${getErrorMessage(err)}`, { cause: err });
+    }
 
     // Check for actual error conditions
     if (patchContent.includes("Failed to generate patch")) {
@@ -370,15 +475,8 @@ async function main(config = {}) {
     // Validate patch/bundle size against `max_patch_size`.
     //
     // Size-check source of truth, in order of preference:
-    //   1. `message.diff_size` — the incremental net diff size recorded at
-    //      patch/bundle generation time (this is the correct quantity to cap:
-    //      how much the PR branch will actually change as a result of the push).
-    //   2. For bundle transport: the on-disk bundle file size.
-    //   3. For patch transport: the format-patch file size.
-    //
-    // Using `diff_size` when present fixes the long-running branch case where
-    // the transport file accumulates per-commit metadata + per-commit diffs and
-    // can be many MB even when each iteration only changes a few KB.
+    // Use the uncompressed patch representation for both transport modes.
+    // Bundle size is compressed and can undercount highly compressible changes.
     if (!isEmpty) {
       const patchSizeBytes = Buffer.byteLength(patchContent, "utf8");
       const patchSizeKb = Math.ceil(patchSizeBytes / 1024);
@@ -393,21 +491,8 @@ async function main(config = {}) {
       }
       const bundleSizeKb = Math.ceil(bundleSizeBytes / 1024);
 
-      const diffSizeBytesRaw = message.diff_size;
-      const haveDiffSize = typeof diffSizeBytesRaw === "number" && diffSizeBytesRaw >= 0;
-
-      let sizeForCheckBytes;
-      let sizeLabel;
-      if (haveDiffSize) {
-        sizeForCheckBytes = diffSizeBytesRaw;
-        sizeLabel = "Incremental diff size";
-      } else if (hasBundleFile) {
-        sizeForCheckBytes = bundleSizeBytes;
-        sizeLabel = "Bundle size";
-      } else {
-        sizeForCheckBytes = patchSizeBytes;
-        sizeLabel = "Patch size";
-      }
+      const sizeForCheckBytes = patchSizeBytes;
+      const sizeLabel = "Patch size";
       const sizeForCheckKb = Math.ceil(sizeForCheckBytes / 1024);
 
       if (hasBundleFile) {
@@ -419,14 +504,7 @@ async function main(config = {}) {
 
       if (sizeForCheckKb > maxSizeKb) {
         let msg;
-        if (haveDiffSize) {
-          const transportLabel = hasBundleFile ? `Bundle size: ${bundleSizeKb} KB` : `Patch file size: ${patchSizeKb} KB`;
-          msg = `Incremental diff size (${sizeForCheckKb} KB) exceeds maximum allowed size (${maxSizeKb} KB). ${transportLabel}.`;
-        } else if (hasBundleFile) {
-          msg = `Bundle size (${sizeForCheckKb} KB) exceeds maximum allowed size (${maxSizeKb} KB)`;
-        } else {
-          msg = `Patch size (${sizeForCheckKb} KB) exceeds maximum allowed size (${maxSizeKb} KB)`;
-        }
+        msg = `Patch size (${sizeForCheckKb} KB) exceeds maximum allowed size (${maxSizeKb} KB)`;
         return { success: false, error: msg };
       }
 
@@ -486,7 +564,12 @@ async function main(config = {}) {
           }
 
           if (patchFilePath && fs.existsSync(patchFilePath)) {
-            const patchStats = fs.readFileSync(patchFilePath, "utf8");
+            let patchStats;
+            try {
+              patchStats = fs.readFileSync(patchFilePath, "utf8");
+            } catch (err) {
+              throw new Error(`Failed to read file ${patchFilePath}: ${getErrorMessage(err)}`, { cause: err });
+            }
             if (patchStats.trim()) {
               content += `**Changes:** Patch file exists with ${patchStats.split("\n").length} lines\n\n`;
               content += `<details><summary>Show patch preview</summary>\n\n\`\`\`diff\n${patchStats.slice(0, 2000)}${patchStats.length > 2000 ? "\n... (truncated)" : ""}\n\`\`\`\n\n</details>\n\n`;
@@ -503,7 +586,7 @@ async function main(config = {}) {
     // Validate target configuration
     if (target !== "*" && target !== "triggering") {
       const pullNumber = parseInt(target, 10);
-      if (isNaN(pullNumber)) {
+      if (Number.isNaN(pullNumber)) {
         return { success: false, error: 'Invalid target configuration: must be "triggering", "*", or a valid pull request number' };
       }
     }
@@ -536,6 +619,7 @@ async function main(config = {}) {
     let branchName;
     let prTitle = "";
     let prLabels = [];
+    /** @type {any} */
     let branchStateBefore = null;
 
     if (!pullNumber) {
@@ -557,6 +641,7 @@ async function main(config = {}) {
     // When the target repo differs from the workflow repo, it may be checked out
     // into a subdirectory of GITHUB_WORKSPACE (e.g. via actions/checkout path:).
     // All git operations must run from that directory, not from GITHUB_WORKSPACE.
+    /** @type {any} */
     let repoCwd = undefined;
     const workflowRepo = process.env.GITHUB_REPOSITORY || "";
     if (itemRepo.toLowerCase() !== workflowRepo.toLowerCase()) {
@@ -588,6 +673,12 @@ async function main(config = {}) {
 
     // Base options for all git exec calls - includes cwd when running in a subdirectory checkout
     const baseGitOpts = repoCwd ? { cwd: repoCwd } : {};
+
+    // For cross-repo checkouts, also trust the specific subdirectory. The factory-level call
+    // covers GITHUB_WORKSPACE; this per-message call covers subdirectory checkout paths.
+    if (repoCwd) {
+      ensureSafeDirectoryTrust(repoCwd);
+    }
     let pullRequest;
     try {
       const response = await githubClient.rest.pulls.get({
@@ -607,19 +698,66 @@ async function main(config = {}) {
       return { success: false, error: `Failed to determine branch name for PR ${pullNumber} in ${itemRepo}` };
     }
 
-    // SECURITY: Check if this is a fork PR - we cannot push to fork branches
-    // The workflow token only has access to the base repository, not the fork
-    const { isFork, reason: forkReason } = detectForkPR(pullRequest);
-    if (isFork) {
-      core.error(`Cannot push to fork PR branch: ${forkReason}`);
-      core.error("The workflow token does not have permission to push to fork repositories.");
-      core.error("Fork PRs must be updated by the fork owner or through other mechanisms.");
+    let pushRepo = itemRepo;
+    let pushRepoParts = repoParts;
+    let pushGithubClient = githubClient;
+    const actualHeadRepo = typeof pullRequest.head?.repo?.full_name === "string" ? pullRequest.head.repo.full_name : "";
+
+    // SECURITY: When head.repo is null (likely a deleted fork) we cannot verify which
+    // repository the PR head came from. Always reject to prevent writes to an unverifiable PR.
+    if (pullRequest.head?.repo == null) {
+      const nullHeadErr = "Cannot push to PR: head repository is null (likely a deleted fork)";
+      core.error(nullHeadErr);
+      return { success: false, error: nullHeadErr };
+    }
+
+    // SECURITY: Validate the PR head repository against the configured or default expected value
+    // before any fork-status branching. This prevents writes to a same-repo PR when head-repo
+    // names an automation fork, and prevents writes to a fork PR when head-repo is not set.
+    const expectedHeadRepo = configuredHeadRepo || itemRepo;
+    if (actualHeadRepo && actualHeadRepo.toLowerCase() !== expectedHeadRepo.toLowerCase()) {
+      const { isFork: actualIsFork } = detectForkPR(pullRequest);
+      if (actualIsFork && !configuredHeadRepo) {
+        core.error(`Cannot push to fork PR branch: head is '${actualHeadRepo}', not '${itemRepo}'`);
+        core.error("Fork PRs remain blocked unless safe-outputs.push-to-pull-request-branch.head-repo is configured.");
+        return {
+          success: false,
+          error: `Cannot push to fork PR: head repository '${actualHeadRepo}' does not match target '${itemRepo}'. Configure safe-outputs.push-to-pull-request-branch.head-repo and matching credentials to allow an automation-owned fork.`,
+        };
+      }
       return {
         success: false,
-        error: `Cannot push to fork PR: ${forkReason}. The workflow token does not have permission to push to fork repositories.`,
+        error: `Cannot push to PR: head repository '${actualHeadRepo}' does not match expected '${expectedHeadRepo}'. Writes to repositories other than the configured head-repo remain blocked.`,
       };
     }
-    core.info(`Fork PR check: not a fork (${forkReason})`);
+
+    // SECURITY: Check if this is a fork PR - only explicitly configured automation-owned
+    // forks are eligible for updates.
+    const { isFork, reason: forkReason } = detectForkPR(pullRequest);
+    if (isFork) {
+      if (!configuredHeadRepo) {
+        core.error(`Cannot push to fork PR branch: ${forkReason}`);
+        core.error("Fork PRs remain blocked unless safe-outputs.push-to-pull-request-branch.head-repo is configured.");
+        return {
+          success: false,
+          error: `Cannot push to fork PR: ${forkReason}. Configure safe-outputs.push-to-pull-request-branch.head-repo and matching credentials to allow an automation-owned fork.`,
+        };
+      }
+      const headRepoResult = resolveAndValidateRepo({ repo: configuredHeadRepo }, itemRepo, allowedRepos, "pull request head repository");
+      if (!headRepoResult.success) {
+        return { success: false, error: headRepoResult.error };
+      }
+      pushRepo = headRepoResult.repo;
+      pushRepoParts = headRepoResult.repoParts;
+      if (headGitHubToken && typeof global.getOctokit === "function") {
+        pushGithubClient = global.getOctokit(headGitHubToken);
+      }
+      core.info(`Fork PR update allowed via configured head repo: ${pushRepo}`);
+    } else {
+      core.info(`Fork PR check: not a fork (${forkReason})`);
+    }
+    const pushRemoteUrl = pushRepo.toLowerCase() === itemRepo.toLowerCase() ? "" : `${(process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "")}/${pushRepo}.git`;
+    const branchRemoteName = pushRemoteUrl || "origin";
 
     // SECURITY: Sanitize branch name to prevent shell injection (CWE-78)
     // Branch names from GitHub API must be normalized before use in git commands
@@ -636,6 +774,7 @@ async function main(config = {}) {
         core.info(`Branch name sanitized: "${originalBranchName}" -> "${branchName}"`);
       }
     }
+    const branchRemoteRef = pushRemoteUrl ? `refs/remotes/gh-aw-head/${branchName}` : `refs/remotes/origin/${branchName}`;
 
     core.info(`Target branch: ${branchName}`);
     core.info(`PR title: ${prTitle}`);
@@ -646,7 +785,7 @@ async function main(config = {}) {
     // This prevents agents from pushing directly to branches that should only receive
     // changes through reviewed pull requests.
     {
-      const blockReason = await checkBranchPushable(githubClient, repoParts.owner, repoParts.repo, branchName, checkBranchProtection);
+      const blockReason = await checkBranchPushable(pushGithubClient, pushRepoParts.owner, pushRepoParts.repo, branchName, checkBranchProtection);
       if (blockReason) {
         core.error(blockReason);
         return { success: false, error: blockReason };
@@ -738,11 +877,16 @@ async function main(config = {}) {
     // Detect missing/deleted branches early and return a clear error.
     // This avoids an opaque git fetch exit code when the PR branch was deleted.
     {
-      const lsRemoteResult = await exec.getExecOutput("git", ["ls-remote", "--exit-code", "--heads", "origin", branchName], {
-        env: { ...process.env, ...gitAuthEnv },
-        ...baseGitOpts,
-        ignoreReturnCode: true,
-      });
+      const lsRemoteResult = await withGitHubHostToken(
+        headGitHubToken,
+        async () =>
+          exec.getExecOutput("git", ["ls-remote", "--exit-code", "--heads", branchRemoteName, branchName], {
+            env: { ...process.env, ...gitAuthEnv },
+            ...baseGitOpts,
+            ignoreReturnCode: true,
+          }),
+        baseGitOpts.cwd
+      );
 
       if (lsRemoteResult.exitCode === 2) {
         const missingBranchError = MISSING_BRANCH_ERROR_TEMPLATE(branchName);
@@ -764,7 +908,7 @@ async function main(config = {}) {
         const stderr = (lsRemoteResult.stderr || "").trim();
         return {
           success: false,
-          error: `Failed to verify branch ${branchName} exists on origin: ${stderr || `git ls-remote exited with code ${lsRemoteResult.exitCode}`}`,
+          error: `Failed to verify branch ${branchName} exists on ${pushRepo}: ${stderr || `git ls-remote exited with code ${lsRemoteResult.exitCode}`}`,
         };
       }
     }
@@ -774,10 +918,15 @@ async function main(config = {}) {
     // for the safe_outputs job; no GIT_CONFIG_* extraheader is injected (see gitAuthEnv above).
     try {
       core.info(`Fetching branch: ${branchName}`);
-      await exec.exec("git", ["fetch", "origin", `${branchName}:refs/remotes/origin/${branchName}`], {
-        env: { ...process.env, ...gitAuthEnv },
-        ...baseGitOpts,
-      });
+      await withGitHubHostToken(
+        headGitHubToken,
+        async () =>
+          exec.exec("git", ["fetch", branchRemoteName, `${branchName}:${branchRemoteRef}`], {
+            env: { ...process.env, ...gitAuthEnv },
+            ...baseGitOpts,
+          }),
+        baseGitOpts.cwd
+      );
     } catch (fetchError) {
       const fetchErrorMessage = getErrorMessage(fetchError);
       if (ignoreMissingBranchFailure && looksLikeMissingRemoteBranchError(fetchErrorMessage)) {
@@ -790,7 +939,7 @@ async function main(config = {}) {
 
     // Check if branch exists on origin
     try {
-      await exec.exec(`git rev-parse --verify origin/${branchName}`, [], baseGitOpts);
+      await exec.exec("git", ["rev-parse", "--verify", branchRemoteRef], baseGitOpts);
     } catch (verifyError) {
       const missingBranchError = MISSING_BRANCH_ERROR_TEMPLATE(branchName);
       if (ignoreMissingBranchFailure) {
@@ -802,8 +951,8 @@ async function main(config = {}) {
 
     // Checkout the branch from origin
     try {
-      await exec.exec(`git checkout -B ${branchName} origin/${branchName}`, [], baseGitOpts);
-      core.info(`Checked out existing branch from origin: ${branchName}`);
+      await exec.exec("git", ["checkout", "-B", branchName, branchRemoteRef], baseGitOpts);
+      core.info(`Checked out existing branch from ${pushRepo}: ${branchName}`);
     } catch (checkoutError) {
       return { success: false, error: `Failed to checkout branch ${branchName}: ${getErrorMessage(checkoutError)}` };
     }
@@ -815,7 +964,7 @@ async function main(config = {}) {
     let newCommitCount = 0;
     let remoteHeadBeforePatch = "";
     let pushedCommitSha = "";
-    let rangeBaseRef = `origin/${branchName}`;
+    let rangeBaseRef = branchRemoteRef;
     if (hasChanges) {
       // Capture HEAD before applying changes to compute new-commit count later
       try {
@@ -832,8 +981,8 @@ async function main(config = {}) {
       // Pin patch application to the recorded base commit captured at patch-generation time.
       // This avoids applying a patch generated from an older branch tip onto a newer remote tip.
       // If the commit is unavailable (e.g. cross-repo/missing object), continue with current HEAD.
-      if (!hasBundleFile && message.base_commit) {
-        const recordedBaseCommit = normalizeCommitSHA(message.base_commit);
+      if (!hasBundleFile) {
+        const recordedBaseCommit = extractPatchBaseCommit(patchContent);
         if (recordedBaseCommit) {
           core.info(`Patch route base_commit resolved: ${recordedBaseCommit}`);
           try {
@@ -846,9 +995,9 @@ async function main(config = {}) {
               core.info(`Note: could not fetch base_commit ${recordedBaseCommit} explicitly (${getErrorMessage(fetchError)}); will verify local availability next`);
             }
             await exec.exec("git", ["cat-file", "-e", recordedBaseCommit], baseGitOpts);
-            const ancestryCheck = await exec.getExecOutput("git", ["merge-base", "--is-ancestor", recordedBaseCommit, `origin/${branchName}`], { ...baseGitOpts, ignoreReturnCode: true });
+            const ancestryCheck = await exec.getExecOutput("git", ["merge-base", "--is-ancestor", recordedBaseCommit, branchRemoteRef], { ...baseGitOpts, ignoreReturnCode: true });
             if (ancestryCheck.exitCode !== 0) {
-              throw new Error(`recorded base_commit ${recordedBaseCommit} is not an ancestor of origin/${branchName}; cannot safely re-anchor patch apply`);
+              throw new Error(`recorded base_commit ${recordedBaseCommit} is not an ancestor of ${branchRemoteRef}; cannot safely re-anchor patch apply`);
             }
             if (remoteHeadBeforePatch && remoteHeadBeforePatch !== recordedBaseCommit) {
               core.warning(`Remote PR branch advanced since patch generation (remote HEAD ${remoteHeadBeforePatch}, patch base ${recordedBaseCommit}); applying patch from recorded base commit`);
@@ -859,8 +1008,6 @@ async function main(config = {}) {
           } catch (baseCommitError) {
             core.warning(`Unable to use recorded base_commit ${recordedBaseCommit}; applying patch on current branch HEAD: ${getErrorMessage(baseCommitError)}`);
           }
-        } else if (String(message.base_commit).trim()) {
-          core.warning(`Ignoring invalid base_commit value for patch apply: ${String(message.base_commit).trim()}`);
         }
       }
 
@@ -895,23 +1042,54 @@ async function main(config = {}) {
             // (e.g. when the commit is on a ref not in the fetch refspec).
             const prerequisiteCommits = extractBundlePrerequisiteCommits(initialFetchErrorOutput);
             if (prerequisiteCommits.length > 0) {
-              core.warning(`Bundle fetch failed due to ${prerequisiteCommits.length} missing prerequisite commit(s); fetching prerequisites from origin and retrying`);
-              core.info(`Fetching ${prerequisiteCommits.length} prerequisite commit(s) from origin`);
-              // Use --filter=blob:none only when the local repo is already shallow or sparse —
-              // in a full clone we already have all blobs and must not convert the repo to a
-              // partial clone (which would trigger lazy blob fetches on later operations).
-              const prereqGitOpts = { env: { ...process.env, ...gitAuthEnv }, ...baseGitOpts };
-              const useBlobFilter = await isShallowOrSparseCheckout(exec, prereqGitOpts);
-              const prerequisiteFetchArgs = useBlobFilter ? ["fetch", "--filter=blob:none", "origin", ...prerequisiteCommits] : ["fetch", "origin", ...prerequisiteCommits];
-              if (useBlobFilter) {
-                core.info("Using --filter=blob:none for prerequisite fetch (shallow or sparse checkout detected)");
-              }
-              await exec.exec("git", prerequisiteFetchArgs, prereqGitOpts);
-              core.info("Fetched prerequisite commits from origin successfully");
+              await fetchBundlePrerequisites(exec, core, gitAuthEnv, baseGitOpts, prerequisiteCommits);
               await exec.exec("git", ["fetch", bundleFilePath, bundleFetchRef], baseGitOpts);
               core.info("Bundle fetch retry succeeded after prerequisite recovery");
             } else {
-              throw new Error(`Failed to fetch bundle: ${initialFetchErrorOutput}`);
+              core.warning(`Bundle fetch from refs/heads/${branchName} failed: ${initialFetchErrorOutput}; resolving source ref from bundle heads`);
+              const { stdout: bundleHeadsOutput } = await exec.getExecOutput("git", ["bundle", "list-heads", bundleFilePath], baseGitOpts);
+              const bundleHeads = bundleHeadsOutput
+                .split("\n")
+                .map(line => line.trim().split(/\s+/))
+                // Bundles produced here advertise SHA-1 object IDs; reject malformed entries.
+                .filter(parts => parts.length === 2 && /^[0-9a-f]{40}$/.test(parts[0]) && parts[1]);
+              const branchRefChecks = await Promise.all(
+                bundleHeads
+                  .filter(([, ref]) => ref.startsWith("refs/heads/"))
+                  .map(async ([, ref]) => ({
+                    ref,
+                    isValid: (await exec.getExecOutput("git", ["check-ref-format", ref], { ...baseGitOpts, ignoreReturnCode: true })).exitCode === 0,
+                  }))
+              );
+              const branchRefs = branchRefChecks.filter(({ isValid }) => isValid).map(({ ref }) => ref);
+
+              let bundleSourceRef;
+              if (branchRefs.length === 1) {
+                bundleSourceRef = branchRefs[0];
+              } else if (branchRefs.length === 0) {
+                const headRefs = bundleHeads.filter(([, ref]) => ref === "HEAD");
+                if (headRefs.length !== 1) {
+                  throw new Error(`Failed to resolve bundle source ref from list-heads: expected exactly 1 HEAD entry, found ${headRefs.length}`);
+                }
+                bundleSourceRef = "HEAD";
+              } else {
+                throw new Error(`Failed to resolve bundle source ref from list-heads: expected exactly 1 refs/heads entry, found ${branchRefs.length}`);
+              }
+
+              core.info(`Fetching resolved bundle source ${bundleSourceRef} into ${bundleRef}`);
+              const resolvedBundleFetchRef = `${bundleSourceRef}:${bundleRef}`;
+              const resolvedBundleFetch = await exec.getExecOutput("git", ["fetch", bundleFilePath, resolvedBundleFetchRef], { ...baseGitOpts, ignoreReturnCode: true });
+              if (resolvedBundleFetch.exitCode !== 0) {
+                const resolvedFetchErrorOutput = resolvedBundleFetch.stderr || `exit code ${resolvedBundleFetch.exitCode}`;
+                const resolvedPrerequisiteCommits = extractBundlePrerequisiteCommits(resolvedFetchErrorOutput);
+                if (resolvedPrerequisiteCommits.length === 0) {
+                  throw new Error(`Failed to fetch resolved bundle source ${bundleSourceRef}: ${resolvedFetchErrorOutput}`);
+                }
+
+                await fetchBundlePrerequisites(exec, core, gitAuthEnv, baseGitOpts, resolvedPrerequisiteCommits, "[resolved] ");
+                await exec.exec("git", ["fetch", bundleFilePath, resolvedBundleFetchRef], baseGitOpts);
+                core.info("Resolved bundle fetch retry succeeded after prerequisite recovery");
+              }
             }
           }
           core.info(`Fetched bundle to ${bundleRef}`);
@@ -969,7 +1147,7 @@ async function main(config = {}) {
           } catch {
             // Ignore
           }
-          return { success: false, error: "Failed to apply bundle" };
+          return { success: false, error: `Failed to apply bundle: ${getErrorMessage(bundleError)}` };
         }
       } else {
         // Patch transport (non-default): git am --3way
@@ -1000,7 +1178,7 @@ async function main(config = {}) {
 
           // Use --3way to handle cross-repo patches where the patch base may differ from target repo
           // This allows git to resolve create-vs-modify mismatches when a file exists in target but not source
-          await exec.exec(`git am --3way ${patchFilePath}`, [], baseGitOpts);
+          await exec.exec("git", ["am", "--3way", patchFilePath], baseGitOpts);
           core.info("Patch applied successfully");
         } catch (error) {
           core.warning(`Initial patch apply failed, attempting add/add recovery: ${getErrorMessage(error)}`);
@@ -1083,12 +1261,11 @@ async function main(config = {}) {
       // This is the primary defense against parser-differential attacks where the JS
       // patch parser and git am disagree on which files a patch contains.
       // (see github/agentic-workflows#539)
+      let agentChangedFiles = [];
       {
-        const diffResult = await exec.getExecOutput("git", ["diff", "--name-only", "--no-renames", `${rangeBaseRef}..HEAD`], baseGitOpts);
-        const actualFiles = diffResult.stdout
-          .split("\n")
-          .map(f => f.trim())
-          .filter(Boolean);
+        const diffResult = await exec.getExecOutput("git", ["diff", "--name-only", "--no-renames", "-z", `${rangeBaseRef}..HEAD`], baseGitOpts);
+        const actualFiles = diffResult.stdout.split("\0").filter(Boolean);
+        agentChangedFiles = actualFiles;
         if (actualFiles.length > 0) {
           core.info(`Post-apply verification: ${actualFiles.length} file(s) actually modified`);
           const postApplyProtection = checkFileProtectionPostApply(actualFiles, config);
@@ -1104,6 +1281,15 @@ async function main(config = {}) {
             core.warning(`Post-apply: Protected file protection triggered (fallback-to-issue): ${postApplyProtection.files.join(", ")}`);
             await exec.exec("git", ["reset", "--hard", rangeBaseRef], baseGitOpts);
             return await createProtectedFilesFallbackIssue(postApplyProtection.files);
+          }
+
+          const changedBlobSizeBytes = getChangedBlobSizeBytes(baseGitOpts, actualFiles);
+          const changedBlobSizeKb = Math.ceil(changedBlobSizeBytes / 1024);
+          core.info(`Changed content size: ${changedBlobSizeKb} KB (maximum allowed: ${maxSizeKb} KB)`);
+          if (changedBlobSizeKb > maxSizeKb) {
+            const msg = `Changed content size (${changedBlobSizeKb} KB) exceeds maximum allowed size (${maxSizeKb} KB)`;
+            await exec.exec("git", ["reset", "--hard", rangeBaseRef], baseGitOpts);
+            return { success: false, error: msg };
           }
         }
       }
@@ -1125,7 +1311,9 @@ async function main(config = {}) {
           // even if the current changeset itself does not touch workflow files.
           // Failing here avoids leaving the local branch in a renamed state after
           // a rejected push, and surfaces the error before any side effects.
-          const preflightError = await runWorkflowScopePreflightCheck(exec, baseGitOpts, allowWorkflows, pullRequest?.base?.ref, "Review branch", core);
+          // When the workflow files are from pre-existing commits (not the agent's
+          // own changeset), a non-fatal skip is returned instead of a hard error.
+          const preflightError = await runWorkflowScopePreflightCheck(exec, baseGitOpts, allowWorkflows, pullRequest?.base?.ref, "Review branch", core, agentChangedFiles);
           if (preflightError) return preflightError;
 
           // Rename current local branch to review branch
@@ -1135,30 +1323,44 @@ async function main(config = {}) {
           // Push the review branch — use getExecOutput to capture stderr so we
           // can detect GitHub's "workflows scope required" rejection and surface
           // a typed, actionable error instead of a bare git exit-1.
-          const reviewPushOutput = await exec.getExecOutput("git", ["push", "origin", reviewBranchName], {
-            env: { ...process.env, ...gitAuthEnv },
-            ...baseGitOpts,
-            ignoreReturnCode: true,
-          });
+          // For fork-backed PRs, push to the head repo remote instead of origin.
+          const reviewPushRemote = pushRemoteUrl || "origin";
+          const reviewPushOutput = await withGitHubHostToken(
+            pushRemoteUrl ? headGitHubToken : "",
+            async () =>
+              exec.getExecOutput("git", ["push", reviewPushRemote, reviewBranchName], {
+                env: { ...process.env, ...gitAuthEnv },
+                ...baseGitOpts,
+                ignoreReturnCode: true,
+              }),
+            baseGitOpts.cwd
+          );
           if (reviewPushOutput.exitCode !== 0) {
             const reviewPushStderr = (reviewPushOutput.stderr || "").trim();
             // GitHub rejects pushes to branches containing .github/workflows/** changes
-            // when the token lacks the 'workflows' scope.  Surface this as a typed
-            // error so the caller can distinguish it from a generic push failure.
+            // when the token lacks the 'workflows' scope.  Distinguish between the
+            // agent's own workflow files (hard error) and pre-existing commits (skip).
             if (isWorkflowsScopeRejection(reviewPushStderr)) {
+              const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+              if (agentWorkflowFiles.length === 0) {
+                return buildWorkflowsScopeSkip("Review branch", core);
+              }
               return buildWorkflowsScopeError("Review branch", core);
             }
-            throw new Error(`git push origin ${reviewBranchName} failed (exit code ${reviewPushOutput.exitCode}): ${reviewPushStderr}`);
+            throw new Error(`git push ${reviewPushRemote} ${reviewBranchName} failed (exit code ${reviewPushOutput.exitCode}): ${reviewPushStderr}`);
           }
           core.info(`Pushed review branch: ${reviewBranchName}`);
 
-          // Create PR from review branch to original branch
+          // Create PR from review branch to original branch.
+          // For fork-backed PRs, use an owner-qualified head reference.
+          const reviewHeadRef = pushRemoteUrl ? `${pushRepoParts.owner}:${reviewBranchName}` : reviewBranchName;
           const detectionReasonEnv = process.env.GH_AW_DETECTION_REASON || "unknown";
+          const warning = getThreatWarningPresentation(detectionReasonEnv);
           const prBody = [
-            "> [!CAUTION]",
-            "> agentic threat detected",
-            "> Threat detection flagged this output in warn mode. Manual review is REQUIRED before any follow-up automation.",
-            `> ${getThreatDetectedMarker(detectionReasonEnv)}`,
+            `> [!${warning.admonition}]`,
+            `> ${warning.title}`,
+            `> ${warning.summary}`,
+            `> ${warning.marker}`,
             ">",
             `> **Reason:** ${detectionReasonEnv}`,
             ">",
@@ -1173,7 +1375,7 @@ async function main(config = {}) {
             repo: repoParts.repo,
             title: `[review] ${prTitle || `Changes for #${pullNumber}`}`,
             body: prBody,
-            head: reviewBranchName,
+            head: reviewHeadRef,
             base: branchName,
           });
 
@@ -1247,13 +1449,15 @@ async function main(config = {}) {
       // Push the applied commits to the branch using signed GraphQL commits (outside patch try/catch so push failures are not misattributed)
       try {
         const pushedSha = await pushSignedCommits({
-          githubClient,
-          owner: repoParts.owner,
-          repo: repoParts.repo,
+          githubClient: pushGithubClient,
+          owner: pushRepoParts.owner,
+          repo: pushRepoParts.repo,
           branch: branchName,
           baseRef: rangeBaseRef,
           cwd: repoCwd || process.cwd(),
           gitAuthEnv,
+          pushRemoteUrl,
+          pushToken: headGitHubToken,
           signedCommits,
           resolvedTemporaryIds,
           currentRepo: itemRepo,
@@ -1300,23 +1504,39 @@ async function main(config = {}) {
             // Pre-flight: check full branch history for workflow file changes.
             // Like the review branch path, creating a new fallback branch ref triggers
             // GitHub's scope check on the full commit history, not just the new commits.
-            const preflightError = await runWorkflowScopePreflightCheck(exec, baseGitOpts, allowWorkflows, pullRequest?.base?.ref, "Fallback branch", core);
+            // When the workflow files are from pre-existing commits (not the agent's
+            // own changeset), a non-fatal skip is returned instead of a hard error.
+            const preflightError = await runWorkflowScopePreflightCheck(exec, baseGitOpts, allowWorkflows, pullRequest?.base?.ref, "Fallback branch", core, agentChangedFiles);
             if (preflightError) return preflightError;
 
             await exec.exec("git", ["checkout", "-b", fallbackBranchName], baseGitOpts);
-            // Use getExecOutput to capture stderr for 'workflows' scope diagnostics
-            const fallbackPushOutput = await exec.getExecOutput("git", ["push", "origin", fallbackBranchName], {
-              env: { ...process.env, ...gitAuthEnv },
-              ...baseGitOpts,
-              ignoreReturnCode: true,
-            });
+            // Use getExecOutput to capture stderr for 'workflows' scope diagnostics.
+            // For fork-backed PRs, push to the head repo remote instead of origin.
+            const fallbackPushRemote = pushRemoteUrl || "origin";
+            const fallbackPushOutput = await withGitHubHostToken(
+              pushRemoteUrl ? headGitHubToken : "",
+              async () =>
+                exec.getExecOutput("git", ["push", fallbackPushRemote, fallbackBranchName], {
+                  env: { ...process.env, ...gitAuthEnv },
+                  ...baseGitOpts,
+                  ignoreReturnCode: true,
+                }),
+              baseGitOpts.cwd
+            );
             if (fallbackPushOutput.exitCode !== 0) {
               const fallbackPushStderr = (fallbackPushOutput.stderr || "").trim();
               if (isWorkflowsScopeRejection(fallbackPushStderr)) {
+                const agentWorkflowFiles = agentChangedFiles.filter(f => f.startsWith(".github/workflows/"));
+                if (agentWorkflowFiles.length === 0) {
+                  return buildWorkflowsScopeSkip("Fallback branch", core);
+                }
                 return buildWorkflowsScopeError("Fallback branch", core);
               }
-              throw new Error(`git push origin ${fallbackBranchName} failed (exit code ${fallbackPushOutput.exitCode}): ${fallbackPushStderr}`);
+              throw new Error(`git push ${fallbackPushRemote} ${fallbackBranchName} failed (exit code ${fallbackPushOutput.exitCode}): ${fallbackPushStderr}`);
             }
+
+            // For fork-backed PRs, use an owner-qualified head reference.
+            const fallbackHeadRef = pushRemoteUrl ? `${pushRepoParts.owner}:${fallbackBranchName}` : fallbackBranchName;
 
             const fallbackBody = [
               "> [!NOTE]",
@@ -1334,7 +1554,7 @@ async function main(config = {}) {
               repo: repoParts.repo,
               title: `[fallback] ${prTitle || `Changes for #${pullNumber}`}`,
               body: fallbackBody,
-              head: fallbackBranchName,
+              head: fallbackHeadRef,
               base: branchName,
             });
 
@@ -1349,6 +1569,7 @@ async function main(config = {}) {
               pull_request_url: fallbackPR.html_url,
               branch_name: fallbackBranchName,
               repo: itemRepo,
+              head_repo: pushRepo,
               number: fallbackPR.number,
               url: fallbackPR.html_url,
             };
@@ -1406,8 +1627,9 @@ async function main(config = {}) {
     // For cross-repo scenarios, use repoParts (the target repo) not context.repo (the workflow repo)
     const githubServer = process.env.GITHUB_SERVER_URL || "https://github.com";
     const repoUrl = `${githubServer}/${repoParts.owner}/${repoParts.repo}`;
-    const pushUrl = `${repoUrl}/tree/${branchName}`;
-    const commitUrl = `${repoUrl}/commit/${commitSha}`;
+    const pushRepoUrl = `${githubServer}/${pushRepoParts.owner}/${pushRepoParts.repo}`;
+    const pushUrl = `${pushRepoUrl}/tree/${branchName}`;
+    const commitUrl = `${pushRepoUrl}/commit/${commitSha}`;
 
     // Update the activation comment with commit link (if a comment was created and changes were pushed)
     // Pass pullNumber so a new comment is created on the PR when no activation comment exists (e.g., schedule triggers)
@@ -1465,8 +1687,8 @@ async function main(config = {}) {
     if (hasChanges) {
       const ciTriggerResult = await pushExtraEmptyCommit({
         branchName,
-        repoOwner: repoParts.owner,
-        repoName: repoParts.repo,
+        repoOwner: pushRepoParts.owner,
+        repoName: pushRepoParts.repo,
         newCommitCount,
       });
       if (ciTriggerResult.success && !ciTriggerResult.skipped) {
@@ -1479,6 +1701,7 @@ async function main(config = {}) {
         success: true,
         number: pullNumber,
         repo: itemRepo,
+        head_repo: pushRepo,
         url: `${repoUrl}/pull/${pullNumber}`,
         branch_name: branchName,
         commit_sha: commitSha,

@@ -18,13 +18,12 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    id: awf
 tracker-id: daily-multi-device-docs-tester
 max-turns: 80  # 10 devices × ~5 turns each + setup/report overhead
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 strict: true
 timeout-minutes: 30
 runtimes:
@@ -34,29 +33,11 @@ tools:
   cli-proxy: true
   github:
     mode: gh-proxy
-  timeout: 120  # Multi-device runs include docs build + preview startup
+  timeout: 120  # Multi-device runs include preview startup and Playwright tests
   playwright:
     mode: cli
   bash:
-    - "npm install*"
-    - "npm run build*"
-    - "npm run dev*"
-    - "npm run preview*"
-    - "npx astro*"
-    - "npx playwright*"
-    - "playwright-cli*"  # CLI-mode playwright commands
-    - "curl*"
-    - "kill*"
-    - "lsof*"
-    - "ls*"             # List files for directory navigation
-    - "pwd*"            # Print working directory
-    - "cd*"             # Change directory
-    - "nohup*"          # Start server in background
-    - "cat*"            # Read log files
-    - "echo*"           # Debug output and shell commands
-    - "sleep*"          # Wait between retries
-    - "rm*"             # Cleanup temp files
-    - "mkdir*"          # Create directories
+    - "*"
 safe-outputs:
   upload-artifact:
     max-uploads: 3
@@ -72,6 +53,7 @@ network:
   allowed:
     - node
     - chrome
+    - playwright
 
 imports:
   - uses: shared/daily-audit-base.md
@@ -81,59 +63,58 @@ imports:
 
   - shared/otlp.md
 pre-agent-steps:
-  - name: Install docs dependencies
-    env:
-      EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
-    run: |
-      cd "$EXPR_GITHUB_WORKSPACE/docs"
-      npm install
   - name: Resolve slide deck PDF
     env:
       EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
     run: |
-      cd "$EXPR_GITHUB_WORKSPACE/docs"
+      cd "$EXPR_GITHUB_WORKSPACE/docs" || exit 1
       node ../scripts/ensure-docs-slide-pdf.js
-  - name: Start docs server
+  - name: Configure Playwright CLI launch options
     env:
-      EXPR_GITHUB_RUN_ID: ${{ github.run_id }}
       EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
     run: |
-      LOG_FILE="/tmp/gh-aw/agent/docs-server-$EXPR_GITHUB_RUN_ID.log"
-      PID_FILE="/tmp/gh-aw/agent/docs-server-$EXPR_GITHUB_RUN_ID.pid"
-      cd "$EXPR_GITHUB_WORKSPACE/docs"
-      npm run build
-      nohup npm run preview -- --host 0.0.0.0 --port 4321 > "$LOG_FILE" 2>&1 &
-      PID=$!
-      echo $PID > "$PID_FILE"
-      echo "Server PID: $PID"
-      echo "Server log: $LOG_FILE"
-  - name: Wait for server readiness
+      mkdir -p "$EXPR_GITHUB_WORKSPACE/.playwright"
+      cat > "$EXPR_GITHUB_WORKSPACE/.playwright/cli.config.json" <<'EOF'
+      {
+        "browser": {
+          "launchOptions": {
+            "chromiumSandbox": false,
+            "args": ["--no-sandbox", "--disable-setuid-sandbox"]
+          }
+        }
+      }
+      EOF
+  - name: Playwright browser launch preflight
+    id: playwright-preflight
     env:
-      EXPR_GITHUB_RUN_ID: ${{ github.run_id }}
+      EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
     run: |
-      PID_FILE="/tmp/gh-aw/agent/docs-server-$EXPR_GITHUB_RUN_ID.pid"
-      LOG_FILE="/tmp/gh-aw/agent/docs-server-$EXPR_GITHUB_RUN_ID.log"
-      MAX_WAIT=135  # Maximum 135 seconds wait time
-      WAITED=0
-      until curl -sf http://localhost:4321/gh-aw/ > /dev/null 2>&1; do
-        # Check if the server process has already died
-        if [ -f "$PID_FILE" ] && ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-          echo "::error::Documentation server process died before becoming ready. Server log:"
-          cat "$LOG_FILE"
-          exit 1
-        fi
-        WAITED=$((WAITED + 3))
-        if [ $WAITED -ge $MAX_WAIT ]; then
-          echo "::error::Documentation server did not start after ${MAX_WAIT}s. Server log:"
-          cat "$LOG_FILE"
-          exit 1
-        fi
-        echo "Waiting for server... ($WAITED/${MAX_WAIT}s)"
-        sleep 3
-      done
-      echo "Server ready at http://localhost:4321/gh-aw/!"
+      PREFLIGHT_LOG="$EXPR_GITHUB_WORKSPACE/.playwright/preflight.log"
+      set +e
+      playwright-cli open --config "$EXPR_GITHUB_WORKSPACE/.playwright/cli.config.json" about:blank > "$PREFLIGHT_LOG" 2>&1
+      PREFLIGHT_STATUS=$?
+      playwright-cli close >> "$PREFLIGHT_LOG" 2>&1 || true
+      if [ $PREFLIGHT_STATUS -ne 0 ]; then
+        echo "preflight_failed=1" >> "$GITHUB_OUTPUT"
+        echo "preflight_log=$PREFLIGHT_LOG" >> "$GITHUB_OUTPUT"
+        echo "Playwright preflight failed; agent will report infrastructure blocker separately."
+      else
+        echo "preflight_failed=0" >> "$GITHUB_OUTPUT"
+      fi
+  - name: Install and build docs
+    env:
+      EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
+    run: |
+      cd "$EXPR_GITHUB_WORKSPACE/docs" || exit 1
+      npm install
+      npm run build
 features:
   gh-aw-detection: true
+evals:
+  - id: device_tests_completed
+    question: Did the agent test the documentation site across the requested device form factors?
+  - id: results_reported
+    question: Did the agent report the multi-device test results and any responsive design or functionality findings?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -158,18 +139,39 @@ This workflow has `strict: true` — it will fail if no safe output is produced.
 3. Use absolute paths or change directory explicitly
 4. Keep token usage low by being efficient with your code and minimizing iterations
 5. **Playwright is available as `playwright-cli` commands in bash** — use `playwright-cli <command>` to automate the browser
+6. Use this Playwright config for every browser command: `${{ github.workspace }}/.playwright/cli.config.json`
+7. If `${{ github.workspace }}/.playwright/preflight.log` contains a Chromium startup error, treat this run as an infrastructure blocker (not a docs regression)
 
 ## Your Mission
 
 Start the documentation preview server and perform comprehensive multi-device testing. Test layout responsiveness, accessibility, interactive elements, and visual rendering across all device types. Use a single Playwright browser instance for efficiency.
 
-## Step 1: Verify Server Availability
+## Step 1: Start Server
 
-The workflow pre-agent steps already installed docs dependencies, built the docs site, and started the Astro preview server.
-Quickly verify it is reachable before testing:
+The docs dependencies are already installed and the site is already built. Start the Astro preview server inside this container:
 
 ```bash
-curl -sf http://localhost:4321/gh-aw/ > /dev/null && echo "Docs server is ready"
+cd "${{ github.workspace }}/docs"
+LOG_FILE="/tmp/docs-server.log"
+nohup npm run preview -- --port 4321 > "$LOG_FILE" 2>&1 &
+echo "Server PID: $!, log: $LOG_FILE"
+```
+
+Then wait for the server to be ready:
+
+```bash
+LOG_FILE="/tmp/docs-server.log"
+MAX_WAIT=120
+WAITED=0
+until curl -sf http://localhost:4321/gh-aw/ > /dev/null 2>&1; do
+  WAITED=$((WAITED + 3))
+  if [ $WAITED -ge $MAX_WAIT ]; then
+    echo "Server log:" && cat "$LOG_FILE"
+    echo "ERROR: Server did not start after ${MAX_WAIT}s" && exit 1
+  fi
+  sleep 3
+done
+echo "Docs server ready at http://localhost:4321/gh-aw/"
 ```
 
 ## Step 2: Device Configuration
@@ -186,8 +188,10 @@ Test these device types based on input `${{ inputs.devices }}`:
 
 Playwright is pre-installed as `@playwright/cli`. Use `playwright-cli <command>` in bash — no MCP tools or Docker container is involved:
 
-- ✅ **Correct**: `playwright-cli browser_navigate --url "http://localhost:4321/gh-aw/"`
-- ✅ **Correct**: Use `playwright-cli browser_run_code --code "async (page) => { ... }"` for custom Playwright code
+- ✅ **Correct**: `playwright-cli open --config "${{ github.workspace }}/.playwright/cli.config.json" "http://localhost:4321/gh-aw/"`
+- ✅ **Correct**: `playwright-cli goto "http://localhost:4321/gh-aw/"`
+- ✅ **Correct**: Use `playwright-cli run-code "async page => { ... }"` for custom Playwright code
+- ❌ **Incorrect**: Do NOT use `playwright-cli browser_*` command names in this workflow (they are MCP tool names, not playwright-cli commands)
 - ❌ **Incorrect**: Do NOT try to `require('playwright')` or create standalone Node.js scripts
 - ❌ **Incorrect**: Do NOT use `mcp__playwright__*` tool names — those are the deprecated MCP mode
 
@@ -196,21 +200,35 @@ Playwright is pre-installed as `@playwright/cli`. Use `playwright-cli <command>`
 Use `waitUntil: 'domcontentloaded'` for navigation to keep checks fast and consistent:
 
 ```bash
-playwright-cli browser_run_code --code "async (page) => {
+playwright-cli run-code "async page => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('http://localhost:4321/gh-aw/', { waitUntil: 'domcontentloaded', timeout: 30000 });
   return { url: page.url(), title: await page.title() };
 }"
 ```
 
-- ✅ **Use `localhost` directly** — playwright-cli runs on the runner, so `localhost` reaches the dev server
-- ❌ **Do NOT use bridge IP detection** — that is only needed in the deprecated MCP mode
+Before device testing, run this preflight gate:
+
+```bash
+PREFLIGHT_LOG="${{ github.workspace }}/.playwright/preflight.log"
+if [ -f "$PREFLIGHT_LOG" ] && grep -qi "error\|failed\|operation not permitted" "$PREFLIGHT_LOG"; then
+  echo "Playwright preflight failed before docs checks. See $PREFLIGHT_LOG"
+  cat "$PREFLIGHT_LOG"
+  # Call noop and stop. Do not classify this as a documentation regression.
+fi
+```
 
 For each device viewport, use playwright-cli to:
+- Open browser with `--config "${{ github.workspace }}/.playwright/cli.config.json"` once per run
 - Set viewport size and navigate to `http://localhost:4321/gh-aw/`
 - Take screenshots and run accessibility audits
 - Test interactions (navigation, search, buttons)
 - Check for layout issues (overflow, truncation, broken layouts)
+
+For mobile and tablet viewports (width ≤1050px), test the responsive header navigation explicitly:
+- Click `.hamburger-btn` and verify its `aria-expanded` attribute is `true`.
+- Target a visible `.tablet-dropdown .dropdown-link[href$="setup/quick-start/"]:visible` rather than a generic `nav a[href]`, which can select the hidden desktop navigation.
+- Click the visible link and verify that it navigates to its expected URL.
 
 ## Step 4: Analyze Results
 
@@ -286,8 +304,7 @@ Label with: `documentation`, `testing`, `automated`
 
 ## Step 6: Cleanup
 
-No manual server cleanup is required in-agent for this workflow.
-The server lifecycle is handled by pre-agent setup and job teardown.
+No manual server cleanup is required. The server process will be cleaned up automatically when the agent job exits.
 
 ## Summary
 
@@ -299,5 +316,7 @@ The server lifecycle is handled by pre-agent setup and job teardown.
 The workflow will fail if you do not call either the `create-issue` or `noop` tool before exiting, regardless of whether testing succeeded or not.
 
 ### Output Format
+
+Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body. Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks for progressive disclosure.
 
 Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

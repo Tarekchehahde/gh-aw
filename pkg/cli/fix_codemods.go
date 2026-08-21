@@ -18,6 +18,12 @@ type Codemod struct {
 	IntroducedIn string // Version where this codemod was introduced
 	Guided       bool   // If true, errors from Apply are guided/manual-fix errors (not auto-correctable)
 	Apply        func(content string, frontmatter map[string]any) (string, bool, error)
+	// ApplyWithContext is an optional extension of Apply that also receives the absolute path of the
+	// workflow file being processed. Codemods that need to resolve imported tools or included files
+	// to derive the effective configuration should set this field; fix_command.go will call it in
+	// preference to Apply when a file path is available. When ApplyWithContext is nil, Apply is
+	// used as the sole handler.
+	ApplyWithContext func(content string, frontmatter map[string]any, filePath string) (string, bool, error)
 }
 
 // GuidedError is returned when a codemod with Guided: true emits an error.
@@ -65,6 +71,7 @@ func GetAllCodemods() []Codemod {
 		getInstallScriptURLCodemod(),
 		getBashAnonymousRemovalCodemod(),                           // Replace bash: with bash: false
 		getBashSingleQuotedArgsCodemod(),                           // Rewrite single-quoted bash args to double-quoted form
+		getBashAllowlistUnsupportedEngineCodemod(),                 // Detect restricted tools.bash on engines that ignore it and emit guided error
 		getActivationOutputsCodemod(),                              // Transform needs.activation.outputs.* to steps.sanitized.outputs.*
 		getRolesToOnRolesCodemod(),                                 // Move top-level roles to on.roles
 		getBotsToOnBotsCodemod(),                                   // Move top-level bots to on.bots
@@ -84,29 +91,37 @@ func GetAllCodemods() []Codemod {
 		getSafeOutputMergePRConstraintsCodemod(),                   // Rename deprecated merge-pull-request allowed-labels/allowed-branches
 		getSafeOutputAddReviewerAllowlistsCodemod(),                // Rename deprecated add-reviewer reviewers/team-reviewers
 		getSafeOutputDispatchRepositoryKeyCodemod(),                // Rename deprecated safe-outputs.dispatch_repository key
+		getSafeJobRunnerCodemod(),                                  // Rename deprecated safe-outputs.jobs runner fields
 		getSafeInputsToMCPScriptsCodemod(),                         // Rename safe-inputs to mcp-scripts
 		getRateLimitToUserRateLimitCodemod(),                       // Rename rate-limit to user-rate-limit with max key migration
 		getEffectiveTokensToAICreditsCodemod(),                     // Migrate obsolete effective-token budget keys to AI credits keys
 		getMessagesEffectiveTokensSuffixToAICreditsSuffixCodemod(), // Migrate safe-outputs.messages ET suffix placeholders to AI credits suffix placeholders
+		getSerenaMCPContainerLocationCodemod(),                     // Update legacy Serena MCP image and entrypoint to the project-maintained location
 		getSerenaToSharedImportCodemod(),                           // Migrate removed tools.serena to shared/mcp/serena.md import
 		getWorkflowRunBranchesCodemod(),                            // Add default branches to bare on.workflow_run trigger
 		getCheckoutPersistCredentialsFalseCodemod(),                // Add with.persist-credentials: false to actions/checkout steps
 		getPullRequestTargetCheckoutFalseCodemod(),                 // Add checkout: false for pull_request_target workflows when safe
 		getDependabotPermissionsCodemod(),                          // Add vulnerability-alerts: read when dependabot toolset is used
 		getGitHubReposToAllowedReposCodemod(),                      // Rename deprecated tools.github.repos to tools.github.allowed-repos
+		getToolsetSingularToToolsetsCodemod(),                      // Rename mistyped tools.github.toolset to tools.github.toolsets
+		getAllowedReposCurrentToGitHubRepositoryCodemod(),          // Migrate legacy tools.github.allowed-repos: current to ${{ github.repository }}
 		getCopilotRequestsFeatureToPermissionsCodemod(),            // Migrate features.copilot-requests to permissions.copilot-requests
 		getByokCopilotFeatureRemovalCodemod(),                      // Remove deprecated features.byok-copilot (Copilot BYOK is default)
 		getInlineAgentsFeatureRemovalCodemod(),                     // Remove deprecated features.inline-agents (inline sub-agents now default)
 		getCliProxyFeatureToGitHubModeCodemod(),                    // Migrate features.cli-proxy: true to tools.github.mode: gh-proxy
 		getDIFCProxyToIntegrityProxyCodemod(),                      // Migrate deprecated features.difc-proxy to tools.github.integrity-proxy
 		getMountAsCLIsToCLIProxyCodemod(),                          // Rename tools.mount-as-clis to tools.cli-proxy and remove features.mcp-cli
+		getMinIntegrityNoneRequiresBashCodemod(),                   // Add tools.bash: false when tools.github.min-integrity is 'none'
+		getCLIProxyBashDisabledCodemod(),                           // Set tools.cli-proxy: false when tools.bash is disabled
 		getSandboxMCPContainerRemovalCodemod(),                     // Remove deprecated sandbox.mcp.container (now managed internally)
 		getSandboxMCPVersionRemovalCodemod(),                       // Remove deprecated sandbox.mcp.version (now managed internally)
 		getSandboxAgentFalseRemovalCodemod(),                       // Remove deprecated sandbox.agent: false (rejected in strict mode)
+		getSandboxRuntimeProfileCodemod(),                          // Migrate sandbox.agent.sudo / legacy-security to sandbox.agent.runtime profiles
 		getInferToDisableModelInvocationCodemod(),                  // Migrate deprecated 'infer' to 'disable-model-invocation'
 		getRunInstallScriptsToRuntimesNodeCodemod(),                // Move top-level run-install-scripts under runtimes.node
 		getMentionsAllowTeamMembersCodemod(),                       // Rename allow-team-members to allowed-collaborators in safe-outputs.mentions
 		getEngineCopilotSDKDriverToDriverCodemod(),                 // Rename deprecated engine.copilot-sdk-driver to engine.driver
+		getEngineModelToTopLevelCodemod(),                          // Move engine.model to top-level model
 	}
 	fixCodemodsLog.Printf("Loaded codemod registry: %d codemods available", len(codemods))
 	return codemods

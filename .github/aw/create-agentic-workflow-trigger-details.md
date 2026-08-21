@@ -10,14 +10,7 @@ For recurring reports, audits, and stakeholder digests, set these create-specifi
 - use `add-comment` only when updating an existing issue or pull request instead of creating a new report destination
 - add `workflow_dispatch` when manual reruns, backfills, or preview runs should be possible
 
-Recurring-report lifecycle checklist (compact):
-
-- [ ] enable `close-older-issues: true` for issue-based recurring reports unless the requester explicitly wants parallel open threads
-- [ ] define one explicit report window (for example `last 7 full days ending at run start (UTC)` or `since previous successful run`)
-- [ ] define grouping dimensions that match audience decisions (for example team, area, owner, severity, status)
-- [ ] derive one stable dedup key per scope and window (for example `stakeholder-digest:<scope>:<window-id>`) and search for it before creating a new issue
-
-Follow [triggers.md](triggers.md) for the report window, grouping dimensions, deduplication key, and empty-window `noop` rule, and [workflow-patterns.md](workflow-patterns.md) for the digest/incident skeletons. When the digest depends on missing or inconsistent metadata, group by the next-best available dimension, use an explicit "Unclassified" bucket, and never invent classifications — call `noop` only when the window itself has zero events.
+For the recurring-report window, grouping dimensions, deduplication key, `close-older-issues` lifecycle, and empty-window/missing-metadata `noop` rules, follow the canonical defaults in [report.md](report.md). Use [workflow-patterns.md](workflow-patterns.md) for the digest/incident skeletons.
 
 ## Persona-oriented scenario map
 
@@ -28,6 +21,22 @@ Use these defaults when the requester frames the automation in non-engineering p
 | Program Manager or information-worker digest | `schedule` plus `workflow_dispatch` for previews, reruns, and backfills | `github` (`gh-proxy`); `create-issue` by default | Define the report window, grouping dimensions, deduplication key, and `noop` behavior for empty windows |
 | Designer or design-governance review | `pull_request` with `paths:` scoped to UI, design-token, copy, or asset files | `github` (`gh-proxy`); optional `playwright`; `add-comment` on the PR | State the review rubric (for example accessibility, token consistency, asset policy), and call `noop` when scoped files are unchanged |
 | Legal / compliance / documentation-policy review | `pull_request` with scoped `paths:` or `schedule` for recurring audits | `github` (`gh-proxy`); `add-comment` for findings; `create-issue` only for violations needing follow-up | Classify findings against the policy, search for existing open issues before escalating, and call `noop` when there is no in-scope change or violation |
+
+## Milestone slip / dependency-escalation trigger decision
+
+Coordination-style requests (for example "tell me when a milestone is slipping" or "flag blocked cross-team dependencies") are often ambiguous between a recurring digest and an event-driven alert. Use this decision order:
+
+1. **Default to `schedule` (+ `workflow_dispatch`)** when the request is about ongoing visibility into milestone health or dependency status over time (a digest), not a single triggering event. Follow the [Recurring Digest Defaults](report.md#recurring-digest-defaults) for window, grouping, and dedup key.
+2. **Use `issues` (`types: [labeled, milestoned, demilestoned]`)** only when the requester explicitly wants an immediate reaction to a specific state change (for example the moment an issue is relabeled `blocked` or moved off a milestone), not a periodic summary.
+3. **Combine both** only when the requester explicitly asks for both an immediate alert and a periodic rollup; keep them as two distinct trigger blocks (or two workflows) rather than one ambiguous trigger, so each has its own dedup key.
+
+| Signal in the request | Trigger | Grouping dimension | Dedup key example |
+|---|---|---|---|
+| "weekly/daily view of milestones at risk" | `schedule` + `workflow_dispatch` | milestone, owning team | `milestone-risk:<milestone>:<window-id>` |
+| "let me know the moment a milestone slips" | `issues` (`milestoned`/`demilestoned`) or `workflow_run` if computed by CI | milestone | `milestone-slip:<milestone>:<issue-number>` |
+| "flag blocked dependencies across teams" (ongoing) | `schedule` + `workflow_dispatch` | dependency, blocking team, severity | `dependency-escalation:<dependency>:<window-id>` |
+
+Call `noop` when the window has no slipped milestones or newly blocked dependencies, and search for an existing open issue with the same dedup key before creating a new one.
 
 ## Backend review guidance
 
@@ -96,6 +105,31 @@ For dependency-license compliance and policy review on PRs:
 | All new dependencies in allowed tier | `noop` (or brief `add-comment` confirmation when the workflow prompt explicitly requests a confirmation comment) |
 | Dependencies in needs-review tier | `add-comment` listing them with license details and requesting maintainer confirmation |
 | Blocked dependency added | `add-comment` flagging the violation + `create-issue` for team-wide record (skip `create-issue` if a matching open issue already exists) |
+
+### Scheduled compliance-policy audit example
+
+Monthly (or otherwise recurring) audits of policy/disclosure files use `schedule` instead of `pull_request`, since there is no single triggering PR event to react to:
+
+```yaml
+on:
+  schedule:
+    - cron: "0 9 1 * *" # first of the month
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+safe-outputs:
+  create-issue:
+    close-older-issues: true
+```
+
+Prompt guidance:
+
+- Check for the presence and freshness of required policy/disclosure files (for example `SECURITY.md`, `CODE_OF_CONDUCT.md`, `LICENSE`, a responsible-disclosure contact) against the project's compliance checklist.
+- Reporting window: one calendar month; dedup key example `compliance-audit:<window-id>` (for example `compliance-audit:2026-08`).
+- Group findings by policy area (security disclosure, licensing, code of conduct) rather than by file.
+- Escalate with `create-issue` only when a required file is missing, stale (for example no update in over a year), or contains a broken disclosure contact; use `close-older-issues: true` so each month's audit supersedes the prior one.
+- Call `noop` when every required policy/disclosure file is present and current.
 
 ## Coverage-analysis guidance
 

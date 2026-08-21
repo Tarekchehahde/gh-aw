@@ -1,0 +1,140 @@
+import { AST_NODE_TYPES, ESLintUtils, TSESLint, TSESTree } from "@typescript-eslint/utils";
+
+const createRule = ESLintUtils.RuleCreator(name => `https://github.com/github/gh-aw/tree/main/eslint-factory#${name}`);
+
+function isIdentifierNamed(node: TSESTree.Node, name: string): node is TSESTree.Identifier {
+  return node.type === AST_NODE_TYPES.Identifier && node.name === name;
+}
+
+/**
+ * Checks whether `node` matches `<errVar> && <errVar>.stack` (LogicalExpression).
+ */
+function isErrAndErrStack(node: TSESTree.Node, errVar: string): boolean {
+  if (node.type !== AST_NODE_TYPES.LogicalExpression || node.operator !== "&&") return false;
+  if (!isIdentifierNamed(node.left, errVar)) return false;
+  const right = node.right;
+  if (right.type !== AST_NODE_TYPES.MemberExpression || right.computed) return false;
+  return isIdentifierNamed(right.object, errVar) && isIdentifierNamed(right.property, "stack");
+}
+
+/**
+ * Checks whether `node` matches `<errVar> instanceof Error` (BinaryExpression).
+ */
+function isErrInstanceofError(node: TSESTree.Node, errVar: string): boolean {
+  if (node.type !== AST_NODE_TYPES.BinaryExpression || node.operator !== "instanceof") return false;
+  return isIdentifierNamed(node.left, errVar) && isIdentifierNamed(node.right, "Error");
+}
+
+/**
+ * Checks whether `node` matches `<errVar>.stack` (MemberExpression).
+ */
+function isErrStack(node: TSESTree.Node, errVar: string): boolean {
+  if (node.type !== AST_NODE_TYPES.MemberExpression || node.computed) return false;
+  return isIdentifierNamed(node.object, errVar) && isIdentifierNamed(node.property, "stack");
+}
+
+/**
+ * Checks whether `node` matches `String(<errVar>)`.
+ */
+function isStringErr(node: TSESTree.Node, errVar: string): boolean {
+  if (node.type !== AST_NODE_TYPES.CallExpression) return false;
+  if (!isIdentifierNamed(node.callee, "String")) return false;
+  if (node.arguments.length !== 1) return false;
+  return isIdentifierNamed(node.arguments[0], errVar);
+}
+
+function isDefinitionAvailableAtNode(definition: TSESLint.Scope.Definition, node: TSESTree.Node): boolean {
+  if (definition.type === "ImportBinding" || definition.type === "FunctionName") {
+    return true;
+  }
+  const definitionNode = definition.name ?? definition.node;
+  if (!definitionNode?.range || !node.range) return false;
+  if (definitionNode.range[0] >= node.range[0]) return false;
+  // If the node falls inside the variable declarator's range, the binding is in the
+  // temporal dead zone at that point (e.g. `const getErrorMessage = <node>`).
+  const declNode = definition.node;
+  if (declNode?.range && node.range[0] >= declNode.range[0] && node.range[1] <= declNode.range[1]) {
+    return false;
+  }
+  return true;
+}
+
+export const noErrStackThenStringFallbackRule = createRule({
+  name: "no-err-stack-then-string-fallback",
+  meta: {
+    type: "suggestion",
+    hasSuggestions: true,
+    docs: {
+      description:
+        "Prefer getErrorMessage(err) over `err && err.stack ? err.stack : String(err)` or " +
+        "`err instanceof Error ? err.stack : String(err)`. " +
+        "The stack-trace form surfaces noisy implementation details; getErrorMessage() returns " +
+        "the concise error message and is available in every actions/setup/js script via error_helpers.cjs.",
+    },
+    schema: [],
+    messages: {
+      preferGetErrorMessage: "Prefer getErrorMessage({{errorVar}}) from error_helpers.cjs. The `{{errorVar}}.stack` ternary surfaces noisy stack frames; getErrorMessage() returns a clean, consistent message.",
+      replaceWithGetErrorMessage: "Replace with getErrorMessage({{errorVar}}) — ensure getErrorMessage is imported from error_helpers.cjs before applying.",
+    },
+  },
+  defaultOptions: [],
+  create(context) {
+    const sourceCode = context.sourceCode;
+    type SourceCodeScope = ReturnType<typeof sourceCode.getScope>;
+
+    function hasResolvableLocalBinding(node: TSESTree.Node, name: string): boolean {
+      let scope: SourceCodeScope | null = sourceCode.getScope(node);
+      while (scope) {
+        const variable = scope.set.get(name);
+        if (variable && variable.defs.some(def => isDefinitionAvailableAtNode(def, node))) {
+          return true;
+        }
+        scope = scope.upper;
+      }
+      return false;
+    }
+
+    return {
+      ConditionalExpression(node) {
+        // Patterns:
+        //   <errVar> && <errVar>.stack ? <errVar>.stack : String(<errVar>)
+        //   <errVar> instanceof Error  ? <errVar>.stack : String(<errVar>)
+        const test = node.test;
+
+        let errVar: string;
+        if (test.type === AST_NODE_TYPES.LogicalExpression) {
+          // Resolve errVar from the test's left-hand side identifier
+          if (test.left.type !== AST_NODE_TYPES.Identifier) return;
+          errVar = test.left.name;
+          if (!isErrAndErrStack(test, errVar)) return;
+        } else if (test.type === AST_NODE_TYPES.BinaryExpression) {
+          if (test.left.type !== AST_NODE_TYPES.Identifier) return;
+          errVar = test.left.name;
+          if (!isErrInstanceofError(test, errVar)) return;
+        } else {
+          return;
+        }
+
+        if (!isErrStack(node.consequent, errVar)) return;
+        if (!isStringErr(node.alternate, errVar)) return;
+
+        context.report({
+          node,
+          messageId: "preferGetErrorMessage",
+          data: { errorVar: errVar },
+          suggest: hasResolvableLocalBinding(node, "getErrorMessage")
+            ? [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: errVar },
+                  fix(fixer) {
+                    return fixer.replaceText(node, `getErrorMessage(${errVar})`);
+                  },
+                },
+              ]
+            : [],
+        });
+      },
+    };
+  },
+});

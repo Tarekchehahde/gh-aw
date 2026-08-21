@@ -17,6 +17,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import os from "os";
 import { generateGitPatch } from "./generate_git_patch.cjs";
+import { generateGitBundle } from "./generate_git_bundle.cjs";
 
 // generateGitPatch uses execGitSync from git_helpers.cjs which calls core.debug / core.error
 // as GitHub Actions globals. Provide a no-op mock so these tests work outside of Actions.
@@ -951,6 +952,198 @@ describe("git patch integration tests", () => {
       }
     });
 
+    it("should base the full-mode patch on GITHUB_SHA when dispatched from a non-default branch", async () => {
+      // Simulate workflow_dispatch from a branch that is ahead of main: the
+      // dispatched branch has commits that are not on main, and the agent adds
+      // one commit on top of it.
+      execGit(["checkout", "-b", "dispatch-branch"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "dispatch1.txt"), "dispatched work 1\n");
+      execGit(["add", "dispatch1.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Dispatched branch commit 1"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "dispatch2.txt"), "dispatched work 2\n");
+      execGit(["add", "dispatch2.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Dispatched branch commit 2"], { cwd: workingRepo });
+
+      const dispatchedSha = execGit(["rev-parse", "HEAD"], { cwd: workingRepo }).stdout.trim();
+
+      // Agent branch created from the dispatched commit with a single commit
+      execGit(["checkout", "-b", "agent-fix/example"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "agent.txt"), "agent change\n");
+      execGit(["add", "agent.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Agent commit on dispatched branch"], { cwd: workingRepo });
+
+      execGit(["fetch", "origin", "main"], { cwd: workingRepo });
+
+      const origSha = process.env.GITHUB_SHA;
+      process.env.GITHUB_SHA = dispatchedSha;
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitPatch("agent-fix/example", "main", { mode: "full" });
+
+        expect(result.success).toBe(true);
+        expect(result.baseCommit).toBe(dispatchedSha);
+
+        const patchContent = fs.readFileSync(result.patchPath, "utf8");
+        expect(patchContent).toContain("Agent commit on dispatched branch");
+        expect(patchContent).not.toContain("Dispatched branch commit 1");
+        expect(patchContent).not.toContain("Dispatched branch commit 2");
+      } finally {
+        if (origSha === undefined) {
+          delete process.env.GITHUB_SHA;
+        } else {
+          process.env.GITHUB_SHA = origSha;
+        }
+        restore();
+      }
+    });
+
+    it("should fall back to merge-base when GITHUB_SHA equals the agent branch tip (no agent commits yet)", async () => {
+      // Simulate workflow_dispatch from a branch that is ahead of main, where the
+      // agent branch was created from it but no commits have been made yet, so
+      // GITHUB_SHA equals the agent branch tip. Basing the patch on GITHUB_SHA in
+      // this case would produce an empty patch; the merge-base fallback must be
+      // used instead so the dispatched branch's commits are still visible.
+      execGit(["checkout", "-b", "dispatch-branch-2"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "dispatch3.txt"), "dispatched work 3\n");
+      execGit(["add", "dispatch3.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Dispatched branch commit 3"], { cwd: workingRepo });
+
+      const dispatchedSha = execGit(["rev-parse", "HEAD"], { cwd: workingRepo }).stdout.trim();
+
+      // Agent branch created from the dispatched commit, but no agent commits yet.
+      execGit(["checkout", "-b", "agent-fix/no-commits-yet"], { cwd: workingRepo });
+
+      execGit(["fetch", "origin", "main"], { cwd: workingRepo });
+
+      const origSha = process.env.GITHUB_SHA;
+      process.env.GITHUB_SHA = dispatchedSha;
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitPatch("agent-fix/no-commits-yet", "main", { mode: "full" });
+
+        expect(result.success).toBe(true);
+        // Must not use GITHUB_SHA as the base (that would be a zero-commit patch);
+        // the merge-base with main is used instead.
+        expect(result.baseCommit).not.toBe(dispatchedSha);
+
+        const patchContent = fs.readFileSync(result.patchPath, "utf8");
+        expect(patchContent).toContain("Dispatched branch commit 3");
+      } finally {
+        if (origSha === undefined) {
+          delete process.env.GITHUB_SHA;
+        } else {
+          process.env.GITHUB_SHA = origSha;
+        }
+        restore();
+      }
+    });
+
+    it("should still use the merge-base in full mode when GITHUB_SHA is on the default branch", async () => {
+      const mainSha = execGit(["rev-parse", "main"], { cwd: workingRepo }).stdout.trim();
+
+      execGit(["checkout", "-b", "default-dispatch-branch"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "agent1.txt"), "agent change 1\n");
+      execGit(["add", "agent1.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Agent commit one"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "agent2.txt"), "agent change 2\n");
+      execGit(["add", "agent2.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Agent commit two"], { cwd: workingRepo });
+
+      execGit(["fetch", "origin", "main"], { cwd: workingRepo });
+
+      const origSha = process.env.GITHUB_SHA;
+      process.env.GITHUB_SHA = mainSha;
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitPatch("default-dispatch-branch", "main", { mode: "full" });
+
+        expect(result.success).toBe(true);
+        expect(result.baseCommit).toBe(mainSha);
+
+        const patchContent = fs.readFileSync(result.patchPath, "utf8");
+        expect(patchContent).toContain("Agent commit one");
+        expect(patchContent).toContain("Agent commit two");
+
+        const logLines = execGit(["log", "--oneline", `${mainSha}..HEAD`], { cwd: workingRepo })
+          .stdout.trim()
+          .split("\n");
+        expect(logLines).toHaveLength(2);
+      } finally {
+        if (origSha === undefined) {
+          delete process.env.GITHUB_SHA;
+        } else {
+          process.env.GITHUB_SHA = origSha;
+        }
+        restore();
+      }
+    });
+
+    it("should base the full-mode bundle on GITHUB_SHA when dispatched from a non-default branch", async () => {
+      execGit(["checkout", "-b", "bundle-dispatch-branch"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "bundle-dispatch.txt"), "dispatched work\n");
+      execGit(["add", "bundle-dispatch.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Bundle dispatched branch commit"], { cwd: workingRepo });
+
+      const dispatchedSha = execGit(["rev-parse", "HEAD"], { cwd: workingRepo }).stdout.trim();
+
+      execGit(["checkout", "-b", "agent-bundle-branch"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "bundle-agent.txt"), "agent change\n");
+      execGit(["add", "bundle-agent.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Agent bundle commit"], { cwd: workingRepo });
+
+      execGit(["fetch", "origin", "main"], { cwd: workingRepo });
+
+      const origSha = process.env.GITHUB_SHA;
+      process.env.GITHUB_SHA = dispatchedSha;
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitBundle("agent-bundle-branch", "main", { mode: "full" });
+
+        expect(result.success).toBe(true);
+        expect(result.baseCommit).toBe(dispatchedSha);
+      } finally {
+        if (origSha === undefined) {
+          delete process.env.GITHUB_SHA;
+        } else {
+          process.env.GITHUB_SHA = origSha;
+        }
+        restore();
+      }
+    });
+
+    it("should fall back to merge-base for the bundle when GITHUB_SHA equals the agent branch tip (no agent commits yet)", async () => {
+      execGit(["checkout", "-b", "bundle-dispatch-branch-2"], { cwd: workingRepo });
+      fs.writeFileSync(path.join(workingRepo, "bundle-dispatch2.txt"), "dispatched work 2\n");
+      execGit(["add", "bundle-dispatch2.txt"], { cwd: workingRepo });
+      execGit(["commit", "-m", "Bundle dispatched branch commit 2"], { cwd: workingRepo });
+
+      const dispatchedSha = execGit(["rev-parse", "HEAD"], { cwd: workingRepo }).stdout.trim();
+
+      // Agent branch created from the dispatched commit, but no agent commits yet.
+      execGit(["checkout", "-b", "agent-bundle-branch-no-commits"], { cwd: workingRepo });
+
+      execGit(["fetch", "origin", "main"], { cwd: workingRepo });
+
+      const origSha = process.env.GITHUB_SHA;
+      process.env.GITHUB_SHA = dispatchedSha;
+      const restore = setTestEnv(workingRepo);
+      try {
+        const result = await generateGitBundle("agent-bundle-branch-no-commits", "main", { mode: "full" });
+
+        expect(result.success).toBe(true);
+        // Must not use GITHUB_SHA as the base (that would be a zero-commit bundle);
+        // the merge-base with main is used instead.
+        expect(result.baseCommit).not.toBe(dispatchedSha);
+      } finally {
+        if (origSha === undefined) {
+          delete process.env.GITHUB_SHA;
+        } else {
+          process.env.GITHUB_SHA = origSha;
+        }
+        restore();
+      }
+    });
+
     it("should choose origin/main as the closest Strategy 3 base in full mode", async () => {
       // Create a stale remote ref that sorts before origin/main.
       execGit(["checkout", "-b", "aaa-stale"], { cwd: workingRepo });
@@ -1004,5 +1197,69 @@ describe("git patch integration tests", () => {
         restore();
       }
     });
+  });
+});
+
+describe("generateGitBundle hook bypass", () => {
+  let remoteDir;
+  let workDir;
+
+  beforeEach(() => {
+    remoteDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-bundle-it-remote-"));
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-bundle-it-work-"));
+    execGit(["init", "--bare"], { cwd: remoteDir });
+    execGit(["clone", remoteDir, workDir]);
+    execGit(["config", "user.name", "Test User"], { cwd: workDir });
+    execGit(["config", "user.email", "test@example.com"], { cwd: workDir });
+  });
+
+  afterEach(() => {
+    cleanupTestRepo(remoteDir);
+    cleanupTestRepo(workDir);
+  });
+
+  it("succeeds when repository post-checkout hook exits non-zero (e.g. git-lfs missing)", async () => {
+    // Simulate a repository whose post-checkout hook fails as git-lfs would when
+    // git-lfs is not on PATH.  Filtered bundle synthesis creates a temporary worktree
+    // internally and must bypass this hook via core.hooksPath.
+    fs.writeFileSync(path.join(workDir, "base.txt"), "base\n");
+    execGit(["add", "base.txt"], { cwd: workDir });
+    execGit(["commit", "-m", "base commit"], { cwd: workDir });
+    execGit(["branch", "-M", "main"], { cwd: workDir });
+    execGit(["push", "-u", "origin", "main"], { cwd: workDir });
+
+    execGit(["checkout", "-b", "pr-branch"], { cwd: workDir });
+    fs.writeFileSync(path.join(workDir, "change.txt"), "pr change\n");
+    execGit(["add", "change.txt"], { cwd: workDir });
+    execGit(["commit", "-m", "pr commit"], { cwd: workDir });
+    execGit(["push", "-u", "origin", "pr-branch"], { cwd: workDir });
+
+    // Add a second (unpushed) commit to force incremental filtered mode.
+    fs.writeFileSync(path.join(workDir, "change2.txt"), "second change\n");
+    execGit(["add", "change2.txt"], { cwd: workDir });
+    execGit(["commit", "-m", "second pr commit"], { cwd: workDir });
+
+    // Install a failing post-checkout hook (simulates git-lfs or similar absent tooling).
+    const hooksDir = path.join(workDir, "test-hooks");
+    fs.mkdirSync(hooksDir, { recursive: true });
+    execGit(["config", "core.hooksPath", hooksDir], { cwd: workDir });
+    const hookPath = path.join(hooksDir, "post-checkout");
+    fs.writeFileSync(hookPath, "#!/bin/sh\necho 'git-lfs filter-process: git-lfs not found' >&2\nexit 2\n");
+    fs.chmodSync(hookPath, 0o755);
+
+    const result = await generateGitBundle("pr-branch", "main", {
+      mode: "incremental",
+      cwd: workDir,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.bundlePath).toBeTruthy();
+    expect(fs.statSync(result.bundlePath).size).toBeGreaterThan(0);
+
+    // Verify the bundle contains the expected commits by listing its heads.
+    const bundleHeads = execGit(["bundle", "list-heads", result.bundlePath], { cwd: workDir }).stdout;
+    expect(bundleHeads).toContain("refs/heads/pr-branch");
+
+    fs.rmSync(result.bundlePath, { force: true });
   });
 });

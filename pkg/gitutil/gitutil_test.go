@@ -3,6 +3,7 @@
 package gitutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,133 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestIsRateLimitError(t *testing.T) {
-	tests := []struct {
-		name     string
-		errMsg   string
-		expected bool
-	}{
-		{
-			name:     "GitHub API rate limit exceeded (HTTP 403)",
-			errMsg:   "gh: API rate limit exceeded for installation. If you reach out to GitHub Support for help, please include the request ID (HTTP 403)",
-			expected: true,
-		},
-		{
-			name:     "rate limit exceeded lowercase",
-			errMsg:   "rate limit exceeded",
-			expected: true,
-		},
-		{
-			name:     "HTTP 403 with API rate limit message",
-			errMsg:   "HTTP 403: API rate limit exceeded for installation.",
-			expected: true,
-		},
-		{
-			name:     "secondary rate limit in GitHub error message",
-			errMsg:   "gh: You have exceeded a secondary rate limit",
-			expected: true,
-		},
-		{
-			name:     "authentication error is not a rate limit error",
-			errMsg:   "authentication required. Run 'gh auth login' first",
-			expected: false,
-		},
-		{
-			name:     "not found error is not a rate limit error",
-			errMsg:   "HTTP 404: Not Found",
-			expected: false,
-		},
-		{
-			name:     "empty string",
-			errMsg:   "",
-			expected: false,
-		},
-		{
-			name:     "unrelated error message",
-			errMsg:   "failed to parse workflow runs: unexpected end of JSON input",
-			expected: false,
-		},
-		{
-			name:     "mixed case",
-			errMsg:   "API Rate Limit Exceeded for installation",
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IsRateLimitError(tt.errMsg)
-			assert.Equal(t, tt.expected, result, "IsRateLimitError(%q) should return %v", tt.errMsg, tt.expected)
-		})
-	}
-}
-
-func TestIsAuthError(t *testing.T) {
-	tests := []struct {
-		name     string
-		errMsg   string
-		expected bool
-	}{
-		{
-			name:     "GH_TOKEN mention",
-			errMsg:   "GH_TOKEN is not set",
-			expected: true,
-		},
-		{
-			name:     "GITHUB_TOKEN mention",
-			errMsg:   "GITHUB_TOKEN is missing or invalid",
-			expected: true,
-		},
-		{
-			name:     "authentication error",
-			errMsg:   "authentication required",
-			expected: true,
-		},
-		{
-			name:     "not logged in",
-			errMsg:   "not logged into any GitHub hosts",
-			expected: true,
-		},
-		{
-			name:     "unauthorized",
-			errMsg:   "HTTP 401: Unauthorized",
-			expected: true,
-		},
-		{
-			name:     "forbidden",
-			errMsg:   "HTTP 403: Forbidden",
-			expected: true,
-		},
-		{
-			name:     "permission denied",
-			errMsg:   "permission denied: insufficient scope",
-			expected: true,
-		},
-		{
-			name:     "saml enforcement",
-			errMsg:   "Resource protected by organization SAML enforcement",
-			expected: true,
-		},
-		{
-			name:     "rate limit error is not an auth error",
-			errMsg:   "API rate limit exceeded for installation",
-			expected: false,
-		},
-		{
-			name:     "empty string",
-			errMsg:   "",
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IsAuthError(tt.errMsg)
-			assert.Equal(t, tt.expected, result, "IsAuthError(%q) should return %v", tt.errMsg, tt.expected)
-		})
-	}
-}
 
 func TestIsHexString(t *testing.T) {
 	tests := []struct {
@@ -245,6 +119,60 @@ func TestIsValidFullSHA(t *testing.T) {
 	}
 }
 
+func TestIsValidFullSHACaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{name: "valid lowercase full SHA", input: "abcdef0123456789abcdef0123456789abcdef01", expected: true},
+		{name: "valid uppercase full SHA", input: "ABCDEF0123456789ABCDEF0123456789ABCDEF01", expected: true},
+		{name: "invalid short SHA", input: "abcdef0", expected: false},
+		{name: "invalid non-hex character", input: "abcdef0123456789abcdef0123456789abcdef0g", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsValidFullSHACaseInsensitive(tt.input))
+		})
+	}
+}
+
+func TestIsGitObjectID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "valid sha1 object id",
+			input:    "abcdef0123456789abcdef0123456789abcdef01",
+			expected: true,
+		},
+		{
+			name:     "valid sha256 object id",
+			input:    "abcdef0123456789abcdef0123456789abcdef01abcdef0123456789abcdef01",
+			expected: true,
+		},
+		{
+			name:     "rejects uppercase object id",
+			input:    "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+			expected: false,
+		},
+		{
+			name:     "rejects ref expression",
+			input:    "HEAD~1",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isGitObjectID(tt.input))
+		})
+	}
+}
+
 func TestExtractBaseRepo(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -284,6 +212,58 @@ func TestExtractBaseRepo(t *testing.T) {
 			assert.Equal(t, tt.expected, result, "ExtractBaseRepo(%q) should return %q", tt.input, tt.expected)
 		})
 	}
+}
+
+func TestGetwd(t *testing.T) {
+	t.Run("returns the current working directory", func(t *testing.T) {
+		dir, err := Getwd()
+		require.NoError(t, err, "Getwd should succeed in a normal test environment")
+		assert.NotEmpty(t, dir, "Getwd should return a non-empty path")
+
+		wantDir, wantErr := os.Getwd()
+		require.NoError(t, wantErr)
+		assert.Equal(t, wantDir, dir, "Getwd should match os.Getwd")
+	})
+
+	t.Run("returns wrapped error with recovery guidance", func(t *testing.T) {
+		orig := osGetwd
+		t.Cleanup(func() { osGetwd = orig })
+		osGetwd = func() (string, error) {
+			return "", errors.New("cwd unavailable")
+		}
+
+		_, err := Getwd()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "cwd unavailable")
+		require.ErrorContains(t, err, "failed to determine current working directory")
+		require.ErrorContains(t, err, "valid working directory and read permissions")
+	})
+}
+
+func TestUserHomeDir(t *testing.T) {
+	t.Run("returns the current user's home directory", func(t *testing.T) {
+		home, err := UserHomeDir()
+		require.NoError(t, err, "UserHomeDir should succeed in a normal test environment")
+		assert.NotEmpty(t, home, "UserHomeDir should return a non-empty path")
+
+		wantHome, wantErr := os.UserHomeDir()
+		require.NoError(t, wantErr)
+		assert.Equal(t, wantHome, home, "UserHomeDir should match os.UserHomeDir")
+	})
+
+	t.Run("returns wrapped error with recovery guidance", func(t *testing.T) {
+		orig := osUserHomeDir
+		t.Cleanup(func() { osUserHomeDir = orig })
+		osUserHomeDir = func() (string, error) {
+			return "", errors.New("home unavailable")
+		}
+
+		_, err := UserHomeDir()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "home unavailable")
+		require.ErrorContains(t, err, "failed to determine home directory")
+		require.ErrorContains(t, err, "HOME (Unix) or USERPROFILE/HOMEDRIVE/HOMEPATH (Windows)")
+	})
 }
 
 func TestFindGitRoot(t *testing.T) {
@@ -327,7 +307,8 @@ func TestFindGitRootFrom(t *testing.T) {
 
 		_, err := FindGitRootFrom(nonRepoDir)
 		require.Error(t, err, "FindGitRootFrom should return error outside a git repository")
-		assert.Contains(t, err.Error(), "not in a git repository", "error should mention not in git repository")
+		require.ErrorContains(t, err, "not in a git repository", "error should mention not in git repository")
+		require.ErrorContains(t, err, "run this command from inside a git repository", "error should include recovery guidance")
 	})
 
 	t.Run("returns git root when .git is a worktree marker file", func(t *testing.T) {
@@ -364,7 +345,7 @@ func TestFindGitRootFrom(t *testing.T) {
 
 		_, err := FindGitRootFrom(repoRoot)
 		require.Error(t, err, "FindGitRootFrom should not accept a .git file without gitdir: prefix")
-		assert.Contains(t, err.Error(), "not in a git repository")
+		require.ErrorContains(t, err, "not in a git repository")
 	})
 
 	t.Run("handles relative path input", func(t *testing.T) {
@@ -396,12 +377,152 @@ func TestReadFileFromHEAD(t *testing.T) {
 		outsidePath := filepath.Join(t.TempDir(), "file.yml")
 		_, err = ReadFileFromHEAD(outsidePath, gitRoot)
 		require.Error(t, err, "should fail for a file outside the git root")
-		assert.Contains(t, err.Error(), "outside the git repository root", "error should mention path is outside repo")
+		require.ErrorContains(t, err, "outside the git repository root", "error should mention path is outside repo")
 	})
 
 	t.Run("returns error for empty gitRoot", func(t *testing.T) {
 		_, err := ReadFileFromHEAD("some/file.yml", "")
 		require.Error(t, err, "should fail when gitRoot is empty")
-		assert.Contains(t, err.Error(), "gitRoot must not be empty", "error should mention empty gitRoot")
+		require.ErrorContains(t, err, "gitRoot must not be empty", "error should mention empty gitRoot")
 	})
+}
+
+func TestValidateGitRef(t *testing.T) {
+	tests := []struct {
+		name        string
+		ref         string
+		expectError bool
+		errContains string
+	}{
+		{
+			name:        "valid branch name",
+			ref:         "main",
+			expectError: false,
+		},
+		{
+			name:        "valid tag name",
+			ref:         "v1.2.3",
+			expectError: false,
+		},
+		{
+			name:        "valid SHA",
+			ref:         "abcdef0123456789abcdef0123456789abcdef01",
+			expectError: false,
+		},
+		{
+			name:        "valid branch with slash",
+			ref:         "feature/my-feature",
+			expectError: false,
+		},
+		{
+			name:        "empty ref is rejected",
+			ref:         "",
+			expectError: true,
+			errContains: "must not be empty",
+		},
+		{
+			name:        "leading dash is rejected (argument injection)",
+			ref:         "-evil",
+			expectError: true,
+			errContains: "must not start with '-'",
+		},
+		{
+			name:        "double dash is rejected (argument injection)",
+			ref:         "--upload-pack=malicious",
+			expectError: true,
+			errContains: "must not start with '-'",
+		},
+		{
+			name:        "dotdot is rejected (git traversal)",
+			ref:         "main..evil",
+			expectError: true,
+			errContains: "must not contain '..'",
+		},
+		{
+			name:        "NUL byte is rejected",
+			ref:         "main\x00evil",
+			expectError: true,
+			errContains: "NUL",
+		},
+		{
+			name:        "dotdot prefix is rejected",
+			ref:         "..evil",
+			expectError: true,
+			errContains: "must not contain '..'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGitRef(tt.ref)
+			if tt.expectError {
+				require.Error(t, err, "expected error for ref %q", tt.ref)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				require.NoError(t, err, "unexpected error for ref %q", tt.ref)
+			}
+		})
+	}
+}
+
+func TestValidateGitPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		expectError bool
+		errContains string
+	}{
+		{
+			name:        "valid file path",
+			path:        ".github/workflows/workflow.md",
+			expectError: false,
+		},
+		{
+			name:        "valid simple filename",
+			path:        "file.md",
+			expectError: false,
+		},
+		{
+			name:        "empty path is rejected",
+			path:        "",
+			expectError: true,
+			errContains: "must not be empty",
+		},
+		{
+			name:        "leading dash is rejected (argument injection)",
+			path:        "-evil",
+			expectError: true,
+			errContains: "must not start with '-'",
+		},
+		{
+			name:        "leading double dash is rejected",
+			path:        "--output=/etc/passwd",
+			expectError: true,
+			errContains: "must not start with '-'",
+		},
+		{
+			name:        "path traversal is rejected",
+			path:        "../etc/passwd",
+			expectError: true,
+			errContains: "must not contain '..'",
+		},
+		{
+			name:        "absolute path is rejected",
+			path:        "/etc/passwd",
+			expectError: true,
+			errContains: "must not be absolute",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGitPath(tt.path)
+			if tt.expectError {
+				require.Error(t, err, "expected error for path %q", tt.path)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				require.NoError(t, err, "unexpected error for path %q", tt.path)
+			}
+		})
+	}
 }

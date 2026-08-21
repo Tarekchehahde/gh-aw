@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -49,6 +50,38 @@ func TestTimeoutFlagParsing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEffectiveMCPLogsToolSoftTimeoutSeconds(t *testing.T) {
+	t.Run("no gateway deadline leaves CLI timeout unchanged", func(t *testing.T) {
+		got, ok := effectiveMCPLogsToolSoftTimeoutSeconds(context.Background(), 5)
+		if ok || got != 0 {
+			t.Fatalf("effectiveMCPLogsToolSoftTimeoutSeconds without deadline = (%d, %v), want (0, false)", got, ok)
+		}
+	})
+
+	t.Run("gateway deadline below CLI timeout returns safety margin", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		got, ok := effectiveMCPLogsToolSoftTimeoutSeconds(ctx, 5)
+		if !ok {
+			t.Fatal("expected soft timeout when gateway deadline is shorter than CLI timeout")
+		}
+		if got < 50 || got > 54 {
+			t.Fatalf("soft timeout = %d seconds, want between 50 and 54 seconds", got)
+		}
+	})
+
+	t.Run("gateway deadline beyond CLI timeout leaves CLI timeout unchanged", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		got, ok := effectiveMCPLogsToolSoftTimeoutSeconds(ctx, 5)
+		if ok || got != 0 {
+			t.Fatalf("effectiveMCPLogsToolSoftTimeoutSeconds with long deadline = (%d, %v), want (0, false)", got, ok)
+		}
+	})
 }
 
 // TestTimeoutLogic tests the timeout logic without making network calls
@@ -117,56 +150,134 @@ func TestEffectiveMCPLogsToolTimeoutMinutes(t *testing.T) {
 		name             string
 		requestedTimeout int
 		count            int
+		workflowName     string
+		engine           string
 		want             int
 	}{
 		{
 			name:             "explicit timeout is preserved",
 			requestedTimeout: 5,
 			count:            100,
+			workflowName:     "my-workflow",
 			want:             5,
 		},
 		{
-			name:             "small fetch window keeps one minute default",
+			name:             "explicit timeout is preserved even without workflow name",
+			requestedTimeout: 5,
+			count:            100,
+			workflowName:     "",
+			want:             5,
+		},
+		{
+			name:             "small fetch window keeps one minute default (named workflow)",
 			requestedTimeout: 0,
 			count:            40,
+			workflowName:     "my-workflow",
 			want:             1,
 		},
 		{
-			name:             "fetch window above forty runs gets two minutes",
+			name:             "fetch window above forty runs gets two minutes (named workflow)",
 			requestedTimeout: 0,
 			count:            41,
+			workflowName:     "my-workflow",
 			want:             2,
 		},
 		{
-			name:             "eighty run fetch window stays in two minute tier",
+			name:             "eighty run fetch window stays in two minute tier (named workflow)",
 			requestedTimeout: 0,
 			count:            80,
+			workflowName:     "my-workflow",
 			want:             2,
 		},
 		{
-			name:             "eighty one run fetch window enters three minute tier",
+			name:             "eighty one run fetch window enters three minute tier (named workflow)",
 			requestedTimeout: 0,
 			count:            81,
+			workflowName:     "my-workflow",
 			want:             3,
 		},
 		{
-			name:             "default hundred run window gets three minutes",
+			name:             "default hundred run window gets three minutes (named workflow)",
 			requestedTimeout: 0,
 			count:            100,
+			workflowName:     "my-workflow",
 			want:             3,
 		},
 		{
-			name:             "unspecified count falls back to default window size",
+			name:             "unspecified count falls back to default window size (named workflow)",
 			requestedTimeout: 0,
 			count:            0,
+			workflowName:     "my-workflow",
 			want:             3,
+		},
+		// Engine-filtering cases: minimum 5 minutes when an engine filter is given,
+		// regardless of whether workflow_name is also present.
+		{
+			name:             "engine filtering with named workflow uses all-workflow minimum",
+			requestedTimeout: 0,
+			count:            2,
+			workflowName:     "my-workflow",
+			engine:           "claude",
+			want:             defaultMCPLogsMinTimeoutMinutesAllWorkflows,
+		},
+		{
+			name:             "engine filtering without workflow name also uses all-workflow minimum",
+			requestedTimeout: 0,
+			count:            2,
+			workflowName:     "",
+			engine:           "claude",
+			want:             defaultMCPLogsMinTimeoutMinutesAllWorkflows,
+		},
+		// All-workflow cases: minimum 5 minutes when no workflow_name is given
+		{
+			name:             "small count uses all-workflow minimum (no workflow name)",
+			requestedTimeout: 0,
+			count:            3,
+			workflowName:     "",
+			want:             defaultMCPLogsMinTimeoutMinutesAllWorkflows,
+		},
+		{
+			name:             "default count uses all-workflow minimum (no workflow name)",
+			requestedTimeout: 0,
+			count:            100,
+			workflowName:     "",
+			want:             defaultMCPLogsMinTimeoutMinutesAllWorkflows,
+		},
+		{
+			name:             "very large count exceeds all-workflow minimum (no workflow name)",
+			requestedTimeout: 0,
+			count:            250,
+			workflowName:     "",
+			want:             (250 + mcpLogsRunsPerDefaultTimeoutMinute - 1) / mcpLogsRunsPerDefaultTimeoutMinute, // ceil(250/mcpLogsRunsPerDefaultTimeoutMinute) > defaultMCPLogsMinTimeoutMinutesAllWorkflows
+		},
+		// Timeout cap cases: user-supplied value must not exceed maxMCPLogsSubprocessTimeoutMinutes
+		{
+			name:             "explicit timeout exactly at max is preserved",
+			requestedTimeout: maxMCPLogsSubprocessTimeoutMinutes,
+			count:            100,
+			workflowName:     "my-workflow",
+			want:             maxMCPLogsSubprocessTimeoutMinutes,
+		},
+		{
+			name:             "explicit timeout above max is capped",
+			requestedTimeout: maxMCPLogsSubprocessTimeoutMinutes + 1,
+			count:            100,
+			workflowName:     "my-workflow",
+			want:             maxMCPLogsSubprocessTimeoutMinutes,
+		},
+		{
+			name:             "very large explicit timeout is capped",
+			requestedTimeout: 100000,
+			count:            100,
+			workflowName:     "",
+			want:             maxMCPLogsSubprocessTimeoutMinutes,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := effectiveMCPLogsToolTimeoutMinutes(tt.requestedTimeout, tt.count); got != tt.want {
-				t.Errorf("effectiveMCPLogsToolTimeoutMinutes(%d, %d) = %d, want %d", tt.requestedTimeout, tt.count, got, tt.want)
+			if got := effectiveMCPLogsToolTimeoutMinutes(tt.requestedTimeout, tt.count, tt.workflowName, tt.engine); got != tt.want {
+				t.Errorf("effectiveMCPLogsToolTimeoutMinutes(%d, %d, %q, %q) = %d, want %d", tt.requestedTimeout, tt.count, tt.workflowName, tt.engine, got, tt.want)
 			}
 		})
 	}

@@ -17,3 +17,8 @@ func New(w io.Writer, _ []string) io.Writer {
 func Stderr() io.Writer {
 	return os.Stderr
 }
+
+// Degrade returns s unchanged; color-profile detection is not supported on wasm.
+func Degrade(s string, _ []string) string {
+	return s
+}

@@ -13,6 +13,13 @@ import (
 
 var labelObjectiveMappingLog = logger.New("github:label_objective_mapping")
 
+// Multi-label logic options.
+const (
+	MultiLabelLogicMax   = "max"   // Use highest value (default)
+	MultiLabelLogicSum   = "sum"   // Add all values
+	MultiLabelLogicFirst = "first" // Use first in priority order
+)
+
 // ObjectiveMapping defines how GitHub labels map to numeric objective values.
 // This enables any label to be assigned a configurable numeric value, with one central definition place.
 type ObjectiveMapping struct {
@@ -46,8 +53,7 @@ func (om *ObjectiveMapping) ComputeObjectiveValue(issueLabels []string) int {
 	matchedLabels := []string{}
 
 	for _, label := range issueLabels {
-		normalizedLabel := strings.ToLower(strings.TrimSpace(label))
-		if val, ok := om.LabelToValue[normalizedLabel]; ok {
+		if val, ok := om.objectiveValueForLabel(label); ok {
 			matchingValues = append(matchingValues, val)
 			matchedLabels = append(matchedLabels, label)
 		}
@@ -59,15 +65,15 @@ func (om *ObjectiveMapping) ComputeObjectiveValue(issueLabels []string) int {
 
 	logic := om.MultiLabelLogic
 	if logic == "" {
-		logic = "max" // default
+		logic = MultiLabelLogicMax // default
 	}
 
 	switch logic {
-	case "sum":
+	case MultiLabelLogicSum:
 		return om.computeValueSum(matchingValues, matchedLabels)
-	case "first":
+	case MultiLabelLogicFirst:
 		return om.computeValueFirst(issueLabels, matchingValues, matchedLabels)
-	default: // "max"
+	default: // MultiLabelLogicMax
 		return om.computeValueMax(matchingValues, matchedLabels)
 	}
 }
@@ -91,8 +97,7 @@ func (om *ObjectiveMapping) computeValueFirst(issueLabels []string, matchingValu
 		for _, issueLabel := range issueLabels {
 			for _, priorityLabel := range om.PriorityLabels {
 				if strings.EqualFold(issueLabel, priorityLabel) {
-					normalizedIssue := strings.ToLower(strings.TrimSpace(issueLabel))
-					if val, ok := om.LabelToValue[normalizedIssue]; ok {
+					if val, ok := om.objectiveValueForLabel(issueLabel); ok {
 						labelObjectiveMappingLog.Printf("Computed objective value via issue label priority: label=%s, value=%d", issueLabel, val)
 						return val
 					}
@@ -135,17 +140,17 @@ func DefaultObjectiveMapping() *ObjectiveMapping {
 			"low-priority":    10,
 			"documentation":   5,
 		},
-		MultiLabelLogic: "max",
+		MultiLabelLogic: MultiLabelLogicMax,
 		PriorityLabels:  []string{"critical", "p0", "copilot-opt", "high-priority", "security-fix", "p1", "performance"},
 	}
 }
 
-// LoadObjectiveMappingFromConfig loads the mapping from environment, config file, or defaults.
+// LoadObjectiveMapping loads the mapping from environment, config file, or defaults.
 // Precedence:
 // 1. OBJECTIVE_MAPPING_JSON environment variable
 // 2. .github/objective-mapping.json file
 // 3. Built-in defaults
-func LoadObjectiveMappingFromConfig() *ObjectiveMapping {
+func LoadObjectiveMapping() *ObjectiveMapping {
 	labelObjectiveMappingLog.Print("Loading objective mapping configuration")
 
 	// Try loading from OBJECTIVE_MAPPING_JSON env var
@@ -188,17 +193,16 @@ func LoadObjectiveMappingFromConfig() *ObjectiveMapping {
 	return defaults
 }
 
-// GetObjectiveLabels returns the subset of issue labels that have objective values.
+// FilterObjectiveLabels returns the subset of issue labels that have objective values.
 // Also returns the labels in the order they appear in the issue's label list.
-func (om *ObjectiveMapping) GetObjectiveLabels(issueLabels []string) []string {
+func (om *ObjectiveMapping) FilterObjectiveLabels(issueLabels []string) []string {
 	if om == nil || len(om.LabelToValue) == 0 {
 		return []string{}
 	}
 
 	result := make([]string, 0)
 	for _, label := range issueLabels {
-		normalizedLabel := strings.ToLower(strings.TrimSpace(label))
-		if _, ok := om.LabelToValue[normalizedLabel]; ok {
+		if _, ok := om.objectiveValueForLabel(label); ok {
 			result = append(result, label)
 		}
 	}
@@ -225,13 +229,12 @@ func (om *ObjectiveMapping) String() string {
 		len(om.LabelToValue), om.MultiLabelLogic, len(om.PriorityLabels))
 }
 
-// ValidateLabelExists checks if a given label has a defined objective value.
-func (om *ObjectiveMapping) ValidateLabelExists(label string) bool {
+// HasObjectiveLabel checks if a given label has a defined objective value.
+func (om *ObjectiveMapping) HasObjectiveLabel(label string) bool {
 	if om == nil {
 		return false
 	}
-	normalizedLabel := strings.ToLower(strings.TrimSpace(label))
-	_, exists := om.LabelToValue[normalizedLabel]
+	_, exists := om.objectiveValueForLabel(label)
 	return exists
 }
 
@@ -246,4 +249,13 @@ func (om *ObjectiveMapping) GetAllLabels() []string {
 	}
 	slices.Sort(labels)
 	return labels
+}
+
+func normalizeObjectiveLabel(label string) string {
+	return strings.ToLower(strings.TrimSpace(label))
+}
+
+func (om *ObjectiveMapping) objectiveValueForLabel(label string) (int, bool) {
+	val, ok := om.LabelToValue[normalizeObjectiveLabel(label)]
+	return val, ok
 }

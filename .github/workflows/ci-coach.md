@@ -16,6 +16,7 @@ tracker-id: ci-coach-daily
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tools:
   cli-proxy: true
   github:
@@ -54,7 +55,12 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    runtime: gvisor
+evals:
+  - id: repair-or-optimization-path
+    question: Did the workflow check validation-status first and then follow the correct repair or optimization path for this run?
+  - id: pr-created-or-noop
+    question: Was a focused CI improvement pull request created when actionable work was found, or was noop called when CI was already healthy?
 ---
 
 # CI Optimization Coach

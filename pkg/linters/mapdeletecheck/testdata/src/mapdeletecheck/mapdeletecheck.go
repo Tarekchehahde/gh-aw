@@ -1,0 +1,75 @@
+package mapdeletecheck
+
+func bad() {
+	m := map[string]int{"a": 1, "b": 2}
+	k := "a"
+
+	// want +1 `redundant existence check before delete`
+	if _, ok := m[k]; ok {
+		delete(m, k)
+	}
+
+	// With a literal key.
+	// want +1 `redundant existence check before delete`
+	if _, ok := m["b"]; ok {
+		delete(m, "b")
+	}
+}
+
+func badWithComments() {
+	cache := map[string]int{"key": 1}
+	key := "key"
+
+	// Leading comment inside the if body suppresses autofix but still reports.
+	// want +1 `redundant existence check before delete`
+	if _, ok := cache[key]; ok {
+		// evict the stale entry before refetching
+		delete(cache, key)
+	}
+
+	// Trailing comment on the delete line suppresses autofix but still reports.
+	// want +1 `redundant existence check before delete`
+	if _, ok := cache[key]; ok {
+		delete(cache, key) // evict
+	}
+}
+
+func good() {
+	m := map[string]int{"a": 1}
+	k := "a"
+
+	// Plain delete – no redundant check, already fine.
+	delete(m, k)
+
+	// The check has an else branch – not flagged.
+	if _, ok := m[k]; ok {
+		delete(m, k)
+	} else {
+		_ = ok
+	}
+
+	// Body contains more than delete – not flagged.
+	if _, ok := m[k]; ok {
+		delete(m, k)
+		m["x"] = 0
+	}
+
+	// Map and key mismatch – not flagged.
+	m2 := map[string]int{"c": 3}
+	k2 := "c"
+	if _, ok := m[k]; ok {
+		delete(m2, k2)
+	}
+
+	// delete can be shadowed; builtin-only matching should avoid this.
+	delete := func(_ map[string]int, _ string) {}
+	if _, ok := m[k]; ok {
+		delete(m, k)
+	}
+
+	// Potentially side-effectful expressions should not be matched by text alone.
+	nextMap := func() map[string]int { return m }
+	if _, ok := nextMap()[k]; ok {
+		delete(nextMap(), k)
+	}
+}

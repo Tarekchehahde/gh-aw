@@ -115,7 +115,7 @@ func RemoveWorkflows(pattern string, keepOrphans bool, workflowDir string) error
 
 	// Show orphaned includes that will also be removed
 	if len(orphanedIncludes) > 0 {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("\nThe following orphaned include files will also be removed (suppress with --keep-orphans):"))
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("\nThe following orphaned include files will also be removed (suppress with --no-remove-orphans):"))
 		for _, include := range orphanedIncludes {
 			fmt.Fprintf(os.Stderr, "  %s (orphaned include)\n", include)
 		}
@@ -137,7 +137,13 @@ func RemoveWorkflows(pattern string, keepOrphans bool, workflowDir string) error
 
 	// Remove the files
 	var removedFiles []string
+	removedPackageSources := make(map[string]struct{})
 	for _, file := range filesToRemove {
+		if source := readFullSourceFromFile(file); source != "" {
+			if repoSpec, ok, err := parseManifestSourceSpec(source); err == nil && ok && repoSpec != nil {
+				removedPackageSources[repositoryPackageIdentifier(repoSpec.RepoSlug, repoSpec.PackagePath)] = struct{}{}
+			}
+		}
 		if err := os.Remove(file); err != nil {
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to remove %s: %v", file, err)))
 		} else {
@@ -160,6 +166,11 @@ func RemoveWorkflows(pattern string, keepOrphans bool, workflowDir string) error
 	if len(removedFiles) > 0 && !keepOrphans {
 		if err := cleanupOrphanedIncludes(false); err != nil {
 			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to clean up orphaned includes: %v", err)))
+		}
+	}
+	for packageSource := range removedPackageSources {
+		if err := removePackageOwnedFilesIfUnused(packageSource); err != nil {
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to remove package-owned files for %s: %v", packageSource, err)))
 		}
 	}
 
@@ -219,7 +230,7 @@ func cleanupOrphanedIncludes(verbose bool) error {
 	workflowsDir := constants.GetWorkflowDir()
 	var allIncludes []string
 
-	err = filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -240,8 +251,8 @@ func cleanupOrphanedIncludes(verbose bool) error {
 		return nil
 	})
 
-	if err != nil {
-		return fmt.Errorf("failed to scan include files: %w", err)
+	if walkErr != nil {
+		return fmt.Errorf("failed to scan include files: %w", walkErr)
 	}
 
 	// Remove unused includes
@@ -339,7 +350,7 @@ func getAllIncludeFiles() ([]string, error) {
 	workflowsDir := constants.GetWorkflowDir()
 	var allIncludes []string
 
-	err := filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -360,14 +371,14 @@ func getAllIncludeFiles() ([]string, error) {
 		return nil
 	})
 
-	return allIncludes, err
+	return allIncludes, walkErr
 }
 
 // cleanupAllIncludes removes all include files when no workflows remain
 func cleanupAllIncludes(verbose bool) error {
 	workflowsDir := constants.GetWorkflowDir()
 
-	err := filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(workflowsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -391,7 +402,7 @@ func cleanupAllIncludes(verbose bool) error {
 		return nil
 	})
 
-	return err
+	return walkErr
 }
 
 // findIncludesInContent finds all import references in content

@@ -88,14 +88,65 @@ type MCPServerHealth struct {
 
 // MCPServerHealthDetail represents health details for a single MCP server
 type MCPServerHealthDetail struct {
-	ServerName   string  `json:"server_name" console:"header:Server"`
+	MCPServerStatsBase
 	RequestCount int     `json:"request_count" console:"header:Requests"`
-	ToolCalls    int     `json:"tool_calls" console:"header:Tool Calls"`
-	ErrorCount   int     `json:"error_count" console:"header:Errors"`
-	ErrorRate    float64 `json:"error_rate"`
+	ErrorRate    float64 `json:"error_rate"` // Percentage (0–100)
 	ErrorRateStr string  `json:"error_rate_str" console:"header:Error Rate"`
 	AvgLatency   string  `json:"avg_latency" console:"header:Avg Latency"`
 	Status       string  `json:"status" console:"header:Status"`
+}
+
+// MarshalJSON preserves the MCP server health detail JSON schema while sharing the
+// per-server stat fields with the other MCP server report types.
+func (d MCPServerHealthDetail) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ServerName   string  `json:"server_name"`
+		RequestCount int     `json:"request_count"`
+		ToolCalls    int     `json:"tool_calls"`
+		ErrorCount   int     `json:"error_count"`
+		ErrorRate    float64 `json:"error_rate"`
+		ErrorRateStr string  `json:"error_rate_str"`
+		AvgLatency   string  `json:"avg_latency"`
+		Status       string  `json:"status"`
+	}{
+		ServerName:   d.ServerName,
+		RequestCount: d.RequestCount,
+		ToolCalls:    d.ToolCallCount,
+		ErrorCount:   d.ErrorCount,
+		ErrorRate:    d.ErrorRate,
+		ErrorRateStr: d.ErrorRateStr,
+		AvgLatency:   d.AvgLatency,
+		Status:       d.Status,
+	})
+}
+
+// UnmarshalJSON is the counterpart to MarshalJSON, mapping the legacy
+// "tool_calls" wire key back into the embedded MCPServerStatsBase.
+func (d *MCPServerHealthDetail) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		ServerName   string  `json:"server_name"`
+		RequestCount int     `json:"request_count"`
+		ToolCalls    int     `json:"tool_calls"`
+		ErrorCount   int     `json:"error_count"`
+		ErrorRate    float64 `json:"error_rate"`
+		ErrorRateStr string  `json:"error_rate_str"`
+		AvgLatency   string  `json:"avg_latency"`
+		Status       string  `json:"status"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	d.MCPServerStatsBase = MCPServerStatsBase{
+		ServerName:    aux.ServerName,
+		ToolCallCount: aux.ToolCalls,
+		ErrorCount:    aux.ErrorCount,
+	}
+	d.RequestCount = aux.RequestCount
+	d.ErrorRate = aux.ErrorRate
+	d.ErrorRateStr = aux.ErrorRateStr
+	d.AvgLatency = aux.AvgLatency
+	d.Status = aux.Status
+	return nil
 }
 
 // MCPSlowestToolCall represents a slow tool call for surfacing in the audit
@@ -484,36 +535,55 @@ func buildMCPServerHealth(mcpToolUsage *MCPToolUsageData, mcpFailures []MCPFailu
 
 	// Process server statistics from mcpToolUsage
 	if mcpToolUsage != nil {
-		for _, server := range mcpToolUsage.Servers {
-			health.TotalRequests += server.RequestCount
-			health.TotalErrors += server.ErrorCount
-
-			errorRate := safePercent(server.ErrorCount, server.RequestCount)
-
-			status := "✅ healthy"
-			if _, isFailed := failedServers[server.ServerName]; isFailed {
-				status = "❌ failed"
-			} else if errorRate > 10 {
-				status = "⚠️ degraded"
-			}
-
-			health.Servers = append(health.Servers, MCPServerHealthDetail{
-				ServerName:   server.ServerName,
-				RequestCount: server.RequestCount,
-				ToolCalls:    server.ToolCallCount,
-				ErrorCount:   server.ErrorCount,
-				ErrorRate:    errorRate,
-				ErrorRateStr: fmt.Sprintf("%.1f%%", errorRate),
-				AvgLatency:   server.AvgDuration,
-				Status:       status,
-			})
-		}
+		appendMCPServerDetails(health, mcpToolUsage, failedServers)
 
 		// Build slowest tool calls from individual call records (top 5)
 		health.SlowestCalls = buildSlowestToolCalls(mcpToolUsage.ToolCalls, 5)
 	}
 
 	// Add failed servers that don't appear in stats
+	appendMissingFailedServers(health, failedServers)
+
+	finalizeMCPServerHealth(health)
+
+	auditExpandedLog.Printf("Built MCP server health: %s, total_requests=%d, error_rate=%.1f%%",
+		health.Summary, health.TotalRequests, health.ErrorRate)
+	return health
+}
+
+// appendMCPServerDetails adds per-server health details from gateway metrics and
+// accumulates request/error totals.
+func appendMCPServerDetails(health *MCPServerHealth, mcpToolUsage *MCPToolUsageData, failedServers map[string]struct{}) {
+	for _, server := range mcpToolUsage.Servers {
+		health.TotalRequests += server.RequestCount
+		health.TotalErrors += server.ErrorCount
+
+		errorRate := safePercent(server.ErrorCount, server.RequestCount)
+
+		status := "✅ healthy"
+		if _, isFailed := failedServers[server.ServerName]; isFailed {
+			status = "❌ failed"
+		} else if errorRate > 10 {
+			status = "⚠️ degraded"
+		}
+
+		health.Servers = append(health.Servers, MCPServerHealthDetail{
+			MCPServerStatsBase: MCPServerStatsBase{
+				ServerName:    server.ServerName,
+				ToolCallCount: server.ToolCallCount,
+				ErrorCount:    server.ErrorCount,
+			},
+			RequestCount: server.RequestCount,
+			ErrorRate:    errorRate,
+			ErrorRateStr: fmt.Sprintf("%.1f%%", errorRate),
+			AvgLatency:   server.AvgDuration,
+			Status:       status,
+		})
+	}
+}
+
+// appendMissingFailedServers adds failed servers that have no gateway statistics.
+func appendMissingFailedServers(health *MCPServerHealth, failedServers map[string]struct{}) {
 	for serverName := range failedServers {
 		found := false
 		for _, s := range health.Servers {
@@ -524,12 +594,15 @@ func buildMCPServerHealth(mcpToolUsage *MCPToolUsageData, mcpFailures []MCPFailu
 		}
 		if !found {
 			health.Servers = append(health.Servers, MCPServerHealthDetail{
-				ServerName: serverName,
-				Status:     "❌ failed",
+				MCPServerStatsBase: MCPServerStatsBase{ServerName: serverName},
+				Status:             "❌ failed",
 			})
 		}
 	}
+}
 
+// finalizeMCPServerHealth computes the health rollups, sorts servers and builds the summary.
+func finalizeMCPServerHealth(health *MCPServerHealth) {
 	health.TotalServers = len(health.Servers)
 
 	// Count servers by status for accurate summary
@@ -559,10 +632,6 @@ func buildMCPServerHealth(mcpToolUsage *MCPToolUsageData, mcpFailures []MCPFailu
 	// Build summary string
 	health.Summary = fmt.Sprintf("%d server(s), %d healthy, %d degraded, %d failed",
 		health.TotalServers, health.HealthySvrs, health.DegradedSvrs, health.FailedSvrs)
-
-	auditExpandedLog.Printf("Built MCP server health: %s, total_requests=%d, error_rate=%.1f%%",
-		health.Summary, health.TotalRequests, health.ErrorRate)
-	return health
 }
 
 // buildSlowestToolCalls extracts the N slowest tool calls from the call records

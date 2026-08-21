@@ -16,7 +16,7 @@ func TestCodexEngine_ResolveLLMProvider_DefaultOpenAI(t *testing.T) {
 	engine := NewCodexEngine()
 
 	asserted := engine.ResolveLLMProvider(&WorkflowData{EngineConfig: &EngineConfig{ID: "codex"}})
-	if asserted != "openai" {
+	if asserted != LLMProviderOpenAI {
 		t.Fatalf("expected default model-provider to be openai, got %q", asserted)
 	}
 }
@@ -245,8 +245,8 @@ func TestCodexEngineRenderMCPConfig(t *testing.T) {
 				"startup_timeout_sec = 120",
 				"tool_timeout_sec = 60",
 				fmt.Sprintf("container = \"ghcr.io/github/github-mcp-server:%s\"", constants.DefaultGitHubMCPServerVersion),
-				"env = { \"GITHUB_HOST\" = \"$GITHUB_SERVER_URL\", \"GITHUB_PERSONAL_ACCESS_TOKEN\" = \"$GH_AW_GITHUB_TOKEN\", \"GITHUB_READ_ONLY\" = \"1\", \"GITHUB_TOOLSETS\" = \"context,repos,issues,pull_requests\" }",
-				"env_vars = [\"GITHUB_HOST\", \"GITHUB_PERSONAL_ACCESS_TOKEN\", \"GITHUB_READ_ONLY\", \"GITHUB_TOOLSETS\"]",
+				"env = { \"GITHUB_FEATURES\" = \"fields_param\", \"GITHUB_HOST\" = \"$GITHUB_SERVER_URL\", \"GITHUB_PERSONAL_ACCESS_TOKEN\" = \"$GH_AW_GITHUB_TOKEN\", \"GITHUB_READ_ONLY\" = \"1\", \"GITHUB_TOOLSETS\" = \"context,repos,issues,pull_requests\" }",
+				"env_vars = [\"GITHUB_FEATURES\", \"GITHUB_HOST\", \"GITHUB_PERSONAL_ACCESS_TOKEN\", \"GITHUB_READ_ONLY\", \"GITHUB_TOOLSETS\"]",
 				"GH_AW_MCP_CONFIG_NORM_EOF",
 				"",
 				"# Generate JSON config for MCP gateway",
@@ -257,6 +257,7 @@ func TestCodexEngineRenderMCPConfig(t *testing.T) {
 				"\"github\": {",
 				fmt.Sprintf("\"container\": \"ghcr.io/github/github-mcp-server:%s\",", constants.DefaultGitHubMCPServerVersion),
 				"\"env\": {",
+				"\"GITHUB_FEATURES\": \"fields_param\",",
 				"\"GITHUB_HOST\": \"$GITHUB_SERVER_URL\",",
 				"\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"$GITHUB_MCP_SERVER_TOKEN\",",
 				"\"GITHUB_READ_ONLY\": \"1\",",
@@ -274,7 +275,8 @@ func TestCodexEngineRenderMCPConfig(t *testing.T) {
 				"\"port\": $MCP_GATEWAY_PORT,",
 				"\"domain\": \"${MCP_GATEWAY_DOMAIN}\",",
 				"\"apiKey\": \"${MCP_GATEWAY_API_KEY}\",",
-				"\"payloadDir\": \"${MCP_GATEWAY_PAYLOAD_DIR}\"",
+				"\"payloadDir\": \"${MCP_GATEWAY_PAYLOAD_DIR}\",",
+				"\"startupTimeout\": 120",
 				"}",
 				"}",
 				"GH_AW_MCP_CONFIG_NORM_EOF",
@@ -592,6 +594,7 @@ func TestCodexEngineExecutionPassesModelEnvVarIntoAWFStep(t *testing.T) {
 	tests := []struct {
 		name             string
 		safeOutputs      *SafeOutputsConfig
+		isEvalsRun       bool
 		expectedModelEnv string
 	}{
 		{
@@ -603,6 +606,12 @@ func TestCodexEngineExecutionPassesModelEnvVarIntoAWFStep(t *testing.T) {
 			name:             "detection job uses detection model env var",
 			safeOutputs:      nil,
 			expectedModelEnv: constants.EnvVarModelDetectionCodex,
+		},
+		{
+			name:             "evals job uses evals model env var",
+			safeOutputs:      nil,
+			isEvalsRun:       true,
+			expectedModelEnv: constants.EnvVarModelEvalsCodex,
 		},
 	}
 
@@ -620,6 +629,7 @@ func TestCodexEngineExecutionPassesModelEnvVarIntoAWFStep(t *testing.T) {
 					"bash": []any{"echo"},
 				},
 				SafeOutputs: tt.safeOutputs,
+				IsEvalsRun:  tt.isEvalsRun,
 			}
 
 			steps := engine.GetExecutionSteps(workflowData, "/tmp/test.log")
@@ -1131,6 +1141,39 @@ func TestCodexEngineWebSearch(t *testing.T) {
 	})
 }
 
+func TestCodexEngineBashDisabled(t *testing.T) {
+	engine := NewCodexEngine()
+
+	t.Run("shell_tool not disabled by default when bash is not fully disabled", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name: "test-workflow",
+		}
+		steps := engine.GetExecutionSteps(workflowData, "test-log")
+		if len(steps) != 1 {
+			t.Fatalf("Expected 1 step, got %d", len(steps))
+		}
+		stepContent := strings.Join([]string(steps[0]), "\n")
+		if strings.Contains(stepContent, "features.shell_tool=false") {
+			t.Errorf("Expected no features.shell_tool=false config when bash is not disabled, got:\n%s", stepContent)
+		}
+	})
+
+	t.Run("adds features.shell_tool=false when BashDisabled is set", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			Name:         "test-workflow",
+			BashDisabled: true,
+		}
+		steps := engine.GetExecutionSteps(workflowData, "test-log")
+		if len(steps) != 1 {
+			t.Fatalf("Expected 1 step, got %d", len(steps))
+		}
+		stepContent := strings.Join([]string(steps[0]), "\n")
+		if !strings.Contains(stepContent, `-c features.shell_tool=false`) {
+			t.Errorf(`Expected -c features.shell_tool=false config when bash is fully disabled, got:\n%s`, stepContent)
+		}
+	})
+}
+
 func TestCodexEngineWebFetch(t *testing.T) {
 	engine := NewCodexEngine()
 
@@ -1282,5 +1325,40 @@ func TestCodexEngineExecutionCustomHarness(t *testing.T) {
 	// Should NOT use the default harness path
 	if strings.Contains(stepContent, "actions/codex_harness.cjs") {
 		t.Errorf("Expected default harness path to be overridden, got:\n%s", stepContent)
+	}
+}
+
+// TestCodexEngineForwardsSafeOutputsInputEnvVars verifies that GH_AW_INPUT_* variables
+// from the safe-outputs config are included in the Codex execution step env.
+// Codex uses the TOML-based MCP setup; the TOML env_vars list references these vars
+// so the safe-outputs container can resolve ${GH_AW_INPUT_…} placeholders in config.json.
+// AWF passes them into the sandbox via --env-all, enabling the forwarding chain.
+func TestCodexEngineForwardsSafeOutputsInputEnvVars(t *testing.T) {
+	engine := NewCodexEngine()
+	workflowData := &WorkflowData{
+		Name: "test-workflow",
+		SafeOutputs: &SafeOutputsConfig{
+			CreatePullRequests: &CreatePullRequestsConfig{
+				BaseSafeOutputConfig: BaseSafeOutputConfig{Max: strPtr("1")},
+				TargetRepoSlug:       "${{ inputs.owner }}/${{ inputs.repo }}",
+			},
+		},
+		SafeOutputsInputEnvVars: map[string]string{
+			"GH_AW_INPUT_OWNER": "${{ inputs.owner }}",
+			"GH_AW_INPUT_REPO":  "${{ inputs.repo }}",
+		},
+	}
+
+	steps := engine.GetExecutionSteps(workflowData, "test-log")
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 execution step, got %d", len(steps))
+	}
+	stepContent := strings.Join([]string(steps[0]), "\n")
+
+	if !strings.Contains(stepContent, "GH_AW_INPUT_OWNER: ${{ inputs.owner }}") {
+		t.Errorf("Expected GH_AW_INPUT_OWNER in step env for TOML env_vars forwarding, got:\n%s", stepContent)
+	}
+	if !strings.Contains(stepContent, "GH_AW_INPUT_REPO: ${{ inputs.repo }}") {
+		t.Errorf("Expected GH_AW_INPUT_REPO in step env for TOML env_vars forwarding, got:\n%s", stepContent)
 	}
 }

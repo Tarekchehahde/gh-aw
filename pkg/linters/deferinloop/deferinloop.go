@@ -9,34 +9,32 @@ import (
 	"go/ast"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
-var log = logger.New("linters:deferinloop")
+var pkgLog = logger.New("linters:deferinloop")
 
 // Analyzer is the defer-in-loop analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "deferinloop",
-	Doc:      "reports defer statements enclosed anywhere within a for or range loop body; a function literal between a defer and an enclosing loop is treated as a new scope boundary, making the defer exempt; test files are not checked",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/deferinloop",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("deferinloop", "reports defer statements enclosed anywhere within a for or range loop body; a function literal between a defer and an enclosing loop is treated as a new scope boundary, making the defer exempt; test files are not checked", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	log.Printf("analyzing package %s", pass.Pkg.Path())
-
 	insp, err := astutil.Inspector(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "deferinloop")
+
+	pkgLog.Printf("analyzing package %s", pass.Pkg.Path())
+
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
+	if err != nil {
+		return nil, err
+	}
 
 	for cur := range insp.Root().Preorder((*ast.DeferStmt)(nil)) {
 		deferStmt, ok := cur.Node().(*ast.DeferStmt)
@@ -45,10 +43,10 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 
 		pos := pass.Fset.PositionFor(deferStmt.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
+		if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
 			continue
 		}
-		if nolint.HasDirective(pos, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(pos, noLintIndex, "deferinloop") {
 			continue
 		}
 
@@ -56,7 +54,7 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 
-		log.Printf("flagging defer inside loop at %s", pos)
+		pkgLog.Printf("flagging defer inside loop at %s", pos)
 		pass.ReportRangef(deferStmt,
 			"defer inside a loop does not execute at the end of each iteration; it runs when the enclosing function returns, which can cause resource leaks")
 	}

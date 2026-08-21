@@ -35,7 +35,7 @@ tools:
     max-patch-size: 51200
 steps:
   - name: Setup Python
-    uses: actions/setup-python@v6.3.0
+    uses: actions/setup-python@v7.0.0
     with:
       python-version: "3.12"
   - name: Setup local chart workspace
@@ -74,6 +74,11 @@ steps:
       fi
 timeout-minutes: 25
 source: githubnext/agentic-ops@c611242a76866fb51d4f7d660c80badc504dd473
+evals:
+  - id: aic_usage_analyzed
+    question: Did the agent audit AI Credit (AIC) usage across agentic workflows for the target period?
+  - id: report_or_discussion_created
+    question: Was a report or discussion created with historical trend data and per-workflow AIC breakdowns?
 ---
 
 # Daily Agentic Workflow AIC Usage Audit

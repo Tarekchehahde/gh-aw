@@ -110,7 +110,7 @@ func generateSquidLogsUploadStep(workflowName string, workflowData *WorkflowData
 		"      - name: Upload Firewall Logs",
 		"        if: always()",
 		"        continue-on-error: true",
-		"        uses: " + getActionPin("actions/upload-artifact"),
+		"        uses: " + getActionPinForData("actions/upload-artifact", workflowData),
 		"        with:",
 		"          name: " + artifactName,
 		"          path: " + firewallLogsDir,
@@ -130,11 +130,11 @@ func generateFirewallLogParsingStep(workflowName string, workflowData *WorkflowD
 		firewallLogsDirEnv = constants.AWFProxyLogsDirExpr
 	}
 
-	// In network-isolation (rootless) mode, pass --rootless so the script uses
-	// non-interactive sudo (sudo -n) with a non-sudo chmod fallback. In non-network-isolation
-	// mode, the script uses plain sudo (AWF ran with full sudo access).
+	// When the runtime profile runs AWF rootless, pass --rootless so the script uses
+	// non-interactive sudo (sudo -n) with a non-sudo chmod fallback. Profiles where AWF
+	// ran with host privileges (docker-sudo-iptables, cloud-hypervisor) use plain sudo.
 	scriptArg := ""
-	if isAWFNetworkIsolationEnabled(workflowData) {
+	if isAWFNetworkIsolationEnabled(workflowData) && getSandboxRuntimeProfile(workflowData).Rootless {
 		scriptArg = " --rootless"
 	}
 

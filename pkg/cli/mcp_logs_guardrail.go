@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
@@ -29,9 +30,43 @@ const (
 // MCPLogsGuardrailResponse represents the response returned by the logs tool.
 // The full data is always written to a file; this response provides the file
 // path so the caller can read the data.
+// Partial is true when the download stopped early (timeout or count limit) and
+// the written data contains a continuation cursor; Continuation then carries the
+// parameters needed to fetch the remaining logs.
 type MCPLogsGuardrailResponse struct {
-	Message  string `json:"message"`
-	FilePath string `json:"file_path,omitempty"`
+	Message      string            `json:"message"`
+	FilePath     string            `json:"file_path,omitempty"`
+	Partial      bool              `json:"partial,omitempty"`
+	Continuation *ContinuationData `json:"continuation,omitempty"`
+}
+
+// extractLogsContinuation returns the continuation cursor embedded in the logs
+// JSON output, or nil when the output is not JSON or the results are complete.
+func extractLogsContinuation(outputStr string) *ContinuationData {
+	var parsed struct {
+		Continuation *ContinuationData `json:"continuation"`
+	}
+	if err := json.Unmarshal([]byte(outputStr), &parsed); err != nil {
+		return nil
+	}
+	return parsed.Continuation
+}
+
+// extractLogsStaleWarning returns the top-level "stale_warning" field embedded
+// in the logs JSON output, or "" when absent or unparseable. This is a
+// dedicated field (distinct from the generic "message" field, which is also
+// used for non-warning hints such as the usage-only artifact hint) so that
+// only genuine stale-data warnings are surfaced as "WARNING" in the MCP
+// response.
+func extractLogsStaleWarning(outputStr string) string {
+	var parsed struct {
+		StaleWarning string `json:"stale_warning"`
+	}
+	if err := json.Unmarshal([]byte(outputStr), &parsed); err != nil {
+		mcpLogsGuardrailLog.Printf("extractLogsStaleWarning: failed to parse output JSON: %v", err)
+		return ""
+	}
+	return parsed.StaleWarning
 }
 
 // buildLogsFileResponse writes the logs JSON output to a content-addressed cache
@@ -117,9 +152,25 @@ func buildLogsFileResponse(outputStr string) string {
 	}
 
 	response := MCPLogsGuardrailResponse{
-		Message:  fmt.Sprintf("Logs data has been written to '%s'. Use the file_path to read the full data.", filePath),
 		FilePath: filePath,
 	}
+
+	var msgs []string
+	continuation := extractLogsContinuation(outputStr)
+	if continuation != nil {
+		response.Partial = true
+		response.Continuation = continuation
+		msgs = append(msgs, fmt.Sprintf("PARTIAL RESULTS: the download stopped before all matching runs were collected. %s Partial logs data has been written to '%s'. Use the file_path to read the collected data and the continuation parameters to fetch the remaining logs.", continuation.Message, filePath))
+	} else {
+		msgs = append(msgs, fmt.Sprintf("Logs data has been written to '%s'. Use the file_path to read the full data.", filePath))
+	}
+	// Surface the stale-data warning (when no date range was requested and the
+	// newest run returned is unexpectedly old) directly in the tool response so
+	// callers see it without having to open the file.
+	if warning := extractLogsStaleWarning(outputStr); warning != "" {
+		msgs = append(msgs, "WARNING: "+warning)
+	}
+	response.Message = strings.Join(msgs, " ")
 
 	responseJSON, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {

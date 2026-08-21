@@ -30,12 +30,20 @@ imports:
     with:
       title-prefix: "[safe-outputs-conformance] "
       expires: 1d
+  - shared/reporting.md
 
 
   - shared/otlp.md
 sandbox:
   agent:
-    sudo: false
+    id: awf
+evals:
+  - id: conformance_checked
+    question: Did the agent run a conformance check against the Safe Outputs specification implementation?
+  - id: tasks_created_or_noop
+    question: Were agentic tasks created for Copilot to address critical/high/medium/low issues, or was noop used when implementation was compliant?
+features:
+  gh-aw-detection: true
 ---
 
 # Daily Safe Outputs Conformance Checker
@@ -188,8 +196,6 @@ If multiple similar issues are found (e.g., 3 handlers missing the same validati
 ```
 
 ## Phase 4: Summary Report
-
-- **Report Formatting**: Use h3 (`###`) or lower for all headers in your report. Never use h1 (`#`) or h2 (`##`) — these are reserved for the issue title. Wrap long sections in `<details><summary><b>Section Name</b></summary>` tags to improve readability.
 
 After processing all issues, provide a summary in the workflow output:
 

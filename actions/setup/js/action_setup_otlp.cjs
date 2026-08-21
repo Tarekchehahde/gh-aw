@@ -1,5 +1,6 @@
 // @ts-check
 "use strict";
+require("./shim.cjs");
 
 /**
  * action_setup_otlp.cjs
@@ -28,6 +29,7 @@
 const { appendFileSync } = require("fs");
 const { nowMs } = require("./performance_now.cjs");
 const { getActionInput } = require("./action_input_utils.cjs");
+const { maskSecret } = require("./actions_secret_masking.cjs");
 
 /**
  * Append a key=value line to a GitHub Actions file (GITHUB_OUTPUT or GITHUB_ENV)
@@ -40,8 +42,12 @@ const { getActionInput } = require("./action_input_utils.cjs");
  */
 function writeEnvLine(filePath, key, value, logLabel, fileLabel) {
   if (!filePath || !value) return;
-  appendFileSync(filePath, `${key}=${value}\n`);
-  console.log(`[otlp] ${logLabel} written to ${fileLabel}`);
+  try {
+    appendFileSync(filePath, `${key}=${value}\n`);
+    core.info(`[otlp] ${logLabel} written to ${fileLabel}`);
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -108,13 +114,13 @@ async function run() {
   // through GitHub Actions expression evaluation is unreliable.
   const inputTraceId = getActionInput("TRACE_ID").toLowerCase();
   if (inputTraceId) {
-    console.log(`[otlp] INPUT_TRACE_ID=${inputTraceId} (will reuse activation trace)`);
+    core.info(`[otlp] INPUT_TRACE_ID=${inputTraceId} (will reuse activation trace)`);
   } else {
-    console.log("[otlp] INPUT_TRACE_ID not set, a new trace ID will be generated");
+    core.info("[otlp] INPUT_TRACE_ID not set, a new trace ID will be generated");
   }
   const inputParentSpanId = getActionInput("PARENT_SPAN_ID").toLowerCase();
   if (inputParentSpanId) {
-    console.log(`[otlp] INPUT_PARENT_SPAN_ID=${inputParentSpanId} (will parent setup span)`);
+    core.info(`[otlp] INPUT_PARENT_SPAN_ID=${inputParentSpanId} (will parent setup span)`);
   }
 
   // Normalize to the canonical underscore form so sendJobSetupSpan (which
@@ -129,6 +135,7 @@ async function run() {
 
   const inputOTLPOIDCToken = getActionInput("OTLP_OIDC_TOKEN");
   if (inputOTLPOIDCToken) {
+    maskSecret(inputOTLPOIDCToken);
     const existingHeaders = process.env.OTEL_EXPORTER_OTLP_HEADERS || "";
     const mergedHeaders = mergeAuthorizationHeader(existingHeaders, inputOTLPOIDCToken);
 
@@ -144,9 +151,9 @@ async function run() {
   }
 
   if (!endpoints) {
-    console.log("[otlp] GH_AW_OTLP_ENDPOINTS not set, skipping setup span");
+    core.info("[otlp] GH_AW_OTLP_ENDPOINTS not set, skipping setup span");
   } else {
-    console.log(`[otlp] sending setup span to configured endpoints`);
+    core.info(`[otlp] sending setup span to configured endpoints`);
   }
 
   const { traceId, spanId, parentSpanId } = await sendJobSetupSpan({
@@ -155,10 +162,10 @@ async function run() {
     parentSpanId: inputParentSpanId || undefined,
   });
 
-  console.log(`[otlp] resolved trace-id=${traceId}`);
+  core.info(`[otlp] resolved trace-id=${traceId}`);
 
   if (endpoints) {
-    console.log(`[otlp] setup span sent (traceId=${traceId}, spanId=${spanId})`);
+    core.info(`[otlp] setup span sent (traceId=${traceId}, spanId=${spanId})`);
   }
 
   const githubOutput = process.env.GITHUB_OUTPUT;
@@ -173,11 +180,11 @@ async function run() {
 
   // Always propagate trace/span context to subsequent steps in this job so
   // that the conclusion span can find the same trace ID.
+  if (isValidTraceId(traceId)) writeEnvLine(githubEnv, "GITHUB_AW_OTEL_TRACE_ID", traceId, "GITHUB_AW_OTEL_TRACE_ID", "GITHUB_ENV");
+  if (isValidSpanId(spanId)) writeEnvLine(githubEnv, "GITHUB_AW_OTEL_PARENT_SPAN_ID", spanId, "GITHUB_AW_OTEL_PARENT_SPAN_ID", "GITHUB_ENV");
+  // Propagate setup-end timestamp so the conclusion span can measure actual
+  // job execution duration (setup-end → conclusion-start).
   if (githubEnv) {
-    if (isValidTraceId(traceId)) writeEnvLine(githubEnv, "GITHUB_AW_OTEL_TRACE_ID", traceId, "GITHUB_AW_OTEL_TRACE_ID", "GITHUB_ENV");
-    if (isValidSpanId(spanId)) writeEnvLine(githubEnv, "GITHUB_AW_OTEL_PARENT_SPAN_ID", spanId, "GITHUB_AW_OTEL_PARENT_SPAN_ID", "GITHUB_ENV");
-    // Propagate setup-end timestamp so the conclusion span can measure actual
-    // job execution duration (setup-end → conclusion-start).
     const setupEndMs = String(Math.floor(nowMs()));
     writeEnvLine(githubEnv, "GITHUB_AW_OTEL_JOB_START_MS", setupEndMs, "GITHUB_AW_OTEL_JOB_START_MS", "GITHUB_ENV");
   }

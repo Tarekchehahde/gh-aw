@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 )
 
 func TestExtractMCPToolUsageData(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		logContent        string
@@ -56,6 +58,17 @@ func TestExtractMCPToolUsageData(t *testing.T) {
 			wantErr:       false,
 		},
 		{
+			name: "tool discovery is not tool usage",
+			// Discovery traffic identifies the contacted server but does not constitute tool usage.
+			logContent: `{"timestamp":"2024-01-12T10:00:00Z","level":"info","type":"request","event":"rpc_call","server_name":"safeoutputs","method":"tools/list","duration":50.0,"status":"success"}
+{"timestamp":"2024-01-12T10:00:01Z","level":"info","type":"request","event":"request","server_name":"safeoutputs","method":"tools/list","duration":50.0,"status":"success"}
+`,
+			wantServers:   1,
+			wantTools:     0,
+			wantToolCalls: 0,
+			wantErr:       false,
+		},
+		{
 			name:          "no gateway.jsonl file",
 			logContent:    "",
 			wantServers:   0,
@@ -67,6 +80,7 @@ func TestExtractMCPToolUsageData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 
 			// Only create gateway.jsonl if there's content
@@ -116,6 +130,7 @@ func TestExtractMCPToolUsageData(t *testing.T) {
 }
 
 func TestMCPToolSummaryCalculations(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a log with multiple calls to the same tool with varying sizes
@@ -159,6 +174,7 @@ func TestMCPToolSummaryCalculations(t *testing.T) {
 }
 
 func TestBuildAuditDataWithMCPToolUsage(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a simple gateway log
@@ -191,7 +207,7 @@ func TestBuildAuditDataWithMCPToolUsage(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, mcpData)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, mcpData)
 
 	// Verify MCP tool usage is included
 	require.NotNil(t, auditData.MCPToolUsage, "MCP tool usage should be included in audit data")
@@ -209,6 +225,7 @@ func TestBuildAuditDataWithMCPToolUsage(t *testing.T) {
 }
 
 func TestBuildAuditDataUsesMCPToolUsageForToolTypes(t *testing.T) {
+	t.Parallel()
 	processedRun := ProcessedRun{
 		Run: WorkflowRun{
 			DatabaseID:   2468,
@@ -230,7 +247,7 @@ func TestBuildAuditDataUsesMCPToolUsageForToolTypes(t *testing.T) {
 		},
 	}
 
-	auditData := buildAuditData(processedRun, metrics, mcpData)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, mcpData)
 
 	require.Len(t, auditData.ToolUsage, 2, "MCP tools should contribute to tool usage when metrics tool calls are empty")
 	require.NotNil(t, auditData.BehaviorFingerprint, "behavior fingerprint should be present")

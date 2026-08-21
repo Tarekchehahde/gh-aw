@@ -141,6 +141,7 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
   safe-outputs:
     create-check-run:
       name: "Security Analysis"       # Optional: check run name (defaults to workflow name)
+      target: "triggering"            # Optional: "triggering" (default), "*" (any PR), or explicit PR number
       max: 1                          # Optional: max check runs per workflow run (default: 1)
       output:                         # Optional: static fallback values used when the agent omits the field
         title: "Pending analysis"     # Fallback title (max 256 chars)
@@ -215,6 +216,7 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
         - outdated
         - resolved
       target-repo: "owner/repo"       # Optional: cross-repository
+      discussions: true               # Optional: opt-in to discussions:write permission for hiding discussion comments (default: false)
   ```
 
   Allowed reasons: `spam`, `abuse`, `off_topic`, `outdated`, `resolved`, `low_quality`.
@@ -243,6 +245,19 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
   ```
 
   Agent calls `set_issue_field` with `value` plus either `field_name` (preferred) or `field_node_id`. `issue_number` is optional and defaults to the triggering issue.
+- `approve-workflow-run:` - Approve a pending workflow run in the "action required" state
+
+  ```yaml
+  safe-outputs:
+    approve-workflow-run:
+      allowed-workflows: [ci.yml]     # Required: workflow filenames eligible for approval (no paths)
+      fork: true                      # Optional: restrict to fork pull requests (default: false)
+      allowed-pull-requests: ["123"]  # Optional: restrict to specific PR numbers
+      protected-files: blocked        # Optional: "blocked" (default), "fallback-to-issue", or "allowed"
+      github-token: ${{ secrets.APPROVE_WORKFLOW_RUN_TOKEN }}  # Required: external token/app (github.token cannot approve runs requiring approval)
+  ```
+
+  Requires `actions: write` (added automatically) plus an external `github-token` or `github-app` — the default `github.token` is not permitted to approve workflow runs requiring approval.
 - `noop:` - Log completion message for transparency (auto-enabled)
 
   ```yaml
@@ -257,7 +272,8 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
   ```yaml
   safe-outputs:
     missing-tool:
-      create-issue: true              # Optional: create issues for missing tools (default: true)
+      create-issue: true              # Optional: create issues for missing tools (default: false when this block is set; auto-enabled as true only when `missing-tool` is omitted)
+      report-as-failure: true         # Optional: classify the run as an agent failure (default: true)
       title-prefix: "[missing tool]"  # Optional: prefix for issue titles
       labels: [tool-request]          # Optional: labels for created issues
   ```
@@ -268,7 +284,8 @@ description: Safe-output reference for workflow dispatch, code scanning, checks,
   ```yaml
   safe-outputs:
     missing-data:
-      create-issue: true              # Optional: create issues for missing data (default: true)
+      create-issue: true              # Optional: create issues for missing data (default: false when this block is set; auto-enabled as true only when `missing-data` is omitted)
+      report-as-failure: true         # Optional: classify the run as an agent failure (default: true)
       title-prefix: "[missing data]"  # Optional: prefix for issue titles
       labels: [data-request]          # Optional: labels for created issues
   ```

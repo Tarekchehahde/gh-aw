@@ -363,11 +363,23 @@ func TestEnforceSafeUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := EnforceSafeUpdate(tt.manifest, tt.secretNames, tt.actionRefs, tt.redirect, tt.oldHasPR, tt.oldHasPRTarget, tt.currentHasPR, tt.currentHasPRTarget)
+			prTransition := PullRequestEventTransition{
+				OldHasPullRequest:           tt.oldHasPR,
+				OldHasPullRequestTarget:     tt.oldHasPRTarget,
+				CurrentHasPullRequest:       tt.currentHasPR,
+				CurrentHasPullRequestTarget: tt.currentHasPRTarget,
+			}
+			err := EnforceSafeUpdate(SafeUpdateOptions{
+				Manifest:              tt.manifest,
+				SecretNames:           tt.secretNames,
+				ActionRefs:            tt.actionRefs,
+				CurrentRedirect:       tt.redirect,
+				PullRequestTransition: prTransition,
+			})
 			if tt.wantErr {
 				require.Error(t, err, "expected safe update enforcement error")
 				for _, msg := range tt.wantErrMsgs {
-					assert.Contains(t, err.Error(), msg, "error message should contain %q", msg)
+					require.ErrorContains(t, err, msg, "error message should contain %q", msg)
 				}
 			} else {
 				assert.NoError(t, err, "unexpected safe update enforcement error")
@@ -379,7 +391,7 @@ func TestEnforceSafeUpdate(t *testing.T) {
 func TestBuildSafeUpdateError(t *testing.T) {
 	t.Run("secrets only", func(t *testing.T) {
 		violations := []string{"NEW_SECRET", "ANOTHER_SECRET"}
-		err := buildSafeUpdateError(violations, nil, nil, "", "", false)
+		err := buildSafeUpdateError(violations, nil, nil, "", "", false, nil)
 		require.Error(t, err, "should return an error")
 
 		msg := err.Error()
@@ -390,7 +402,7 @@ func TestBuildSafeUpdateError(t *testing.T) {
 	})
 
 	t.Run("added actions only", func(t *testing.T) {
-		err := buildSafeUpdateError(nil, []string{"evil-org/bad-action"}, nil, "", "", false)
+		err := buildSafeUpdateError(nil, []string{"evil-org/bad-action"}, nil, "", "", false, nil)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
 		assert.Contains(t, msg, "evil-org/bad-action", "action in message")
@@ -398,7 +410,7 @@ func TestBuildSafeUpdateError(t *testing.T) {
 	})
 
 	t.Run("removed actions only", func(t *testing.T) {
-		err := buildSafeUpdateError(nil, nil, []string{"actions/setup-node"}, "", "", false)
+		err := buildSafeUpdateError(nil, nil, []string{"actions/setup-node"}, "", "", false, nil)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
 		assert.Contains(t, msg, "actions/setup-node", "action in message")
@@ -406,7 +418,7 @@ func TestBuildSafeUpdateError(t *testing.T) {
 	})
 
 	t.Run("added redirect only", func(t *testing.T) {
-		err := buildSafeUpdateError(nil, nil, nil, "owner/repo/workflows/new.md@main", "", false)
+		err := buildSafeUpdateError(nil, nil, nil, "owner/repo/workflows/new.md@main", "", false, nil)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
 		assert.Contains(t, msg, "New redirect configured", "added redirect section header in message")
@@ -414,7 +426,7 @@ func TestBuildSafeUpdateError(t *testing.T) {
 	})
 
 	t.Run("removed redirect only", func(t *testing.T) {
-		err := buildSafeUpdateError(nil, nil, nil, "", "owner/repo/workflows/old.md@main", false)
+		err := buildSafeUpdateError(nil, nil, nil, "", "owner/repo/workflows/old.md@main", false, nil)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
 		assert.Contains(t, msg, "Previously-approved redirect removed", "removed redirect section header in message")
@@ -429,6 +441,7 @@ func TestBuildSafeUpdateError(t *testing.T) {
 			"owner/repo/workflows/new.md@main",
 			"owner/repo/workflows/old.md@main",
 			false,
+			nil,
 		)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
@@ -440,12 +453,45 @@ func TestBuildSafeUpdateError(t *testing.T) {
 	})
 
 	t.Run("pull_request to pull_request_target escalation", func(t *testing.T) {
-		err := buildSafeUpdateError(nil, nil, nil, "", "", true)
+		err := buildSafeUpdateError(nil, nil, nil, "", "", true, nil)
 		require.Error(t, err, "should return an error")
 		msg := err.Error()
 		assert.Contains(t, msg, "Event trigger security escalation", "event escalation section in message")
 		assert.Contains(t, msg, "pull_request was converted to pull_request_target", "event escalation details in message")
 	})
+}
+
+func TestMemoryValidationScriptChangesRequireSafeUpdateReview(t *testing.T) {
+	manifest := &GHAWManifest{
+		MemoryValidationScripts: []GHAWManifestMemoryValidationScript{
+			{Memory: "cache-memory:unchanged", SHA256: "same"},
+			{Memory: "repo-memory:modified", SHA256: "before"},
+			{Memory: "repo-memory:removed", SHA256: "removed"},
+		},
+	}
+	current := []GHAWManifestMemoryValidationScript{
+		{Memory: "cache-memory:added", SHA256: "added"},
+		{Memory: "cache-memory:unchanged", SHA256: "same"},
+		{Memory: "repo-memory:modified", SHA256: "after"},
+	}
+
+	changes := collectMemoryValidationScriptChanges(manifest, current)
+	assert.Equal(t, []string{
+		"cache-memory:added (added)",
+		"repo-memory:modified (modified)",
+		"repo-memory:removed (removed)",
+	}, changes)
+
+	err := EnforceSafeUpdate(SafeUpdateOptions{
+		Manifest:                manifest,
+		PullRequestTransition:   PullRequestEventTransition{},
+		MemoryValidationScripts: current,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "Memory validation script changes")
+	require.ErrorContains(t, err, "cache-memory:added (added)")
+	require.ErrorContains(t, err, "repo-memory:modified (modified)")
+	require.ErrorContains(t, err, "repo-memory:removed (removed)")
 }
 
 func TestExtractPullRequestEventPresence(t *testing.T) {

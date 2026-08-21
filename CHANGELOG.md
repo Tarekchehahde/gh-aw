@@ -438,6 +438,24 @@ Run `gh aw fix --write` to apply automatic updates across your repository.
 
 ### Breaking Changes
 
+#### Removed the experimental `opencode` engine
+
+Workflows using `engine: opencode` must migrate to `copilot`, `claude`, `codex`,
+`gemini`, `antigravity`, or `pi`. The runner no longer restores
+`opencode.jsonc` or `.opencode/` configuration.
+
+#### `gh aw add` errors for packages with `aw.yml` config
+
+Running `gh aw add <package>` on a package that declares interactive config
+steps in `aw.yml` now returns an error instead of installing with a TODO
+placeholder message.
+
+**Migration:**
+- Replace `gh aw add <package>` with `gh aw add-wizard <package>` for any
+  package that declares interactive config steps in `aw.yml`.
+- If running in non-interactive automation, check whether the package supports
+  a non-interactive installation path.
+
 #### Remove `imports.if` from workflow frontmatter
 
 `imports:` entries no longer accept an `if` condition. Conditional imports are

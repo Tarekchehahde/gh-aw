@@ -129,6 +129,8 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  issues: read
+  discussions: read
 engine: copilot
 tools:
   github:
@@ -138,7 +140,7 @@ tools:
     mode: cli
     version: "v1.41.0"
   cache-memory:
-    key: pr-${{ github.run_id }}
+    key: pr-${{ env.GH_AW_WORKFLOW_ID_SANITIZED }}
   edit:
   bash: ["git status", "git diff"]
 timeout-minutes: 15
@@ -159,7 +161,9 @@ Review and test the pull request with multiple tools.
 	compiler.SetApprove(true)
 
 	// Warm up: run once before timing to prime one-time caches (schema compilation, etc.)
-	_ = compiler.CompileWorkflow(testFile)
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		b.Fatalf("warm-up compile failed: %v", err)
+	}
 
 	b.ResetTimer()
 	b.ReportAllocs()

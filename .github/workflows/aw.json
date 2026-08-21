@@ -1,8 +1,8 @@
 {
-  "utc": "-08:00",
-  "auto_upgrade": true,
+  "auto_upgrade": { "cron": "0 9 * * 1" },
   "maintenance": {
     "action_failure_issue_expires": 12,
     "label_triggers": true
-  }
+  },
+  "utc": "-08:00"
 }

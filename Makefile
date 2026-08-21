@@ -18,10 +18,16 @@ CI_COVERAGE_ENABLED ?= 1
 CI_COVERAGE_SOURCE_BRANCH ?= main
 CI_RUN_ID ?=
 CI_UNIT_WORKFLOW_FILE ?= cgo.yml
-CI_UNIT_TEST_ARTIFACT_PATTERN ?= test-result-cgo-unit
+CI_UNIT_TEST_ARTIFACT_PATTERN ?= test-result-cgo-unit-*
 CI_UNIT_RUN_ID ?=
 GO_IMPACTED_TEST_MAX_SECONDS ?= 60
 GO_IMPACTED_TEST_PATTERN_MAX_CHARS ?= 8000
+GO_IMPACTED_TEST_FALLBACK_MODE ?= package
+GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE_DEFAULT ?= 5
+GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE ?= $(GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE_DEFAULT)
+TEST_UNIT_MAX_SECONDS ?= 30
+TEST_UNIT_RUN_FULL ?= 0
+TEST_UNIT_IMPACTED_FALLBACK_MODE ?= sample
 
 # Build flags
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
@@ -32,7 +38,7 @@ all: build
 
 # Build the binary, run make deps before this
 .PHONY: build
-build: sync-action-pins sync-action-scripts
+build: sync-action-pins sync-action-scripts sync-compat
 	go build $(LDFLAGS) -o $(BINARY_NAME) ./cmd/gh-aw
 
 # Build for all platforms
@@ -79,10 +85,20 @@ build-wasm:
 .PHONY: test
 test: test-unit test-integration
 
-# Test unit tests only (excludes labelled integration tests and long tests)
+# Test all Go unit tests only (excludes labelled integration tests and long tests)
+.PHONY: test-unit-all
+test-unit-all:
+	go test -v -parallel=4 -timeout=10m -run='^Test' ./... -short
+
+# Test impacted Go unit tests first for faster feedback (target budget: ~30s)
 .PHONY: test-unit
 test-unit:
-	go test -v -parallel=4 -timeout=10m -run='^Test' ./... -short
+	@echo "Running impacted Go unit tests first (time budget: $(TEST_UNIT_MAX_SECONDS)s)..."; \
+	$(MAKE) --no-print-directory test-impacted-go CI_COVERAGE_ENABLED=0 GO_IMPACTED_TEST_MAX_SECONDS=$(TEST_UNIT_MAX_SECONDS) GO_IMPACTED_TEST_FALLBACK_MODE=$(TEST_UNIT_IMPACTED_FALLBACK_MODE) GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE=$(GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE); \
+	if [ "$(TEST_UNIT_RUN_FULL)" = "1" ]; then \
+		echo "TEST_UNIT_RUN_FULL=1 set; running full Go unit test suite after impacted tests."; \
+		$(MAKE) --no-print-directory test-unit-all; \
+	fi
 
 .PHONY: test-integration
 test-integration:
@@ -154,17 +170,19 @@ bench:
 	go test -bench=. -benchmem -benchtime=3x -run=^$$ ./pkg/... | tee bench_results.txt
 
 # Run only critical performance benchmarks for daily monitoring
+# Uses time-based -benchtime (not a fixed low iteration count) so that results are
+# averaged over many iterations and are far less sensitive to shared CI runner noise.
 .PHONY: bench-performance
 bench-performance:
 	@echo "Running critical performance benchmarks..."
 	@echo "This includes: CompileSimpleWorkflow, CompileComplexWorkflow, CompileMCPWorkflow,"
 	@echo "               CompileMemoryUsage, ParseWorkflow, Validation, YAMLGeneration"
 	@go test -bench='Benchmark(CompileSimpleWorkflow|CompileComplexWorkflow|CompileMCPWorkflow|CompileMemoryUsage|ParseWorkflow|Validation|YAMLGeneration)$$' \
-		-benchmem -benchtime=3x -run=^$$ ./pkg/workflow | tee bench_performance.txt
+		-benchmem -benchtime=2s -run=^$$ ./pkg/workflow | tee bench_performance.txt
 	@echo ""
 	@echo "Also running CLI helper benchmarks..."
 	@go test -bench='Benchmark(ExtractWorkflowNameFromFile|FindIncludesInContent)$$' \
-		-benchmem -benchtime=1s -run=^$$ ./pkg/cli >> bench_performance.txt
+		-benchmem -benchtime=2s -run=^$$ ./pkg/cli >> bench_performance.txt
 	@echo ""
 	@echo "Performance benchmark results saved to bench_performance.txt"
 
@@ -208,12 +226,10 @@ security-scan: security-gosec security-govulncheck
 .PHONY: security-gosec
 security-gosec:
 	@echo "Running gosec security scanner..."
-	@command -v gosec >/dev/null || go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 	@# Keep only globally noisy rules here.
 	@# G602 (slice bounds check) is excluded globally due persistent false positives.
 	@# Use inline '#nosec Gxxx -- justification' suppressions for specific findings.
-	@GOPATH=$$(go env GOPATH); \
-	PATH="$$GOPATH/bin:$$PATH" gosec -fmt=json -out=gosec-report.json -stdout -exclude-generated -track-suppressions \
+	@go tool gosec -fmt=json -out=gosec-report.json -stdout -exclude-generated -track-suppressions \
 		-nosec-require-rules -nosec-require-justification \
 		-exclude=G602 \
 		./...
@@ -222,13 +238,13 @@ security-gosec:
 .PHONY: security-govulncheck
 security-govulncheck:
 	@echo "Running govulncheck..."
-	go run golang.org/x/vuln/cmd/govulncheck ./...
+	@go tool govulncheck ./...
 	@echo "✓ Govulncheck complete"
 
 .PHONY: security-govulncheck-sarif
 security-govulncheck-sarif:
 	@echo "Running govulncheck (SARIF output)..."
-	go run -mod=readonly golang.org/x/vuln/cmd/govulncheck -format sarif ./... > govulncheck-results.sarif; ret=$$?; [ $$ret -eq 0 ] || [ $$ret -eq 3 ]
+	@go tool govulncheck -format sarif ./... > govulncheck-results.sarif; ret=$$?; [ $$ret -eq 0 ] || [ $$ret -eq 3 ]
 	@echo "✓ Govulncheck complete (results in govulncheck-results.sarif)"
 
 # Test JavaScript files
@@ -253,20 +269,21 @@ test-impacted-js: build-js
 		echo "Set BASE_REF explicitly, for example: make test-impacted-js BASE_REF=origin/main"; \
 		exit 1; \
 	fi; \
-	CHANGED_JS_FILES=$$(git diff --name-only --diff-filter=ACMR "$$BASE_COMMIT"..HEAD -- actions/setup/js eslint-factory | grep -E '\.(cjs|js|mjs|ts)$$' || true); \
+	CHANGED_JS_FILES=$$({ git diff --name-only --diff-filter=ACMR "$$BASE_COMMIT" -- actions/setup/js eslint-factory; git ls-files --others --exclude-standard -- actions/setup/js eslint-factory; } | sort -u | grep -E '\.(cjs|js|mjs|ts)$$' || true); \
 	if [ -z "$$CHANGED_JS_FILES" ]; then \
 		echo "No changed JavaScript/TypeScript files under actions/setup/js or eslint-factory; skipping impacted JS tests."; \
 		exit 0; \
 	fi; \
 	CHANGED_SETUP_JS_FILES=$$(printf '%s\n' "$$CHANGED_JS_FILES" | grep '^actions/setup/js/' || true); \
 	CHANGED_ESLINT_FACTORY_FILES=$$(printf '%s\n' "$$CHANGED_JS_FILES" | grep '^eslint-factory/' || true); \
+	ROOT=$$(pwd); \
 	if [ -n "$$CHANGED_SETUP_JS_FILES" ]; then \
 		echo "Running impacted JavaScript unit tests in actions/setup/js for changed files: $$CHANGED_SETUP_JS_FILES"; \
-		cd actions/setup/js && printf '%s\n' "$$CHANGED_SETUP_JS_FILES" | sed 's|^actions/setup/js/||' | tr '\n' '\0' | xargs -0 -r npm run test:js -- --no-file-parallelism --passWithNoTests $(JS_IMPACTED_TEST_EXCLUDES); \
+		cd "$$ROOT/actions/setup/js" && printf '%s\n' "$$CHANGED_SETUP_JS_FILES" | sed 's|^actions/setup/js/||' | tr '\n' '\0' | xargs -0 -r npm run test:js -- --no-file-parallelism --passWithNoTests $(JS_IMPACTED_TEST_EXCLUDES); \
 	fi; \
 	if [ -n "$$CHANGED_ESLINT_FACTORY_FILES" ]; then \
 		echo "Running eslint-factory tests for changed files: $$CHANGED_ESLINT_FACTORY_FILES"; \
-		cd eslint-factory && npm test; \
+		cd "$$ROOT/eslint-factory" && npm test; \
 	fi
 
 # Test impacted Go unit tests only (excluding integration tests)
@@ -278,7 +295,7 @@ test-impacted-go:
 		echo "Set BASE_REF explicitly, for example: make test-impacted-go BASE_REF=origin/main"; \
 		exit 1; \
 	fi; \
-	CHANGED_GO_FILES=$$(git diff --name-only --diff-filter=ACMR "$$BASE_COMMIT"..HEAD | grep -E '\.go$$' || true); \
+	CHANGED_GO_FILES=$$({ git diff --name-only --diff-filter=ACDMR "$$BASE_COMMIT"; git ls-files --others --exclude-standard; } | sort -u | grep -E '\.go$$' | grep -v -E '(^|/)testdata/' || true); \
 	if [ -z "$$CHANGED_GO_FILES" ]; then \
 		echo "No changed Go files; skipping impacted Go tests."; \
 		exit 0; \
@@ -329,11 +346,22 @@ test-impacted-go:
 		CHANGED_GO_PACKAGES="$$COVERAGE_GO_PACKAGES"; \
 		echo "Running impacted Go unit tests from CI coverage correlation: $$CHANGED_GO_PACKAGES"; \
 	else \
-		CHANGED_GO_PACKAGES=$$(printf '%s\n' "$$CHANGED_GO_FILES" | while IFS= read -r file; do dirname "$$file"; done | sort -u | sed 's|^|./|'); \
+		CHANGED_GO_PACKAGES=$$(printf '%s\n' "$$CHANGED_GO_FILES" | while IFS= read -r file; do \
+			dir=$$(dirname "$$file"); \
+			if find "$$dir" -maxdepth 1 -type f -name '*.go' -print -quit 2>/dev/null | grep -q .; then \
+				printf './%s\n' "$$dir"; \
+			fi; \
+		done | sort -u); \
+		if [ -z "$$CHANGED_GO_PACKAGES" ]; then \
+			echo "No remaining Go packages for the changed files; skipping impacted Go tests."; \
+			exit 0; \
+		fi; \
 		echo "Running impacted Go unit tests in changed-file packages: $$CHANGED_GO_PACKAGES"; \
 	fi; \
 	SELECTED_GO_TESTS=""; \
-	if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then \
+	if [ "$(CI_COVERAGE_ENABLED)" != "1" ]; then \
+		echo "CI timing correlation disabled; using local impacted-test sampling."; \
+	elif command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then \
 		UNIT_RUN_ID="$(CI_UNIT_RUN_ID)"; \
 		if [ -z "$$UNIT_RUN_ID" ]; then \
 			UNIT_RUN_ID=$$(gh run list --workflow "$(CI_UNIT_WORKFLOW_FILE)" --branch "$$COVERAGE_SOURCE_BRANCH" --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true); \
@@ -343,12 +371,11 @@ test-impacted-go:
 			rm -rf "$$UNIT_RESULT_DIR"; \
 			mkdir -p "$$UNIT_RESULT_DIR"; \
 			if gh run download "$$UNIT_RUN_ID" --pattern "$(CI_UNIT_TEST_ARTIFACT_PATTERN)" --dir "$$UNIT_RESULT_DIR" >/dev/null 2>&1; then \
-				UNIT_RESULT_FILE=$$(find "$$UNIT_RESULT_DIR" -type f -name '*.json' | head -n 1); \
-				if [ -n "$$UNIT_RESULT_FILE" ]; then \
+				if find "$$UNIT_RESULT_DIR" -type f -name '*.json' -print -quit | grep -q .; then \
 					IMPACTED_PACKAGE_FILE="$(CI_COVERAGE_DIR)/impacted-go-packages.txt"; \
 					printf '%s\n' "$$CHANGED_GO_PACKAGES" | sed 's|^\./|github.com/github/gh-aw/|' > "$$IMPACTED_PACKAGE_FILE"; \
 					IMPACTED_TEST_CANDIDATES="$(CI_COVERAGE_DIR)/impacted-go-test-candidates.tsv"; \
-					jq -r 'select(.Action == "pass" and .Package != null and .Test != null and (.Test | contains("/") | not) and .Elapsed != null) | [.Package, .Test, (.Elapsed | tostring)] | @tsv' "$$UNIT_RESULT_FILE" \
+					find "$$UNIT_RESULT_DIR" -type f -name '*.json' -exec jq -r 'select(.Action == "pass" and .Package != null and .Test != null and (.Test | contains("/") | not) and .Elapsed != null) | [.Package, .Test, (.Elapsed | tostring)] | @tsv' {} + \
 						| awk 'NR==FNR { pkgs[$$1] = 1; next } $$1 in pkgs { print }' "$$IMPACTED_PACKAGE_FILE" - \
 						| sort -u > "$$IMPACTED_TEST_CANDIDATES"; \
 					if [ -s "$$IMPACTED_TEST_CANDIDATES" ]; then \
@@ -413,12 +440,31 @@ test-impacted-go:
 		done || exit 1; \
 		exit 0; \
 	fi; \
+	if [ "$(GO_IMPACTED_TEST_FALLBACK_MODE)" = "sample" ]; then \
+		SAMPLE_PER_PACKAGE="$(GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE)"; \
+		case "$$SAMPLE_PER_PACKAGE" in \
+			''|*[!0-9]*|0) SAMPLE_PER_PACKAGE="$(GO_IMPACTED_TEST_SAMPLE_PER_PACKAGE_DEFAULT)" ;; \
+		esac; \
+		echo "No impacted timing data available; running up to $$SAMPLE_PER_PACKAGE sampled top-level tests per impacted package."; \
+		printf '%s\n' "$$CHANGED_GO_PACKAGES" | while IFS= read -r pkg; do \
+			[ -z "$$pkg" ] && continue; \
+			TEST_PATTERN=$$(go test -list '^Test' "$$pkg" 2>/dev/null | head -n "$$SAMPLE_PER_PACKAGE" | paste -sd'|' -); \
+			if [ -z "$$TEST_PATTERN" ]; then \
+				echo "No top-level tests discovered in $$pkg; skipping sampled run for this package."; \
+				continue; \
+			fi; \
+			echo "Running sampled impacted Go unit tests in $$pkg with pattern ^($$TEST_PATTERN)$$"; \
+			go test -v -parallel=4 -timeout=10m -short -run "^($$TEST_PATTERN)$$" "$$pkg" || exit 1; \
+		done || exit 1; \
+		exit 0; \
+	fi; \
 	# Use -short to exclude integration tests and keep execution to unit-test scope. \
 	printf '%s\n' "$$CHANGED_GO_PACKAGES" | tr '\n' '\0' | xargs -0 -r go test -v -parallel=4 -timeout=10m -short
 
 # Test both impacted JavaScript and Go unit tests
 .PHONY: test-impacted
-test-impacted: test-impacted-js test-impacted-go
+test-impacted:
+	@$(MAKE) --no-print-directory -j2 test-impacted-js test-impacted-go
 
 # Install JavaScript dependencies
 .PHONY: deps-js
@@ -438,9 +484,18 @@ bundle-js:
 	@echo "✓ bundle-js tool built"
 	@echo "To bundle a JavaScript file: ./bundle-js <input-file> [output-file]"
 
-# Test all code (Go, JavaScript, and wasm golden)
+# Run Bash script tests (check-stale-lock-files, check-workflow-drift, check-cgo-cjs-workflow-purity)
+.PHONY: test-scripts
+test-scripts: build
+	@echo "Running Bash script tests..."
+	bash scripts/check-stale-lock-files_test.sh
+	bash scripts/check-workflow-drift_test.sh ./$(BINARY_NAME)
+	bash scripts/check-cgo-cjs-workflow-purity_test.sh
+	@echo "✓ All Bash script tests passed"
+
+# Test all code (Go, JavaScript, wasm golden, and shell scripts)
 .PHONY: test-all
-test-all: test test-js test-wasm-golden
+test-all: test test-js test-wasm-golden test-scripts
 
 # Run tests with coverage
 .PHONY: test-coverage
@@ -592,10 +647,11 @@ check-node-version:
 	echo "✓ Node.js version check passed ($$NODE_VERSION)"
 
 .PHONY: tools
-tools: ## Install build-time tools from tools.go
+tools: ## Install build-time tools declared in go.mod tool directives
 	@echo "Installing build tools..."
-	@go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
-	@go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+	@go install github.com/rhysd/actionlint/cmd/actionlint
+	@go install github.com/securego/gosec/v2/cmd/gosec
+	@go install golang.org/x/vuln/cmd/govulncheck
 	@go install golang.org/x/tools/gopls@v0.21.1
 	@echo "✓ Tools installed successfully"
 
@@ -658,6 +714,76 @@ install-golangci-lint:
 	echo "Error: Failed to download a valid golangci-lint archive from $$DOWNLOAD_URL after $$MAX_ATTEMPTS attempts"; \
 	exit 1
 
+# Install shellcheck binary
+# Downloads pre-built binary from GitHub releases
+.PHONY: install-shellcheck
+install-shellcheck:
+	@echo "Installing shellcheck binary..."
+	@SHELLCHECK_VERSION="v0.11.0"; \
+	GOPATH=$$(go env GOPATH); \
+	GOOS=$$(go env GOOS); \
+	GOARCH=$$(go env GOARCH); \
+	BINARY_NAME="shellcheck"; \
+	if [ "$$GOOS" = "windows" ]; then \
+		BINARY_NAME="shellcheck.exe"; \
+	fi; \
+	if [ -x "$$GOPATH/bin/$$BINARY_NAME" ]; then \
+		INSTALLED_VERSION=$$("$$GOPATH/bin/$$BINARY_NAME" --version 2>/dev/null | sed -n 's/^version: //p' | head -n1 || echo "unknown"); \
+		if [ "$$INSTALLED_VERSION" = "$${SHELLCHECK_VERSION#v}" ]; then \
+			echo "✓ shellcheck $$SHELLCHECK_VERSION already installed"; \
+			exit 0; \
+		fi; \
+	fi; \
+	case "$$GOOS/$$GOARCH" in \
+		linux/amd64) ASSET_NAME="shellcheck-$$SHELLCHECK_VERSION.linux.x86_64.tar.gz" ;; \
+		linux/arm64) ASSET_NAME="shellcheck-$$SHELLCHECK_VERSION.linux.aarch64.tar.gz" ;; \
+		darwin/amd64) ASSET_NAME="shellcheck-$$SHELLCHECK_VERSION.darwin.x86_64.tar.gz" ;; \
+		darwin/arm64) ASSET_NAME="shellcheck-$$SHELLCHECK_VERSION.darwin.aarch64.tar.gz" ;; \
+		windows/amd64) ASSET_NAME="shellcheck-$$SHELLCHECK_VERSION.zip" ;; \
+		*) echo "Error: shellcheck $$SHELLCHECK_VERSION is not supported on $$GOOS/$$GOARCH"; exit 1 ;; \
+	esac; \
+	DOWNLOAD_URL="https://github.com/koalaman/shellcheck/releases/download/$$SHELLCHECK_VERSION/$$ASSET_NAME"; \
+	TEMP_DIR=$$(mktemp -d); \
+	ARCHIVE="$$TEMP_DIR/$$ASSET_NAME"; \
+	EXTRACT_DIR="$$TEMP_DIR/extract"; \
+	MAX_ATTEMPTS=3; \
+	RETRY_DELAY=2; \
+	trap "rm -rf $$TEMP_DIR" EXIT; \
+	echo "Downloading shellcheck $$SHELLCHECK_VERSION for $$GOOS/$$GOARCH..."; \
+	for attempt in $$(seq 1 $$MAX_ATTEMPTS); do \
+		rm -f "$$ARCHIVE"; \
+		rm -rf "$$EXTRACT_DIR"; \
+		mkdir -p "$$EXTRACT_DIR"; \
+		if curl --fail --silent --show-error --location "$$DOWNLOAD_URL" -o "$$ARCHIVE"; then \
+			if [ "$$GOOS" = "windows" ]; then \
+				if unzip -q "$$ARCHIVE" -d "$$EXTRACT_DIR" && \
+					mkdir -p "$$GOPATH/bin" && \
+					mv "$$EXTRACT_DIR/$$BINARY_NAME" "$$GOPATH/bin/$$BINARY_NAME" && \
+					chmod +x "$$GOPATH/bin/$$BINARY_NAME"; then \
+					echo "✓ shellcheck $$SHELLCHECK_VERSION installed to $$GOPATH/bin/$$BINARY_NAME"; \
+					exit 0; \
+				fi; \
+			elif tar -tzf "$$ARCHIVE" >/dev/null 2>&1 && \
+				tar -xzf "$$ARCHIVE" -C "$$EXTRACT_DIR" && \
+				mkdir -p "$$GOPATH/bin" && \
+				mv "$$EXTRACT_DIR/shellcheck-$$SHELLCHECK_VERSION/$$BINARY_NAME" "$$GOPATH/bin/$$BINARY_NAME" && \
+				chmod +x "$$GOPATH/bin/$$BINARY_NAME"; then \
+				echo "✓ shellcheck $$SHELLCHECK_VERSION installed to $$GOPATH/bin/$$BINARY_NAME"; \
+				exit 0; \
+			fi; \
+			echo "Warning: Failed to extract or install shellcheck archive (attempt $$attempt/$$MAX_ATTEMPTS)"; \
+		else \
+			echo "Warning: Failed to download shellcheck archive (attempt $$attempt/$$MAX_ATTEMPTS)"; \
+		fi; \
+		if [ "$$attempt" -lt "$$MAX_ATTEMPTS" ]; then \
+			echo "Retrying shellcheck download in $$RETRY_DELAY seconds..."; \
+			sleep $$RETRY_DELAY; \
+			RETRY_DELAY=$$((RETRY_DELAY * 2)); \
+		fi; \
+	done; \
+	echo "Error: Failed to download a valid shellcheck archive from $$DOWNLOAD_URL after $$MAX_ATTEMPTS attempts"; \
+	exit 1
+
 # License compliance checking
 .PHONY: license-check
 license-check: ## Check dependency licenses for compliance
@@ -682,7 +808,7 @@ deps: check-node-version
 
 # Install development tools (including linter)
 .PHONY: deps-dev
-deps-dev: check-node-version deps tools install-golangci-lint download-github-actions-schema
+deps-dev: check-node-version deps tools install-golangci-lint install-shellcheck download-github-actions-schema
 	@echo "✓ Development dependencies installed"
 
 # Download GitHub Actions workflow schema for embedded validation
@@ -703,7 +829,7 @@ download-github-actions-schema:
 patch-github-actions-schema:
 	@echo "Patching GitHub Actions schema with custom permissions..."
 	@tmpfile=$$(mktemp) && \
-		jq '.definitions["permissions-event"].properties += {"copilot-requests": {"type": "string", "enum": ["write", "none"]}, "vulnerability-alerts": {"type": "string", "enum": ["read", "none"]}}' \
+		jq 'def append_missing($$items): reduce $$items[] as $$item (. ; if index($$item) then . else . + [$$item] end); .definitions["permissions-event"].properties += {"copilot-requests": {"type": "string", "enum": ["write", "none"]}, "vulnerability-alerts": {"type": "string", "enum": ["read", "none"]}} | (.properties.on.oneOf[] | select(.properties? and .properties.issues? and .properties.issues.properties? and .properties.issues.properties.types?).properties.issues.properties.types.items.enum) |= append_missing(["typed", "untyped", "field_added", "field_removed"]) | (.properties.on.oneOf[] | select(.properties? and .properties.issues? and .properties.issues.properties? and .properties.issues.properties.types?).properties.issues.properties.types.default) |= append_missing(["typed", "untyped", "field_added", "field_removed"])' \
 			pkg/workflow/schemas/github-workflow.json > "$$tmpfile" && \
 		mv "$$tmpfile" pkg/workflow/schemas/github-workflow.json
 	@cd actions/setup/js && npm run format:schema >/dev/null 2>&1
@@ -807,6 +933,28 @@ check-workflow-drift:
 	fi
 	@bash scripts/check-workflow-drift.sh ./$(BINARY_NAME)
 
+# Guard against a stale binary when files under pkg/parser/schemas/ are modified.
+# Schema files are embedded at compile time via //go:embed, so changing them without
+# rebuilding means the running binary still holds the old schema.  This target
+# detects when schema files have been modified (via git) but the binary has not been
+# rebuilt.  It is the schema-side parallel of check-stale-lock-files.
+# Requires the gh-aw binary to exist (run `make build` first).
+.PHONY: check-stale-schema-binary
+check-stale-schema-binary:
+	@base_ref="$${CHECK_STALE_SCHEMA_BASE_REF:-}"; \
+	if [ -z "$$base_ref" ] && [ -n "$${GITHUB_BASE_REF:-}" ]; then \
+		if git rev-parse --verify "origin/$${GITHUB_BASE_REF}^{commit}" >/dev/null 2>&1; then \
+			base_ref="origin/$${GITHUB_BASE_REF}"; \
+		elif git rev-parse --verify "$${GITHUB_BASE_REF}^{commit}" >/dev/null 2>&1; then \
+			base_ref="$${GITHUB_BASE_REF}"; \
+		fi; \
+	fi; \
+	if [ -n "$$base_ref" ]; then \
+		bash scripts/check-stale-schema-binary.sh --binary "./$(BINARY_NAME)" --base-ref "$$base_ref"; \
+	else \
+		bash scripts/check-stale-schema-binary.sh --binary "./$(BINARY_NAME)"; \
+	fi
+
 # Format code
 .PHONY: fmt
 fmt: fmt-go fmt-cjs fmt-json
@@ -877,6 +1025,16 @@ lint-cjs: fmt-check-cjs validate-cjs-syntax check-node-version
 .PHONY: lint-json
 lint-json: fmt-check-json
 	@echo "✓ JSON formatting validated"
+
+# Full-repository error-message audit (non-blocking report).
+# Reports pre-existing error-message violations across the repo so the debt can
+# be tracked as a metric over time. Always exits 0.
+.PHONY: lint-error-messages-report
+lint-error-messages-report:
+	@echo "Building custom linters..."
+	@env -u GOOS -u GOARCH go build -o /tmp/gh-aw-linters ./cmd/linters
+	@echo "Auditing error messages across $(LINTER_PACKAGES) (non-blocking)..."
+	@/tmp/gh-aw-linters -errormessage -errormessage.full-repo $(LINTER_PACKAGES) || true
 
 # Lint error messages for quality compliance
 .PHONY: lint-errors
@@ -956,9 +1114,27 @@ lint-action-sh:
 	@echo "Checking action shell scripts for python/python3 invocations..."
 	@bash scripts/check-action-sh-no-python.sh
 
+# Run shellcheck on actions/setup/sh scripts at error severity
+.PHONY: shellcheck-setup-sh
+shellcheck-setup-sh:
+	@GOPATH=$$(go env GOPATH); \
+	GOOS=$$(go env GOOS); \
+	BINARY_NAME="shellcheck"; \
+	if [ "$$GOOS" = "windows" ]; then \
+		BINARY_NAME="shellcheck.exe"; \
+	fi; \
+	if command -v shellcheck >/dev/null 2>&1 || [ -x "$$GOPATH/bin/$$BINARY_NAME" ]; then \
+		echo "Running shellcheck on actions/setup/sh..."; \
+		PATH="$$GOPATH/bin:$$PATH" shellcheck --severity=error actions/setup/sh/*.sh; \
+		echo "✓ shellcheck passed"; \
+	else \
+		echo "shellcheck is not installed. Run 'make deps-dev' to install dependencies."; \
+		exit 1; \
+	fi
+
 # Validate all project files
 .PHONY: lint
-lint: check-stale-lock-files fmt-check fmt-check-json lint-cjs golint validate-model-alias-chains lint-action-sh
+lint: check-stale-lock-files fmt-check fmt-check-json lint-cjs golint validate-model-alias-chains lint-action-sh shellcheck-setup-sh check-stale-schema-binary
 	@echo "✓ All validations passed"
 
 # Install the binary locally
@@ -976,6 +1152,11 @@ generate-schema-docs:
 .PHONY: generate-agent-factory
 generate-agent-factory:
 	node scripts/generate-agent-factory.js
+
+# Generate llms.txt at repository root from .github/aw/*.md
+.PHONY: generate-llms-txt
+generate-llms-txt:
+	node scripts/generate-llms-txt.js
 
 # Build slides with Marp
 .PHONY: build-slides
@@ -1013,6 +1194,18 @@ clean-docs:
 	@rm -rf docs/dist docs/node_modules docs/.astro
 	@echo "✓ Documentation artifacts cleaned"
 
+.PHONY: test-docs-remark
+test-docs-remark:
+	@echo "Running docs remark plugin unit tests..."
+	@node docs/src/lib/remark/inlineMarkdownInHtml.test.js
+	@echo "✓ Docs remark plugin unit tests passed"
+
+.PHONY: test-docs-wizard-model
+test-docs-wizard-model:
+	@echo "Running AW wizard data model unit tests..."
+	@node docs/src/lib/wizard/model.test.js
+	@echo "✓ AW wizard data model unit tests passed"
+
 # Sync templates from .github to pkg/cli/templates
 # Sync action pins from .github/aw to pkg/actionpins/data and pkg/workflow/data
 .PHONY: sync-action-pins
@@ -1032,7 +1225,19 @@ sync-action-scripts:
 	@echo "Syncing install-gh-aw.sh to actions/setup-cli/install.sh..."
 	@cp install-gh-aw.sh actions/setup-cli/install.sh
 	@chmod +x actions/setup-cli/install.sh
+	@echo "Syncing install-gh-aw.ps1 to actions/setup-cli/install.ps1..."
+	@cp install-gh-aw.ps1 actions/setup-cli/install.ps1
 	@echo "✓ Action scripts synced successfully"
+
+# Sync max-agent in the latest compat.json interval with DefaultCopilotVersion
+.PHONY: sync-compat
+sync-compat:
+	@bash scripts/sync-compat.sh
+
+# Check that compat.json is in sync with DefaultCopilotVersion (CI gate)
+.PHONY: check-stale-compat
+check-stale-compat:
+	@bash scripts/sync-compat.sh --check
 
 # Sync install-gh-aw.sh SHA/hash constants in pkg/cli/copilot_setup.go
 .PHONY: sync-install-script-hashes
@@ -1045,7 +1250,7 @@ sync-install-script-hashes:
 .PHONY: recompile
 recompile: build
 	./$(BINARY_NAME) init --codespaces ""
-	./$(BINARY_NAME) compile --validate --verbose --purge
+	./$(BINARY_NAME) compile --validate --verbose --purge --schedule-seed github/gh-aw
 #	./$(BINARY_NAME) compile --dir pkg/cli/workflows --validate --verbose --purge
 
 # Compile workflows under pkg/cli/workflows
@@ -1136,15 +1341,21 @@ sbom:
 
 # Agent should run this task before finishing its turns
 .PHONY: agent-finish
-agent-finish: deps-dev fmt lint build build-wasm test-all validate-otel-contract fix recompile dependabot generate-schema-docs generate-agent-factory security-scan
+agent-finish: deps-dev fmt lint build build-wasm test-all validate-otel-contract fix recompile dependabot generate-schema-docs generate-agent-factory generate-llms-txt security-scan
 	@echo "Agent finished tasks successfully."
 
-# Lightweight pre-PR gate — run before every report_progress / create_pull_request call.
-# Includes formatting + lint validation to prevent lint-fix PR churn:
-# stale-lock guard (fast, no binary) + build + fmt + lint + test-unit + workflow drift check.
+# Change-scoped pre-PR gate — run before every intermediate report_progress call.
+# The driver runs independent lint checks in parallel after formatting and build.
+.PHONY: agent-report-progress-no-test
+agent-report-progress-no-test:
+	@bash scripts/agent-report-progress.sh
+
+# Change-scoped pre-PR gate with impacted tests — run once before the final
+# report_progress call. Independent lint and test groups run in parallel; full
+# workflow recompilation remains isolated because it temporarily rewrites files.
 .PHONY: agent-report-progress
-agent-report-progress: check-stale-lock-files build fmt lint test-unit check-workflow-drift
-	@echo "Pre-PR validation passed (zero lint errors, lock files in sync). Safe to call report_progress."
+agent-report-progress:
+	@bash scripts/agent-report-progress.sh --with-tests
 
 # Extended pre-PR gate with lock-file-only linting.
 .PHONY: agent-report-progress-lint
@@ -1159,13 +1370,15 @@ help:
 	@echo "  build-awmg       - Build the awmg (MCP gateway) binary for current platform"
 	@echo "  build-all        - Build binaries for all platforms (gh-aw and awmg)"
 	@echo "  test             - Run Go tests (unit + integration)"
-	@echo "  test-unit        - Run Go unit tests only (faster)"
+	@echo "  test-unit        - Run impacted Go unit tests first (~$(TEST_UNIT_MAX_SECONDS)s budget); set TEST_UNIT_RUN_FULL=1 for full suite"
+	@echo "  test-unit-all    - Run full Go unit test suite"
 	@echo "  test-security    - Run security regression tests"
 	@echo "  test-js          - Run JavaScript tests"
 	@echo "  test-impacted-js - Run impacted JavaScript unit tests for current branch changes"
 	@echo "  test-impacted-go - Run impacted Go unit tests for current branch changes"
 	@echo "  test-impacted    - Run impacted JavaScript and Go unit tests for current branch changes"
-	@echo "  test-all         - Run all tests (Go, JavaScript, and wasm golden)"
+	@echo "  test-scripts     - Run Bash script tests (check-stale-lock-files, check-workflow-drift)"
+	@echo "  test-all         - Run all tests (Go, JavaScript, wasm golden, and shell scripts)"
 	@echo "  test-wasm-golden - Run wasm golden tests (Go string API path)"
 	@echo "  test-wasm        - Build wasm and run Node.js golden comparison test"
 	@echo "  update-wasm-golden - Regenerate wasm golden files from current compiler output"
@@ -1185,11 +1398,12 @@ help:
 	@echo "  actions-validate - Validate action.yml files"
 	@echo "  actions-clean    - Clean action build artifacts"
 	@echo "  generate-action-metadata - Generate action.yml and README.md from JavaScript modules"
-	@echo "  tools            - Install build-time tools from tools.go"
+	@echo "  tools            - Install build-time tools declared in go.mod tool directives"
 	@echo "  license-check    - Check dependency licenses for compliance"
 	@echo "  license-report   - Generate CSV license report"
 	@echo "  deps             - Install dependencies"
 	@echo "  deps-dev         - Install development dependencies (includes tools)"
+	@echo "  install-shellcheck - Install pinned shellcheck binary"
 	@echo "  check-node-version - Check Node.js version (20 or higher required)"
 	@echo "  golint           - Run golangci-lint (full repository scan)"
 	@echo "  golint-incremental - Run golangci-lint incrementally (only changed files, requires BASE_REF)"
@@ -1204,8 +1418,10 @@ help:
 	@echo "  validate-cjs-syntax - Syntax-check all non-test .cjs files (catches module-load SyntaxErrors)"
 	@echo "  lint-json        - Lint JSON files in pkg directory (excluding actions/setup/js)"
 	@echo "  lint-errors      - Lint error messages for quality compliance"
+	@echo "  lint-error-messages-report - Non-blocking full-repo error message audit"
 	@echo "  validate-otel-contract - Validate the gh-aw OpenTelemetry compatibility contract"
 	@echo "  lint-action-sh   - Lint action shell scripts for python/python3 invocations"
+	@echo "  shellcheck-setup-sh - Run shellcheck on actions/setup/sh scripts"
 	@echo "  check-file-sizes - Check Go file sizes and function counts (informational)"
 	@echo "  check-validator-sizes - Check *_validation.go files against the 768-line hard limit"
 	@echo "  security-scan    - Run all security scans (gosec, govulncheck)"
@@ -1217,9 +1433,12 @@ help:
 	@echo "  validate-workflows - Validate compiled workflow lock files (depends on build)"
 	@echo "  check-workflow-drift - Check for drift between .md sources and .lock.yml files (builds binary if missing)"
 	@echo "  check-stale-lock-files - Fast guard: detect modified .md files without regenerated .lock.yml (no binary needed)"
+	@echo "  check-stale-schema-binary - Guard: detect modified schema files under pkg/parser/schemas/ without a binary rebuild"
 	@echo "  install          - Install binary locally"
 	@echo "  sync-action-pins - Sync actions-lock.json from .github/aw to pkg/actionpins/data and pkg/workflow/data (runs automatically during build)"
-	@echo "  sync-action-scripts - Sync install-gh-aw.sh to actions/setup-cli/install.sh (runs automatically during build)"
+	@echo "  sync-action-scripts - Sync install-gh-aw.sh and install-gh-aw.ps1 to actions/setup-cli/ (runs automatically during build)"
+	@echo "  sync-compat      - Sync max-agent in .github/aw/compat.json latest interval with DefaultCopilotVersion (runs automatically during build)"
+	@echo "  check-stale-compat - Guard: detect when compat.json max-agent is out of sync with DefaultCopilotVersion"
 	@echo "  sync-install-script-hashes - Update install-gh-aw.sh SHA and SHA256 constants in pkg/cli/copilot_setup.go (runs automatically during update)"
 	@echo "  update           - Update GitHub Actions and workflows, sync action pins, and rebuild binary"
 	@echo "  fix              - Apply automatic codemod-style fixes to workflow files (depends on build)"
@@ -1229,6 +1448,7 @@ help:
 	@echo "  dependabot       - Generate Dependabot manifests for npm dependencies in workflows"
 	@echo "  generate-schema-docs - Generate frontmatter full reference documentation from JSON schema"
 	@echo "  generate-agent-factory     - Generate agent factory documentation page"
+	@echo "  generate-llms-txt  - Generate llms.txt at repository root from .github/aw/*.md"
 	@echo "  build-slides     - Build slides with Marp to docs/public/slides/gh-aw.html"
 	@echo "  deps-docs        - Install Astro documentation dependencies"
 	@echo "  build-docs       - Build Astro documentation to docs/dist"
@@ -1236,8 +1456,9 @@ help:
 	@echo "  preview-docs     - Preview built documentation with Astro"
 	@echo "  clean-docs       - Clean documentation artifacts (dist, node_modules, .astro)"
 
-	@echo "  agent-finish            - Complete validation sequence (build, test, fix, recompile, fmt, lint, security-scan)"
-	@echo "  agent-report-progress   - Lightweight pre-PR gate: check-stale-lock-files + build + fmt + lint + test-unit + check-workflow-drift"
-	@echo "  agent-report-progress-lint - Pre-PR gate + gh aw lint lock-file check"
+	@echo "  agent-finish                - Complete validation sequence (build, test, fix, recompile, fmt, lint, security-scan)"
+	@echo "  agent-report-progress-no-test - Fast change-scoped pre-PR gate without tests"
+	@echo "  agent-report-progress       - Change-scoped pre-PR gate with impacted Go tests"
+	@echo "  agent-report-progress-lint  - Full pre-PR gate + gh aw lint lock-file check"
 	@echo "  sbom             - Generate SBOM in SPDX and CycloneDX formats (requires syft)"
 	@echo "  help             - Show this help message"

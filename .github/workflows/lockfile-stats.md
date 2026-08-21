@@ -25,8 +25,9 @@ imports:
   - shared/otlp.md
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 ---
+
 # Lockfile Statistics Analysis Agent
 
 You are the Lockfile Statistics Analysis Agent. Analyze `.github/workflows/*.lock.yml` and publish one discussion in the `audits` category.

@@ -12,96 +12,77 @@ import (
 	"strconv"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
-var errorIface = universeErrorInterface()
-
-// universeErrorInterface returns the built-in error interface type, or nil.
-func universeErrorInterface() *types.Interface {
-	errorObj := types.Universe.Lookup("error")
-	if errorObj == nil {
-		return nil
-	}
-	iface, ok := errorObj.Type().Underlying().(*types.Interface)
-	if !ok {
-		return nil
-	}
-	return iface
-}
+var errorIface = astutil.UniverseErrorInterface()
 
 // Analyzer is the sprintf-err-dot analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "sprintferrdot",
-	Doc:      "reports redundant .Error() calls on error arguments passed to fmt format functions",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/sprintferrdot",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("sprintferrdot", "reports redundant .Error() calls on error arguments passed to fmt format functions", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "sprintferrdot")
 
-	nodeFilter := []ast.Node{
-		(*ast.CallExpr)(nil),
+	nodeFilter := []ast.Node{(*ast.CallExpr)(nil)}
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
+		analyzeErrDotCall(pass, n, generatedFiles, noLintIndex)
+	})
+}
+
+// analyzeErrDotCall checks whether a call expression is a fmt format function
+// that passes .Error() on an error argument redundantly.
+func analyzeErrDotCall(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return
-		}
+	pos := pass.Fset.PositionFor(call.Pos(), false)
+	if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
+		return
+	}
 
-		pos := pass.Fset.PositionFor(call.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
-			return
-		}
+	formatArgIdx, variadicStart, ok := fmtFormatCallInfo(pass, call)
+	if !ok {
+		return
+	}
+	if formatArgIdx >= len(call.Args) || variadicStart > len(call.Args) {
+		return
+	}
 
-		formatArgIdx, variadicStart, ok := fmtFormatCallInfo(pass, call)
-		if !ok {
-			return
-		}
-		if formatArgIdx >= len(call.Args) || variadicStart > len(call.Args) {
-			return
-		}
+	formatStr, ok := extractStringLit(call.Args[formatArgIdx])
+	if !ok {
+		return
+	}
 
-		formatStr, ok := extractStringLit(call.Args[formatArgIdx])
-		if !ok {
-			return
-		}
+	verbs := parseSimpleFormatVerbs(formatStr)
+	if verbs == nil {
+		return
+	}
 
-		verbs := parseSimpleFormatVerbs(formatStr)
-		if verbs == nil {
-			return
+	variadicArgs := call.Args[variadicStart:]
+	for i, arg := range variadicArgs {
+		if i >= len(verbs) {
+			break
 		}
-
-		variadicArgs := call.Args[variadicStart:]
-		for i, arg := range variadicArgs {
-			if i >= len(verbs) {
-				break
-			}
-			if verbs[i] != 's' && verbs[i] != 'v' {
+		if verbs[i] != 's' && verbs[i] != 'v' {
+			continue
+		}
+		if isErrorDotCall(pass, arg) {
+			if nolint.HasDirectiveForLinter(pass.Fset.PositionFor(arg.Pos(), false), noLintIndex, "sprintferrdot") {
 				continue
 			}
-			if isErrorDotCall(pass, arg) {
-				if nolint.HasDirective(pass.Fset.PositionFor(arg.Pos(), false), noLintLinesByFile) {
-					continue
-				}
-				pass.Reportf(arg.Pos(),
-					"redundant .Error() call: pass the error value directly with %%%c", verbs[i])
-			}
+			pass.Reportf(arg.Pos(),
+				"redundant .Error() call: pass the error value directly with %%%c", verbs[i])
 		}
-	})
-
-	return nil, nil
+	}
 }
 
 // fmtFormatCallInfo returns the format-string argument index and the
@@ -117,7 +98,7 @@ func fmtFormatCallInfo(pass *analysis.Pass, call *ast.CallExpr) (formatArgIdx, v
 	switch sel.Sel.Name {
 	case "Sprintf", "Errorf", "Printf":
 		return 0, 1, true
-	case "Fprintf", "Fscanf":
+	case "Fprintf":
 		return 1, 2, true
 	default:
 		return 0, 0, false

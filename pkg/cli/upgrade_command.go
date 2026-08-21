@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/fileutil"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/workflow"
 	"github.com/spf13/cobra"
@@ -31,7 +33,7 @@ type UpgradeConfig struct {
 }
 
 // NewUpgradeCommand creates the upgrade command
-func NewUpgradeCommand() *cobra.Command {
+func NewUpgradeCommand(validateEngine func(string) error) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade local agent files and workflows (codemods, action updates, and compilation)",
@@ -57,21 +59,23 @@ Use --audit to check dependency health without performing upgrades. This include
 The --audit flag skips the normal upgrade process.
 
 This command always upgrades all Markdown files in .github/workflows.`,
-		Example: `  ` + string(constants.CLIExtensionPrefix) + ` upgrade                    # Upgrade all workflows
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-fix          # Update agent files only (skip codemods, actions, and compilation)
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-actions      # Skip updating GitHub Actions versions
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-compile      # Skip recompiling workflows (do not modify lock files)
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --create-pull-request  # Upgrade and open a pull request
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --dir custom/workflows  # Upgrade workflows in custom directory
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org       # Preview upgrade pull requests across an organization
+		Example: `  ` + string(constants.CLIExtensionPrefix) + ` upgrade                              # Upgrade all workflows
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-fix                    # Update agent files only (skip codemods, actions, and compilation)
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-actions                # Skip updating GitHub Actions versions
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --no-compile                # Skip recompiling workflows (do not modify lock files)
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --create-pull-request       # Upgrade and open a pull request
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --dir custom/workflows      # Upgrade workflows in custom directory
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --engine claude             # Override AI engine for compilation
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --repo owner/repo           # Upgrade workflows in another repository
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org                # Preview upgrade pull requests across an organization
   ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org --repos '*-service'  # Limit org mode to matching repositories
   ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org --create-pull-request  # Open upgrade pull requests in org repositories
   ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org --create-pull-request --yes  # Auto-accept per-repo confirmations for PR creation (required in CI)
   ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org --create-issue  # Open issues in org repos with agentic workflows
   ` + string(constants.CLIExtensionPrefix) + ` upgrade --org my-org --create-issue --yes  # Auto-accept per-repo confirmations (required in CI)
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --audit           # Check dependency health without upgrading
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --audit --json    # Output audit results in JSON format
-  ` + string(constants.CLIExtensionPrefix) + ` upgrade --pre-releases    # Include pre-release versions when upgrading the extension (stable releases are the default)`,
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --audit                     # Check dependency health without upgrading
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --audit --json              # Output audit results in JSON format
+  ` + string(constants.CLIExtensionPrefix) + ` upgrade --pre-releases              # Include pre-release versions when upgrading the extension (stable releases are the default)`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			verbose, _ := cmd.Flags().GetBool("verbose")
@@ -90,8 +94,18 @@ This command always upgrades all Markdown files in .github/workflows.`,
 			skipExtensionUpgrade, _ := cmd.Flags().GetBool("skip-extension-upgrade")
 			approveUpgrade, _ := cmd.Flags().GetBool("approve")
 			preReleases, _ := cmd.Flags().GetBool("pre-releases")
+			engineOverride, _ := cmd.Flags().GetString("engine")
+			targetRepo, _ := cmd.Flags().GetString("repo")
 			targetOrg, _ := cmd.Flags().GetString("org")
 			repoGlobs, _ := cmd.Flags().GetStringSlice("repos")
+
+			if err := validateEngine(engineOverride); err != nil {
+				return err
+			}
+
+			if targetRepo != "" && targetOrg != "" {
+				return errors.New("cannot specify both --repo and --org flags; use --repo for a single repository or --org for organization-wide upgrades. Example: gh aw upgrade --repo owner/repo")
+			}
 
 			if len(repoGlobs) > 0 && targetOrg == "" {
 				return errors.New("--repos requires --org to be specified")
@@ -102,7 +116,7 @@ This command always upgrades all Markdown files in .github/workflows.`,
 			}
 
 			if createPR && createIssue {
-				return errors.New("cannot specify both --create-pull-request and --create-issue")
+				return errors.New("cannot specify both --create-pull-request and --create-issue. Example: gh aw upgrade --org my-org --create-pull-request")
 			}
 
 			// Handle audit mode
@@ -122,6 +136,11 @@ This command always upgrades all Markdown files in .github/workflows.`,
 				approve:              approveUpgrade,
 				preReleases:          preReleases,
 				yes:                  yes,
+				engineOverride:       engineOverride,
+			}
+
+			if targetRepo != "" {
+				return runUpgradeForTargetRepoFn(cmd.Context(), targetRepo, opts, createPR, verbose)
 			}
 
 			if targetOrg != "" {
@@ -141,7 +160,7 @@ This command always upgrades all Markdown files in .github/workflows.`,
 			if createPR {
 				prBody := "This PR upgrades agentic workflows by applying the latest codemods, " +
 					"updating GitHub Actions versions, and recompiling all workflows."
-				_, err := CreatePRWithChanges("upgrade-agentic-workflows", "chore: upgrade agentic workflows",
+				_, err := CreatePRWithChanges(cmd.Context(), "upgrade-agentic-workflows", "chore: upgrade agentic workflows",
 					"Upgrade agentic workflows", prBody, verbose)
 				return err
 			}
@@ -149,6 +168,8 @@ This command always upgrades all Markdown files in .github/workflows.`,
 		},
 	}
 
+	addEngineFlag(cmd)
+	addRepoFlag(cmd)
 	cmd.Flags().StringP("dir", "d", "", "Workflow directory (default: $GH_AW_WORKFLOWS_DIR or .github/workflows)")
 	cmd.Flags().Bool("no-fix", false, "Skip codemods, action version updates, and workflow compilation (only update agent files)")
 	cmd.Flags().Bool("no-actions", false, "Skip updating GitHub Actions versions (ignored when --no-fix is set)")
@@ -169,6 +190,7 @@ This command always upgrades all Markdown files in .github/workflows.`,
 	addJSONFlag(cmd)
 
 	// Register completions
+	RegisterEngineFlagCompletion(cmd)
 	RegisterDirFlagCompletion(cmd, "dir")
 
 	return cmd
@@ -206,6 +228,7 @@ type upgradeOptions struct {
 	approve              bool
 	preReleases          bool
 	yes                  bool
+	engineOverride       string
 }
 
 // runUpgradeCommand executes the upgrade process
@@ -220,7 +243,7 @@ func runUpgradeCommand(opts upgradeOptions) error {
 	// prevents the re-launched process from entering this branch again.
 	if !opts.skipExtensionUpgrade {
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Checking gh-aw extension version..."))
-		upgraded, installPath, err := upgradeExtensionIfOutdated(opts.verbose, opts.preReleases)
+		upgraded, installPath, err := upgradeExtensionIfOutdated(opts.ctx, opts.verbose, opts.preReleases)
 		if err != nil {
 			upgradeLog.Printf("Extension upgrade failed: %v", err)
 			return err
@@ -295,7 +318,7 @@ func runUpgradeCommand(opts upgradeOptions) error {
 			// was successfully updated, so both files stay in sync. Compilation is
 			// deferred to Step 4.
 			upgradeLog.Print("Updating action references in workflow .md files")
-			if err := UpdateActionsInWorkflowFiles(opts.ctx, opts.workflowDir, "", opts.verbose, false, true, 0); err != nil {
+			if err := UpdateActionsInWorkflowFiles(opts.ctx, opts.workflowDir, opts.engineOverride, opts.verbose, false, true, 0, false); err != nil {
 				msg := fmt.Sprintf("Failed to update action references in workflow files: %v", err)
 				upgradeLog.Print(msg)
 				// Non-critical: warn but don't fail the upgrade
@@ -323,9 +346,10 @@ func runUpgradeCommand(opts upgradeOptions) error {
 
 		// Create and configure compiler
 		compiler := createAndConfigureCompiler(CompileConfig{
-			Verbose:     opts.verbose,
-			WorkflowDir: opts.workflowDir,
-			Approve:     opts.approve,
+			Verbose:        opts.verbose,
+			WorkflowDir:    opts.workflowDir,
+			Approve:        opts.approve,
+			EngineOverride: opts.engineOverride,
 		})
 
 		// Determine workflow directory
@@ -383,7 +407,7 @@ func runUpgradeCommand(opts upgradeOptions) error {
 		if newPins && !opts.noCompile {
 			upgradeLog.Print("Recompiling workflows to embed new container digest pins")
 			fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Recompiling workflows to embed container digest pins..."))
-			if recompileErr := recompileAllWorkflows(opts.ctx, opts.workflowDir, "", opts.verbose); recompileErr != nil {
+			if recompileErr := recompileAllWorkflows(opts.ctx, opts.workflowDir, opts.engineOverride, opts.verbose, opts.approve); recompileErr != nil {
 				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to recompile after container pin update: %v", recompileErr)))
 			}
 		}
@@ -399,11 +423,11 @@ func runUpgradeCommand(opts upgradeOptions) error {
 // updateCopilotArtifacts updates the dispatcher skill and related Copilot setup artifacts.
 func updateCopilotArtifacts(ctx context.Context, verbose bool) error {
 	// Update dispatcher skill
-	if err := ensureAgenticWorkflowsDispatcher(verbose, false); err != nil {
+	if err := ensureAgenticWorkflowsDispatcher(verbose, false, true); err != nil {
 		upgradeLog.Printf("Failed to update dispatcher skill: %v", err)
 		return fmt.Errorf("failed to update dispatcher skill: %w", err)
 	}
-	if err := ensureAgenticWorkflowsAgent(verbose); err != nil {
+	if err := ensureAgenticWorkflowsAgent(verbose, true); err != nil {
 		upgradeLog.Printf("Failed to update Agentic Workflows custom agent: %v", err)
 		return fmt.Errorf("failed to update Agentic Workflows custom agent: %w", err)
 	}
@@ -434,6 +458,13 @@ func updateCopilotArtifacts(ctx context.Context, verbose bool) error {
 // path because os.Executable() returns a "(deleted)"-suffixed path after the binary
 // has been renamed out of the way during the upgrade.
 func relaunchWithSameArgs(extraFlag string, exeOverride string) error {
+	allowedExtraFlags := map[string]struct{}{
+		"--skip-extension-upgrade": {},
+	}
+	if _, ok := allowedExtraFlags[extraFlag]; !ok {
+		return fmt.Errorf("invalid relaunch flag %q: expected --skip-extension-upgrade", extraFlag)
+	}
+
 	var exe string
 	if exeOverride != "" {
 		exe = exeOverride
@@ -455,8 +486,24 @@ func relaunchWithSameArgs(extraFlag string, exeOverride string) error {
 	// Explicitly copy os.Args[1:] so appending the extra flag does not modify
 	// the original slice backing array.
 	newArgs := append(append([]string(nil), os.Args[1:]...), extraFlag)
+	if slices.ContainsFunc(newArgs, containsControlCharacters) {
+		return errors.New("invalid relaunch arguments: argument contains invalid control characters. Example: compile .github/workflows/example.md")
+	}
 	upgradeLog.Printf("Re-launching with new binary: %s %v", exe, newArgs)
 
+	// Validate the executable path before re-launching it (defense-in-depth).
+	// exe is always derived from os.Executable() or the pre-rename installPath which is
+	// itself obtained from os.Executable() + filepath.EvalSymlinks (all trusted OS calls).
+	originalExe := exe
+	exe, err := fileutil.ValidateExecutablePath(exe)
+	if err != nil {
+		return fmt.Errorf("invalid executable path %q: %w", originalExe, err)
+	}
+
+	// #nosec G204 -- exe is validated as an absolute path above and originates from
+	// os.Executable() or the known install path. newArgs forwards os.Args[1:] (user-controlled)
+	// plus a hardcoded flag; exec.Command passes arguments directly to execve(2) without
+	// invoking a shell, so shell-injection (CWE-78) is not possible regardless of argv content.
 	cmd := exec.Command(exe, newArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

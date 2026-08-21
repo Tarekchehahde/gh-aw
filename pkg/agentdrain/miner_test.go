@@ -13,6 +13,7 @@ import (
 )
 
 func TestNewMiner(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultConfig()
 	m, err := NewMiner(cfg)
 	require.NoError(t, err, "NewMiner should not return an error")
@@ -20,6 +21,7 @@ func TestNewMiner(t *testing.T) {
 }
 
 func TestTrain(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		simThreshold    float64
@@ -63,6 +65,7 @@ func TestTrain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := DefaultConfig()
 			cfg.SimThreshold = tt.simThreshold
 			m, err := NewMiner(cfg)
@@ -85,6 +88,7 @@ func TestTrain(t *testing.T) {
 }
 
 func TestTrainEvent(t *testing.T) {
+	t.Parallel()
 	m, err := NewMiner(DefaultConfig())
 	require.NoError(t, err, "NewMiner should succeed")
 
@@ -99,6 +103,7 @@ func TestTrainEvent(t *testing.T) {
 }
 
 func TestClusters(t *testing.T) {
+	t.Parallel()
 	m, err := NewMiner(DefaultConfig())
 	require.NoError(t, err, "NewMiner should succeed")
 
@@ -113,6 +118,7 @@ func TestClusters(t *testing.T) {
 }
 
 func TestMasking(t *testing.T) {
+	t.Parallel()
 	masker, err := NewMasker(DefaultConfig().MaskRules)
 	require.NoError(t, err, "NewMasker should not return an error")
 
@@ -139,6 +145,7 @@ func TestMasking(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			out := masker.Mask(tt.input)
 			assert.Contains(t, out, tt.wantContain, "Mask(%q) should contain %q", tt.input, tt.wantContain)
 		})
@@ -146,6 +153,7 @@ func TestMasking(t *testing.T) {
 }
 
 func TestFlattenEvent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		evt              AgentEvent
@@ -203,6 +211,7 @@ func TestFlattenEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := FlattenEvent(tt.evt, tt.exclude)
 			assert.Equal(t, tt.expected, got, "FlattenEvent output mismatch for case %q", tt.name)
 			if tt.excludedField != "" {
@@ -222,6 +231,7 @@ func TestFlattenEvent(t *testing.T) {
 }
 
 func TestTokenize(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		line     string
@@ -251,6 +261,7 @@ func TestTokenize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := Tokenize(tt.line)
 			assert.Equal(t, tt.expected, got, "Tokenize(%q) should split into expected tokens", tt.line)
 		})
@@ -264,7 +275,7 @@ func TestTrainEmptyLine(t *testing.T) {
 	result, err := m.Train(" \t\n ")
 	assert.Nil(t, result, "Train should return nil result for whitespace-only input")
 	require.Error(t, err, "Train should return an error for whitespace-only input")
-	assert.Contains(t, err.Error(), "empty line after masking", "Train error should explain empty line after masking")
+	require.ErrorContains(t, err, "empty line after masking", "Train error should explain empty line after masking")
 }
 
 func TestNewMaskerInvalidPattern(t *testing.T) {
@@ -278,7 +289,7 @@ func TestNewMaskerInvalidPattern(t *testing.T) {
 
 	assert.Nil(t, masker, "NewMasker should return nil masker for invalid regex pattern")
 	require.Error(t, err, "NewMasker should fail when a regex pattern is invalid")
-	assert.Contains(t, err.Error(), `mask rule "invalid"`, "NewMasker error should identify the failing rule")
+	require.ErrorContains(t, err, `mask rule "invalid"`, "NewMasker error should identify the failing rule")
 }
 
 func TestConcurrency(t *testing.T) {
@@ -305,6 +316,7 @@ func TestConcurrency(t *testing.T) {
 }
 
 func TestStageRouting(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultConfig()
 	stages := []string{"plan", "tool_call", "finish"}
 	coord, err := NewCoordinator(cfg, stages)
@@ -325,6 +337,7 @@ func TestStageRouting(t *testing.T) {
 }
 
 func TestCoordinatorAnalyzeEvent(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultConfig()
 	stages := []string{"plan", "tool_call"}
 	coord, err := NewCoordinator(cfg, stages)
@@ -351,6 +364,7 @@ func TestCoordinatorAnalyzeEvent(t *testing.T) {
 }
 
 func TestStageSequence(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		events   []AgentEvent
@@ -382,6 +396,7 @@ func TestStageSequence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := StageSequence(tt.events)
 			assert.Equal(t, tt.expected, got, "StageSequence result mismatch")
 		})
@@ -389,6 +404,7 @@ func TestStageSequence(t *testing.T) {
 }
 
 func TestPersistenceRoundTrip(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultConfig()
 	stages := []string{"plan", "tool_call", "finish"}
 	coord, err := NewCoordinator(cfg, stages)
@@ -427,6 +443,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 }
 
 func TestComputeSimilarity(t *testing.T) {
+	t.Parallel()
 	param := "<*>"
 	tests := []struct {
 		name     string
@@ -467,6 +484,7 @@ func TestComputeSimilarity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := computeSimilarity(tt.a, tt.b, param)
 			assert.InDelta(t, tt.expected, got, 1e-9, "computeSimilarity(%v, %v) mismatch", tt.a, tt.b)
 		})
@@ -474,6 +492,7 @@ func TestComputeSimilarity(t *testing.T) {
 }
 
 func TestMergeTemplate(t *testing.T) {
+	t.Parallel()
 	param := "<*>"
 	tests := []struct {
 		name     string
@@ -508,6 +527,7 @@ func TestMergeTemplate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := mergeTemplate(tt.existing, tt.incoming, param)
 			assert.Equal(t, tt.expected, got, "mergeTemplate(%v, %v) mismatch", tt.existing, tt.incoming)
 		})

@@ -6,6 +6,17 @@ on:
   pull_request:
     types: [labeled, ready_for_review]
     names: ["implementation"]
+    paths:
+      - 'actions/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'pkg/**'
+      - 'docs/adr/**'
+      - '.design-gate.yml'
+      - 'eslint-factory/**'
+      - 'scripts/**'
+      - 'tools.go'
+      - '.github/workflows/**'
   slash_command:
     strategy: centralized
     name: review
@@ -19,10 +30,10 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-max-turns: 20
+max-turns: 30
+model: claude-sonnet-4-6
 engine:
   id: claude
-  model: claude-sonnet-4-6
 safe-outputs:
   add-comment:
     max: 2
@@ -40,12 +51,13 @@ safe-outputs:
     run-success: "✅ [{workflow_name}]({run_url}) completed the design decision gate check."
     run-failure: "❌ [{workflow_name}]({run_url}) {status} during design decision gate check."
 timeout-minutes: 15
+features:
+  gh-aw-detection: true
 sandbox:
-  agent:
-    sudo: false
   mcp:
     keepalive-interval: 60
 imports:
+  - shared/mcp-pagination.md
   - ../agents/adr-writer.agent.md
   - shared/reporting.md
   - shared/otlp.md
@@ -78,8 +90,29 @@ steps:
       set -euo pipefail
 
       if [ "$EXPR_GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ -z "${PR_NUMBER:-}" ]; then
-        echo "::error::workflow_dispatch requires inputs.pr_number"
-        exit 1
+        echo "::notice::workflow_dispatch did not include inputs.pr_number; skipping ADR gate."
+        mkdir -p /tmp/gh-aw/agent
+        printf '{"number":null,"title":"No pull request provided","body":"","labels":[],"baseRefName":"","headRefName":"","author":null,"url":""}\n' \
+          > /tmp/gh-aw/agent/pr.json
+        printf '[]\n' > /tmp/gh-aw/agent/pr-files.json
+        printf '# ADR gate skipped: workflow_dispatch did not include inputs.pr_number.\n' \
+          > /tmp/gh-aw/agent/pr.diff
+        printf 'No .design-gate.yml read because workflow_dispatch did not include inputs.pr_number.\n' \
+          > /tmp/gh-aw/agent/design-gate-config.yml
+        jq -n \
+          --arg skip_reason "workflow_dispatch did not include inputs.pr_number" \
+          '{
+            pr_number: null,
+            threshold: 100,
+            has_custom_config: false,
+            has_implementation_label: false,
+            default_business_additions: 0,
+            requires_adr_by_default_volume: false,
+            file_count: 0,
+            diff_available: false,
+            skip_reason: $skip_reason
+          }' > /tmp/gh-aw/agent/adr-prefetch-summary.json
+        exit 0
       fi
 
       mkdir -p /tmp/gh-aw/agent
@@ -133,7 +166,13 @@ steps:
           file_count: $file_count,
           diff_available: $diff_available
         }' > /tmp/gh-aw/agent/adr-prefetch-summary.json
-
+evals:
+  - id: adr-check-performed
+    question: Does the agent output confirm that it checked for existing ADRs before deciding on an action?
+  - id: action-taken
+    question: Did the agent add a PR comment, push a draft ADR, or call noop?
+  - id: decision-justified
+    question: Does the agent output explain why an ADR is required or why no ADR gate was triggered for this PR?
 ---
 
 # Design Decision Gate 🏗️
@@ -166,6 +205,7 @@ Stop at the first step where you have sufficient information to emit a safe outp
 
 Stop and emit a safe output **immediately** when any of the following is true:
 
+- **Skipped prefetch**: `adr-prefetch-summary.json` contains `skip_reason` → call `noop` with that reason and **stop**.
 - **Noop exit**: `has_implementation_label` is `false` AND `requires_adr_by_default_volume` is `false` → call `noop` and **stop**.
 - **ADR found, no divergence**: ADR contains all four required sections and the diff does not contradict the decision → call `add-comment` (approved) and **stop**.
 - **ADR found, divergence**: Divergences identified → call `add-comment` (divergence list) and **stop**.
@@ -187,8 +227,9 @@ Stop and emit a safe output **immediately** when any of the following is true:
    - Missing `pr.diff` → `mcp__github__get_pull_request_diff` (only if `diff_available` is `true` in the summary; if `false`, the diff exceeds the 300-file API limit — use `pr-files.json` instead and do **not** call the diff API)
    - Missing `adr-prefetch-summary.json` → compute manually from PR files and labels
 3. Do **not** perform broad exploration. Only fetch extra data if a required field is missing from pre-fetched files.
-4. Call exactly one final safe output action (`add-comment`, `push-to-pull-request-branch`, or `noop`) and then stop.
-5. If you have enough evidence to decide, stop immediately. Do not gather optional data.
+4. Do not use the `Agent` or `Task` tools, delegate work, run `git push`, or investigate safe-output tool availability or permissions. The required safe-output tools are available directly.
+5. Call only the minimum final safe outputs, then stop: use `noop` or `add-comment` for every non-draft outcome; when a draft ADR is generated, call `push-to-pull-request-branch` and then `add-comment`.
+6. If you have enough evidence to decide, stop immediately. Do not gather optional data.
 
 ## Gate Quality Bar
 
@@ -324,7 +365,55 @@ mkdir -p ${{ github.workspace }}/docs/adr
 
 ### Post a Blocking Comment
 
-Post a comment using `add-comment` explaining the requirement:
+Read the `adr-report-templates` skill and post a comment using `add-comment` with the **ADR Required** template.
+
+### Report Formatting
+
+- Use h3 (###) or lower for all headers in your report to maintain proper document hierarchy.
+- Apply **progressive disclosure**: keep the immediately visible text as brief as possible; wrap all verbose sections (next steps, background, reference material) in `<details><summary>…</summary>` tags.
+- Required structure for blocking comments: headline + one-line status (always visible) → "What to do next" (in `<details>`) → "Why ADRs Matter" (in `<details>`) → ADR format reference (in `<details>`) → blocking notice (always visible)
+
+## Step 4b: If ADR Found — Verify Implementation Matches
+
+If an ADR **is** found (either in the PR body, on the PR branch, or in a linked issue), verify that the implementation aligns with the stated decision.
+
+### Read the ADR
+
+Load and parse the ADR content. Extract:
+- The **Decision** section (what was decided)
+- The **Context** section (constraints and forces)
+- The **Consequences** section (expected outcomes)
+
+### Analyze Alignment
+
+Compare the ADR's stated decision against the actual code changes in the PR diff. Look for:
+
+1. **Divergences** — Code that contradicts the stated decision (e.g., ADR says "use PostgreSQL" but code connects to MongoDB)
+2. **Missing implementation** — Key aspects of the decision not reflected in the code
+3. **Scope creep** — Significant architectural changes not covered by the ADR
+4. **Full alignment** — Code faithfully implements the stated decision
+
+### Report Findings
+
+Read the `adr-report-templates` skill and post a comment using `add-comment` with the template matching the outcome:
+
+- **If the implementation MATCHES the ADR**: use the **ADR Verified** template.
+- **If there are DIVERGENCES**: use the **Implementation Diverges** template.
+
+## Important: Always Call a Safe Output
+
+**You MUST always call at least one safe output tool.** If none of the above steps result in an action, call `noop` with an explanation:
+
+```json
+{"noop": {"message": "No action needed: [brief explanation of what was found and why no action was required]"}}
+```
+
+## skill: `adr-report-templates`
+---
+description: PR comment templates for the Design Decision Gate (ADR Required, ADR Verified, and Implementation Diverges).
+---
+
+**ADR Required** template (no ADR found — blocking comment):
 
 ```markdown
 ### 🏗️ Design Decision Gate — ADR Required
@@ -372,37 +461,8 @@ All ADRs are stored in `docs/adr/` as Markdown files numbered by PR number (e.g.
 </details>
 ```
 
-### Report Formatting
+**ADR Verified** template (implementation matches the ADR):
 
-- Use h3 (###) or lower for all headers in your report to maintain proper document hierarchy.
-- Apply **progressive disclosure**: keep the immediately visible text as brief as possible; wrap all verbose sections (next steps, background, reference material) in `<details><summary>…</summary>` tags.
-- Required structure for blocking comments: headline + one-line status (always visible) → "What to do next" (in `<details>`) → "Why ADRs Matter" (in `<details>`) → ADR format reference (in `<details>`) → blocking notice (always visible)
-
-## Step 4b: If ADR Found — Verify Implementation Matches
-
-If an ADR **is** found (either in the PR body, on the PR branch, or in a linked issue), verify that the implementation aligns with the stated decision.
-
-### Read the ADR
-
-Load and parse the ADR content. Extract:
-- The **Decision** section (what was decided)
-- The **Context** section (constraints and forces)
-- The **Consequences** section (expected outcomes)
-
-### Analyze Alignment
-
-Compare the ADR's stated decision against the actual code changes in the PR diff. Look for:
-
-1. **Divergences** — Code that contradicts the stated decision (e.g., ADR says "use PostgreSQL" but code connects to MongoDB)
-2. **Missing implementation** — Key aspects of the decision not reflected in the code
-3. **Scope creep** — Significant architectural changes not covered by the ADR
-4. **Full alignment** — Code faithfully implements the stated decision
-
-### Report Findings
-
-**If the implementation MATCHES the ADR**:
-
-Post an approving comment:
 ```markdown
 ### ✅ Design Decision Gate — ADR Verified
 
@@ -416,9 +476,8 @@ Post an approving comment:
 </details>
 ```
 
-**If there are DIVERGENCES**:
+**Implementation Diverges** template (implementation contradicts the ADR):
 
-Post a comment describing the discrepancies:
 ```markdown
 ### ⚠️ Design Decision Gate — Implementation Diverges from ADR
 
@@ -443,12 +502,4 @@ Either:
 The ADR and implementation must be in sync before this PR can merge.
 
 </details>
-```
-
-## Important: Always Call a Safe Output
-
-**You MUST always call at least one safe output tool.** If none of the above steps result in an action, call `noop` with an explanation:
-
-```json
-{"noop": {"message": "No action needed: [brief explanation of what was found and why no action was required]"}}
 ```

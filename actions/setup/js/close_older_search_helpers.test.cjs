@@ -1,7 +1,7 @@
 // @ts-check
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { buildMarkerSearchQuery, filterByMarker, logFilterSummary } from "./close_older_search_helpers.cjs";
+import { buildMarkerSearchQuery, searchOlderEntitiesByMarker, filterByMarker, logFilterSummary } from "./close_older_search_helpers.cjs";
 
 // Mock globals
 global.core = {
@@ -126,6 +126,28 @@ describe("close_older_search_helpers", () => {
       expect(filtered).toHaveLength(1);
       expect(filtered[0].number).toBe(2);
       expect(counters.excludedCount).toBe(1);
+    });
+
+    it("should exclude items in additionalExcludeNumbers (same-run issues)", () => {
+      const items = [
+        { number: 1, body: "<!-- gh-aw-workflow-id: test -->", title: "Item 1" },
+        { number: 2, body: "<!-- gh-aw-workflow-id: test -->", title: "Item 2" },
+        { number: 3, body: "<!-- gh-aw-workflow-id: test -->", title: "Item 3 (old)" },
+      ];
+
+      const { filtered, counters } = filterByMarker({
+        items,
+        excludeNumber: 2,
+        additionalExcludeNumbers: new Set([1]),
+        exactMarker: "<!-- gh-aw-workflow-id: test -->",
+        entityType: "issue",
+      });
+
+      // Items 1 and 2 are excluded (both created in the current run);
+      // only item 3 (created in an earlier run) should be returned.
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].number).toBe(3);
+      expect(counters.excludedCount).toBe(2);
     });
 
     it("should exclude items without exact marker in body", () => {
@@ -375,6 +397,78 @@ describe("close_older_search_helpers", () => {
       expect(issueResult.counters.filteredCount).toBe(discResult.counters.filteredCount);
       expect(issueResult.counters.excludedCount).toBe(discResult.counters.excludedCount);
       expect(issueResult.counters.markerMismatchCount).toBe(discResult.counters.markerMismatchCount);
+    });
+  });
+
+  describe("searchOlderEntitiesByMarker", () => {
+    it("should return empty array when neither workflowId nor closeOlderKey is provided", async () => {
+      const executeSearch = vi.fn();
+
+      const result = await searchOlderEntitiesByMarker({
+        owner: "owner",
+        repo: "repo",
+        workflowId: "",
+        excludeNumber: 10,
+        entityType: "issue",
+        executeSearch,
+        getItems: () => [],
+        mapItem: item => item,
+      });
+
+      expect(result).toEqual([]);
+      expect(executeSearch).not.toHaveBeenCalled();
+    });
+
+    it("should search, filter, map, and log summary with shared pipeline", async () => {
+      const executeSearch = vi.fn().mockResolvedValue({
+        data: {
+          items: [
+            { number: 1, title: "Old issue", body: "<!-- gh-aw-workflow-id: test -->", labels: [{ name: "bug" }] },
+            { number: 2, title: "New issue", body: "<!-- gh-aw-workflow-id: test -->", labels: [] },
+            { number: 3, title: "PR", body: "<!-- gh-aw-workflow-id: test -->", pull_request: {} },
+          ],
+        },
+      });
+
+      const result = await searchOlderEntitiesByMarker({
+        owner: "owner",
+        repo: "repo",
+        workflowId: "test",
+        excludeNumber: 2,
+        entityType: "issue",
+        entityQualifier: "is:issue",
+        executeSearch,
+        getItems: response => response?.data?.items,
+        mapItem: item => ({ number: item.number, title: item.title }),
+        additionalFilter: (item, extra) => {
+          if (item.pull_request) {
+            extra.pullRequestCount = (extra.pullRequestCount || 0) + 1;
+            return false;
+          }
+          return true;
+        },
+        extraLabels: [["pullRequestCount", "Excluded pull requests"]],
+      });
+
+      expect(result).toEqual([{ number: 1, title: "Old issue" }]);
+      expect(executeSearch).toHaveBeenCalledWith('repo:owner/repo is:issue is:open "gh-aw-workflow-id: test" in:body');
+      expect(global.core.info).toHaveBeenCalledWith("  - Excluded pull requests: 1");
+    });
+
+    it("should return empty array when the API result shape does not include items", async () => {
+      const result = await searchOlderEntitiesByMarker({
+        owner: "owner",
+        repo: "repo",
+        workflowId: "test",
+        excludeNumber: 10,
+        entityType: "discussion",
+        executeSearch: () => Promise.resolve({ search: {} }),
+        getItems: response => response?.search?.nodes,
+        mapItem: item => item,
+      });
+
+      expect(result).toEqual([]);
+      expect(global.core.info).toHaveBeenCalledWith("No results returned from search API");
     });
   });
 });

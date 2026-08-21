@@ -3,6 +3,10 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,6 +14,7 @@ import (
 )
 
 func TestAddInteractiveConfig_determineFilesToAdd(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		workflowSpecs []string
@@ -82,6 +87,7 @@ func TestAddInteractiveConfig_determineFilesToAdd(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			config := &AddInteractiveConfig{
 				WorkflowSpecs:     tt.workflowSpecs,
 				resolvedWorkflows: tt.resolved,
@@ -101,7 +107,9 @@ func TestAddInteractiveConfig_determineFilesToAdd(t *testing.T) {
 }
 
 func TestAddInteractiveConfig_primaryWorkflowName(t *testing.T) {
+	t.Parallel()
 	t.Run("uses resolved workflow for repository package", func(t *testing.T) {
+		t.Parallel()
 		config := &AddInteractiveConfig{
 			WorkflowSpecs: []string{"owner/repo"},
 			resolvedWorkflows: &ResolvedWorkflows{
@@ -117,6 +125,7 @@ func TestAddInteractiveConfig_primaryWorkflowName(t *testing.T) {
 	})
 
 	t.Run("falls back to parsed workflow spec", func(t *testing.T) {
+		t.Parallel()
 		config := &AddInteractiveConfig{
 			WorkflowSpecs: []string{"owner/repo/test-workflow"},
 		}
@@ -126,6 +135,7 @@ func TestAddInteractiveConfig_primaryWorkflowName(t *testing.T) {
 }
 
 func TestAddInteractiveConfig_showWorkflowDescriptions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		resolvedWorkflows *ResolvedWorkflows
@@ -169,6 +179,7 @@ func TestAddInteractiveConfig_showWorkflowDescriptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			config := &AddInteractiveConfig{
 				resolvedWorkflows: tt.resolvedWorkflows,
 			}
@@ -182,6 +193,7 @@ func TestAddInteractiveConfig_showWorkflowDescriptions(t *testing.T) {
 }
 
 func TestAddInteractiveConfig_showFinalInstructions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		resolvedWorkflows *ResolvedWorkflows
@@ -207,6 +219,7 @@ func TestAddInteractiveConfig_showFinalInstructions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			config := &AddInteractiveConfig{
 				resolvedWorkflows: tt.resolvedWorkflows,
 			}
@@ -216,5 +229,135 @@ func TestAddInteractiveConfig_showFinalInstructions(t *testing.T) {
 				config.showFinalInstructions()
 			}, "showFinalInstructions should not panic")
 		})
+	}
+}
+
+func TestAddInteractiveConfig_createWorkflowChangesLocallyDoesNotRequireCleanTreeOrCreatePR(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmpDir))
+	defer func() {
+		require.NoError(t, os.Chdir(oldWd))
+	}()
+
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	require.NoError(t, gitInit.Run())
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "existing-change.txt"), []byte("dirty tree"), 0o644))
+
+	fakeGH := filepath.Join(tmpDir, "gh")
+	require.NoError(t, os.WriteFile(fakeGH, []byte("#!/bin/sh\necho unexpected gh invocation >&2\nexit 42\n"), 0o755))
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	config := &AddInteractiveConfig{
+		WorkflowSpecs: []string{"owner/repo/test-workflow"},
+		resolvedWorkflows: &ResolvedWorkflows{
+			Workflows: []*ResolvedWorkflow{
+				{
+					Spec: &WorkflowSpec{
+						RepoSpec: RepoSpec{
+							RepoSlug: "owner/repo",
+						},
+						WorkflowName: "test-workflow",
+						WorkflowPath: "test.md",
+					},
+					Content: []byte("---\non:\n  workflow_dispatch:\n---\n# Test workflow\n"),
+				},
+			},
+			HasWorkflowDispatch: true,
+		},
+	}
+
+	err = config.createWorkflowChangesAndConfigureSecret(context.Background(), []string{"test-workflow.md", "test-workflow.lock.yml"}, nil, "COPILOT_GITHUB_TOKEN", "secret", false)
+	require.NoError(t, err)
+
+	require.NotNil(t, config.addResult)
+	assert.Zero(t, config.addResult.PRNumber)
+	assert.Empty(t, config.addResult.PRURL)
+	assert.True(t, config.addResult.HasWorkflowDispatch)
+
+	workflowPath := filepath.Join(tmpDir, ".github", "workflows", "test-workflow.md")
+	_, err = os.Stat(workflowPath)
+	require.NoError(t, err, "workflow should be written locally")
+}
+
+// TestAddInteractiveConfig_prepareAndConfirmAddInteractive_localWriteSkipsSecretsAndPRSteps
+// drives the actual orchestration in prepareAndConfirmAddInteractive (not just the
+// downstream write helper) with a simulated "No, write files locally" answer to the
+// PR-vs-local prompt. It asserts that choosing local writes never invokes any gh
+// mutation (secret upload, PR creation/merge) and that no secret is returned for the
+// caller to configure.
+func TestAddInteractiveConfig_prepareAndConfirmAddInteractive_localWriteSkipsSecretsAndPRSteps(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmpDir))
+	defer func() {
+		require.NoError(t, os.Chdir(oldWd))
+	}()
+
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	require.NoError(t, gitInit.Run())
+
+	// A fake gh that records every invocation instead of touching the network. Reads
+	// (e.g. listing existing secrets) are expected and tolerated by the caller, but any
+	// mutating invocation (secret set, pr create/merge) must never happen on the local
+	// write path.
+	ghLog := filepath.Join(tmpDir, "gh-invocations.log")
+	fakeGH := filepath.Join(tmpDir, "gh")
+	script := "#!/bin/sh\necho \"$@\" >> " + ghLog + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(fakeGH, []byte(script), 0o755))
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Drive the huh confirm form via accessible (line-based) mode, answering "no" to
+	// "Do you want to create a pull request with these changes?".
+	t.Setenv("ACCESSIBLE", "1")
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	_, err = w.WriteString("n\n")
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+
+	config := &AddInteractiveConfig{
+		Ctx:            context.Background(),
+		WorkflowSpecs:  []string{"owner/repo/test-workflow"},
+		EngineOverride: "copilot",
+		SkipSecret:     true,
+		hasWriteAccess: true,
+		RepoOverride:   "owner/repo",
+		resolvedWorkflows: &ResolvedWorkflows{
+			Workflows: []*ResolvedWorkflow{
+				{
+					Spec: &WorkflowSpec{
+						RepoSpec:     RepoSpec{RepoSlug: "owner/repo"},
+						WorkflowName: "test-workflow",
+						WorkflowPath: "test.md",
+					},
+					Content: []byte("---\non:\n  workflow_dispatch:\n---\n# Test workflow\n"),
+				},
+			},
+			HasWorkflowDispatch: true,
+		},
+	}
+
+	workflowFiles, _, secretName, secretValue, createPR, err := config.prepareAndConfirmAddInteractive()
+	require.NoError(t, err)
+
+	assert.False(t, createPR, "choosing local writes should report createPR=false")
+	assert.Empty(t, secretName, "local writes must not resolve a secret to configure")
+	assert.Empty(t, secretValue, "local writes must not resolve a secret value")
+	assert.NotEmpty(t, workflowFiles, "workflow files should still be determined for local writes")
+
+	if _, statErr := os.Stat(ghLog); statErr == nil {
+		logContent, readErr := os.ReadFile(ghLog)
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(logContent), "secret set", "local write path must never upload a repository secret")
+		assert.NotContains(t, string(logContent), "pr create", "local write path must never create a pull request")
+		assert.NotContains(t, string(logContent), "pr merge", "local write path must never merge a pull request")
 	}
 }

@@ -10,9 +10,6 @@ permissions:
   pull-requests: read
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: codex
 strict: true
@@ -22,6 +19,7 @@ network:
     - github
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   bash: ["*"]
@@ -39,7 +37,9 @@ timeout-minutes: 30
 checkout:
   - fetch-depth: 1
     current: true
-
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Schema Feature Coverage Checker

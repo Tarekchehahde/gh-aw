@@ -72,8 +72,6 @@ describe("no-github-request-interpolated-route", () => {
       valid: [
         // `this.github` is not resolved — `this` is not an Identifier
         "this.github.request(`GET /repos/${owner}/${repo}`, { owner, repo });",
-        // Variable indirection for the route argument is not resolved
-        "const route = `GET /repos/${owner}/${repo}`; github.request(route, { owner, repo });",
         `github.request("GET /repos/".concat(owner, "/", repo), { owner, repo });`,
         `github.request("GET /repos" + "/{owner}/{repo}", { owner, repo });`,
       ],
@@ -169,6 +167,32 @@ describe("no-github-request-interpolated-route", () => {
     });
   });
 
+  it("invalid: opaque whole-route helpers are flagged with tailored guidance", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [],
+      invalid: [
+        {
+          code: "function addReaction(endpoint) { github.request(`POST ${endpoint}`, { content: '+1' }); }",
+          errors: [
+            {
+              messageId: "opaqueWholeRoute",
+              data: { kind: "template literal with interpolations", client: "github" },
+            },
+          ],
+        },
+        {
+          code: 'function addComment(endpoint) { github.request("POST " + endpoint, { body }); }',
+          errors: [
+            {
+              messageId: "opaqueWholeRoute",
+              data: { kind: "string concatenation expression", client: "github" },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it("valid: simple aliases bound to non-Octokit sources are not flagged", () => {
     cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
       valid: [
@@ -177,6 +201,7 @@ describe("no-github-request-interpolated-route", () => {
         // Alias of http module — must not be flagged
         "const client = http; client.request(`GET /repos/${owner}/${repo}`);",
         // Unknown .getOctokit() owner must not be treated as toolkit Octokit source
+        "const client = unknown.getOctokit(token); client.request(`GET /repos/${owner}/${repo}`);",
         "const helperClient = myHelper.getOctokit(token); helperClient.request(`GET /repos/${owner}/${repo}`);",
       ],
       invalid: [],
@@ -266,6 +291,24 @@ describe("no-github-request-interpolated-route", () => {
             },
           ],
         },
+        {
+          code: "const client = global.getOctokit(token); client.request(`GET /repos/${owner}/${repo}`, { });",
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "template literal with interpolations", client: "client" },
+            },
+          ],
+        },
+        {
+          code: "const client = globalState.getOctokit(token); client.request(`GET /repos/${owner}/${repo}`, { });",
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "template literal with interpolations", client: "client" },
+            },
+          ],
+        },
       ],
     });
   });
@@ -294,6 +337,83 @@ describe("no-github-request-interpolated-route", () => {
             {
               messageId: "interpolatedRoute",
               data: { kind: "template literal with interpolations", client: "gh" },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: identifier-bound interpolated route is resolved and flagged", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [],
+      invalid: [
+        {
+          code: "function f(owner, repo) { const route = `GET /repos/${owner}/${repo}`; github.request(route, {}); }",
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "template literal with interpolations", client: "github" },
+            },
+          ],
+        },
+        {
+          code: `function f(owner, repo) { const route = "GET /repos/" + owner + "/" + repo; github.request(route, {}); }`,
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "string concatenation expression", client: "github" },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: identifier-bound fully-static ternary route is not flagged", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [
+        // Fully static ternary — both branches are literals, so this is a true negative
+        `function f(cond) { const route = cond ? "GET /a" : "GET /b"; github.request(route, {}); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: reassigned identifier is not resolved (write-once semantics)", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [
+        // let binding reassigned after declaration — write-once chain does not apply
+        "function f(owner, repo, suffix) { let route = `GET /repos/${owner}/${repo}`; route = suffix; github.request(route, {}); }",
+      ],
+      invalid: [],
+    });
+  });
+
+  it("destructured route bindings resolve to the destructured value", () => {
+    cjsRuleTester.run("no-github-request-interpolated-route", noGithubRequestInterpolatedRouteRule, {
+      valid: [
+        // Statically destructured route — no interpolation, must not be flagged
+        `function f() { const [route] = ["GET /repos/{owner}/{repo}"]; github.request(route, {}); }`,
+        // Destructured from a non-literal right-hand side — unresolvable, must not be flagged
+        "function f(routes) { const [route] = routes; github.request(route, {}); }",
+      ],
+      invalid: [
+        {
+          code: "function f(owner, repo) { const [route] = [`GET /repos/${owner}/${repo}`]; github.request(route, {}); }",
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "template literal with interpolations", client: "github" },
+            },
+          ],
+        },
+        {
+          code: "function f(owner, repo) { const { route } = { route: `GET /repos/${owner}/${repo}` }; github.request(route, {}); }",
+          errors: [
+            {
+              messageId: "interpolatedRoute",
+              data: { kind: "template literal with interpolations", client: "github" },
             },
           ],
         },

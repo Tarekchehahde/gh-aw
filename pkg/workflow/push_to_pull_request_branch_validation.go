@@ -7,9 +7,10 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/console"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
-var pushToPullRequestBranchValidationLog = newValidationLogger("push_to_pull_request_branch_validation")
+var pushToPullRequestBranchValidationLog = logger.New("workflow:push_to_pull_request_branch_validation")
 
 var fetchRepositoryVisibility = getRepositoryVisibilityForSlug
 
@@ -125,7 +126,7 @@ func (c *Compiler) validatePushToPullRequestBranchWarnings(safeOutputs *SafeOutp
 				"    fetch: [\"*\"]      # fetch all remote branches",
 				"    fetch-depth: 0   # fetch full history",
 			}, "\n")
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(msg))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(msg))
 			c.IncrementWarningCount()
 		}
 	}
@@ -143,7 +144,7 @@ func (c *Compiler) validatePushToPullRequestBranchWarnings(safeOutputs *SafeOutp
 			"    required-title-prefix: \"[bot] \"  # only PRs whose title starts with this prefix",
 			"    required-labels: [automated]      # only PRs that carry all of these labels",
 		}, "\n")
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(msg))
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(msg))
 		c.IncrementWarningCount()
 	}
 }

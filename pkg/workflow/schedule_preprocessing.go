@@ -22,7 +22,7 @@ func (c *Compiler) normalizeScheduleString(scheduleStr string, itemIndex int) (p
 		// Return error for array items, but return nil error for top-level parsing
 		// (caller will handle differently based on context)
 		if itemIndex >= 0 {
-			return "", "", fmt.Errorf("invalid schedule expression in item %d: %w", itemIndex, err)
+			return "", "", fmt.Errorf("schedule expression in item %d is not recognized (expected a cron string or friendly format like 'daily at 09:00'): %w", itemIndex, err)
 		}
 		return "", "", err
 	}
@@ -85,15 +85,15 @@ func (c *Compiler) normalizeScheduleString(scheduleStr string, itemIndex int) (p
 	// R-SAFE-003: missing workflow identifier causes fuzzy schedule to remain unscattered; fail with a descriptive error.
 	if parser.IsFuzzyCron(parsedCron) {
 		if itemIndex >= 0 {
-			return "", "", fmt.Errorf("fuzzy cron expression '%s' in item %d must be scattered to proper cron format before compilation (missing workflow identifier: ensure the workflow identifier is set)", parsedCron, itemIndex)
+			return "", "", fmt.Errorf("fuzzy cron expression '%s' in item %d requires a workflow identifier to be scattered into a proper cron format. Set the workflow identifier before compilation", parsedCron, itemIndex)
 		}
-		return "", "", fmt.Errorf("fuzzy cron expression '%s' must be scattered to proper cron format before compilation (missing workflow identifier: ensure the workflow identifier is set)", parsedCron)
+		return "", "", fmt.Errorf("fuzzy cron expression '%s' requires a workflow identifier to be scattered into a proper cron format. Set the workflow identifier before compilation", parsedCron)
 	}
 	if !parser.IsCronExpression(parsedCron) {
 		if itemIndex >= 0 {
-			return "", "", fmt.Errorf("invalid cron expression '%s' in item %d: must have exactly 5 fields (minute hour day-of-month month day-of-week)", parsedCron, itemIndex)
+			return "", "", fmt.Errorf("cron expression '%s' in item %d is malformed. Expected exactly 5 fields (minute hour day-of-month month day-of-week), for example: '0 9 * * 1'", parsedCron, itemIndex)
 		}
-		return "", "", fmt.Errorf("invalid cron expression '%s': must have exactly 5 fields (minute hour day-of-month month day-of-week)", parsedCron)
+		return "", "", fmt.Errorf("cron expression '%s' is malformed. Expected exactly 5 fields (minute hour day-of-month month day-of-week), for example: '0 9 * * 1'", parsedCron)
 	}
 
 	return parsedCron, original, nil
@@ -190,8 +190,7 @@ func (c *Compiler) preprocessScheduleFields(frontmatter map[string]any, markdown
 		if err != nil {
 			// Check if this is an explicit rejection of unsupported syntax
 			// vs. just not being a valid schedule at all
-			//nolint:errstringmatch // gronx currently exposes unsupported cron syntax only as plain error text.
-			if strings.Contains(err.Error(), "syntax is not supported") {
+			if errors.Is(err, parser.ErrUnsupportedSyntax) {
 				// This is an explicit rejection - return the error
 				return err
 			}
@@ -247,7 +246,7 @@ func (c *Compiler) preprocessScheduleFields(frontmatter map[string]any, markdown
 		// Convert string to array format with single item
 		parsedCron, original, err := c.normalizeScheduleString(scheduleStr, -1)
 		if err != nil {
-			return fmt.Errorf("invalid schedule expression: %w", err)
+			return fmt.Errorf("schedule expression is not recognized (expected a cron string or friendly format like 'daily at 09:00'): %w", err)
 		}
 
 		// Create array format
@@ -278,7 +277,7 @@ func (c *Compiler) preprocessScheduleFields(frontmatter map[string]any, markdown
 	// Schedule should be an array of schedule items
 	scheduleArray, ok := scheduleValue.([]any)
 	if !ok {
-		return errors.New("schedule field must be a string or an array")
+		return errors.New("schedule field expects a string or an array of objects. Example:\non:\n  schedule:\n    - cron: \"0 9 * * 1\"")
 	}
 
 	// Initialize friendly formats map for this compilation
@@ -291,23 +290,23 @@ func (c *Compiler) preprocessScheduleFields(frontmatter map[string]any, markdown
 	for i, item := range scheduleArray {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
-			return fmt.Errorf("schedule item %d must be an object with a 'cron' field", i)
+			return fmt.Errorf("schedule item %d should be an object with a 'cron' field. Example: { cron: \"0 9 * * 1\" }", i)
 		}
 
 		cronValue, hasCron := itemMap["cron"]
 		if !hasCron {
-			return fmt.Errorf("schedule item %d missing 'cron' field", i)
+			return fmt.Errorf("schedule item %d is missing the required 'cron' field. Example: { cron: \"0 9 * * 1\" }", i)
 		}
 
 		cronStr, ok := cronValue.(string)
 		if !ok {
-			return fmt.Errorf("schedule item %d 'cron' field must be a string", i)
+			return fmt.Errorf("schedule item %d 'cron' field should be a string, got %T. Example: cron: \"0 9 * * 1\"", i, cronValue)
 		}
 
 		// Validate optional timezone field (IANA timezone string)
 		if tzValue, hasTimezone := itemMap["timezone"]; hasTimezone {
 			if _, ok := tzValue.(string); !ok {
-				return fmt.Errorf("schedule item %d 'timezone' field must be a string (IANA timezone, e.g. \"America/New_York\")", i)
+				return fmt.Errorf("schedule item %d 'timezone' field should be a string with an IANA timezone name, got %T. Example: timezone: \"America/New_York\"", i, tzValue)
 			}
 		}
 
@@ -398,7 +397,7 @@ func (c *Compiler) createTriggerParseError(filePath, content, triggerStr string,
 		}
 
 		// Format and return the error
-		formattedErr := console.FormatError(compilerErr)
+		formattedErr := console.FormatErrorStderr(compilerErr)
 		return errors.New(formattedErr)
 	}
 
@@ -468,16 +467,11 @@ func (c *Compiler) addDailyCronWarning(cronExpr string) {
 
 		// Construct the warning message
 		warningMsg := fmt.Sprintf(
-			"Schedule uses fixed daily time (%s:%s UTC). Consider using fuzzy schedule 'daily' instead to distribute workflow execution times and reduce load spikes.",
-			hour, minute,
+			"Schedule uses fixed daily time (%s UTC). Consider using fuzzy schedule 'daily' instead to distribute workflow execution times and reduce load spikes.",
+			formatCronTime(hour, minute),
 		)
 
-		// This warning is added to the warning count
-		// It will be collected and displayed by the compilation process
-		c.IncrementWarningCount()
-
-		// Store the warning for later display
-		c.addScheduleWarning(warningMsg)
+		c.emitScheduleWarning(warningMsg)
 	}
 }
 
@@ -499,11 +493,7 @@ func (c *Compiler) addHourlyCronWarning(cronExpr string) {
 			minute, interval,
 		)
 
-		// This warning is added to the warning count
-		c.IncrementWarningCount()
-
-		// Store the warning for later display
-		c.addScheduleWarning(warningMsg)
+		c.emitScheduleWarning(warningMsg)
 	}
 }
 
@@ -534,16 +524,31 @@ func (c *Compiler) addWeeklyCronWarning(cronExpr string) {
 
 		// Construct the warning message
 		warningMsg := fmt.Sprintf(
-			"Schedule uses fixed weekly time (%s %s:%s UTC). Consider using fuzzy schedule 'weekly on %s' instead to distribute workflow execution times and reduce load spikes.",
-			weekdayName, hour, minute, strings.ToLower(weekdayName),
+			"Schedule uses fixed weekly time (%s %s UTC). Consider using fuzzy schedule 'weekly on %s' instead to distribute workflow execution times and reduce load spikes.",
+			weekdayName, formatCronTime(hour, minute), strings.ToLower(weekdayName),
 		)
 
-		// This warning is added to the warning count
-		c.IncrementWarningCount()
-
-		// Store the warning for later display
-		c.addScheduleWarning(warningMsg)
+		c.emitScheduleWarning(warningMsg)
 	}
+}
+
+func formatCronTime(hour, minute string) string {
+	if len(hour) == 1 {
+		hour = "0" + hour
+	}
+	if len(minute) == 1 {
+		minute = "0" + minute
+	}
+	return hour + ":" + minute
+}
+
+func (c *Compiler) emitScheduleWarning(warning string) {
+	// This warning is added to the warning count.
+	// It will be collected and displayed by the compilation process.
+	c.IncrementWarningCount()
+
+	// Store the warning for later display.
+	c.addScheduleWarning(warning)
 }
 
 // addScheduleWarning adds a warning to the compiler's schedule warnings list

@@ -96,7 +96,7 @@ async function main(config = {}) {
       }
 
       const numericCommentId = typeof commentId === "string" ? parseInt(commentId, 10) : commentId;
-      if (isNaN(numericCommentId) || numericCommentId < 1) {
+      if (Number.isNaN(numericCommentId) || numericCommentId < 1) {
         core.warning(`Invalid comment_id: ${commentId} - must be a positive integer`);
         return {
           success: false,
@@ -183,7 +183,7 @@ async function main(config = {}) {
       // Append footer with workflow information when enabled
       if (includeFooter) {
         const footer = generateFooterWithMessages(workflowName, runUrl, workflowSource, workflowSourceURL, undefined, triggeringPRNumber, undefined, undefined, { skipDetectionCaution: true });
-        finalBody = finalBody.trimEnd() + footer;
+        finalBody = finalBody.trimEnd() + "\n\n" + footer;
       }
 
       core.info(`Replying to review comment ${numericCommentId} on PR #${targetPRNumber} (${owner}/${repo})`);

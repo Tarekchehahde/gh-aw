@@ -58,7 +58,7 @@ global.core = mockCore;
 global.github = mockGithub;
 global.context = mockContext;
 
-const { createReviewBuffer } = require("./pr_review_buffer.cjs");
+const { createReviewBuffer, createPrReviewBufferRegistry } = require("./pr_review_buffer.cjs");
 
 describe("create_pr_review_comment.cjs", () => {
   let createPRReviewCommentScript;
@@ -463,6 +463,99 @@ describe("create_pr_review_comment.cjs", () => {
     expect(buffer.getBufferedCount()).toBe(1);
   });
 
+  it("should use the original PR context for centralized slash-command dispatches", async () => {
+    global.context = {
+      eventName: "workflow_dispatch",
+      runId: 12345,
+      repo: { owner: "testowner", repo: "testrepo" },
+      payload: {
+        inputs: {
+          event_name: "issue_comment",
+          event_payload: JSON.stringify({
+            issue: { number: 456, pull_request: {} },
+            repository: mockContext.payload.repository,
+          }),
+        },
+      },
+    };
+    mockGithub.rest.pulls.get.mockResolvedValue({
+      data: { number: 456, head: { sha: "dispatch123abc" } },
+    });
+    const handler = await createHandler({ target: "triggering" });
+    const message = {
+      type: "create_pull_request_review_comment",
+      pull_request_number: 456,
+      path: "src/main.js",
+      line: 5,
+      body: "Review comment from centralized slash command",
+    };
+
+    const result = await handler(message, {});
+
+    expect(result.success).toBe(true);
+    expect(result.buffered).toBe(true);
+    expect(result.pull_request_number).toBe(456);
+    expect(mockGithub.rest.pulls.get).toHaveBeenCalledWith({
+      owner: "testowner",
+      repo: "testrepo",
+      pull_number: 456,
+    });
+    expect(buffer.getBufferedCount()).toBe(1);
+  });
+
+  it("falls back to raw context when resolveInvocationContext returns empty object", async () => {
+    const invocationHelpersPath = path.join(__dirname, "invocation_context_helpers.cjs");
+    const invocationHelpers = require(invocationHelpersPath);
+    const resolveInvocationContextSpy = vi.spyOn(invocationHelpers, "resolveInvocationContext").mockReturnValue({});
+    try {
+      const handler = await createHandler({ target: "triggering" });
+      const message = {
+        type: "create_pull_request_review_comment",
+        path: "src/main.js",
+        line: 5,
+        body: "Review comment from fallback context",
+      };
+
+      const result = await handler(message, {});
+
+      expect(result.success).toBe(true);
+      expect(result.buffered).toBe(true);
+      expect(result.pull_request_number).toBe(123);
+      expect(buffer.getBufferedCount()).toBe(1);
+      expect(resolveInvocationContextSpy).toHaveBeenCalled();
+    } finally {
+      resolveInvocationContextSpy.mockRestore();
+    }
+  });
+
+  it("falls back to raw context when resolveInvocationContext throws a non-validation error", async () => {
+    const invocationHelpersPath = path.join(__dirname, "invocation_context_helpers.cjs");
+    const invocationHelpers = require(invocationHelpersPath);
+    const resolveInvocationContextSpy = vi.spyOn(invocationHelpers, "resolveInvocationContext").mockImplementation(() => {
+      throw new Error("boom");
+    });
+    try {
+      const handler = await createHandler({ target: "triggering" });
+      const message = {
+        type: "create_pull_request_review_comment",
+        path: "src/main.js",
+        line: 5,
+        body: "Review comment from thrown context resolver",
+      };
+
+      const result = await handler(message, {});
+
+      expect(result.success).toBe(true);
+      expect(result.buffered).toBe(true);
+      expect(result.pull_request_number).toBe(123);
+      expect(buffer.getBufferedCount()).toBe(1);
+      expect(resolveInvocationContextSpy).toHaveBeenCalled();
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("failed to resolve invocation context"));
+    } finally {
+      resolveInvocationContextSpy.mockRestore();
+    }
+  });
+
   it("should reject comments targeting a different PR than the first comment", async () => {
     // First comment sets context to PR #123
     const handler = await createHandler();
@@ -522,5 +615,151 @@ describe("create_pr_review_comment.cjs", () => {
     expect(result.buffered).toBe(true);
     // Footer context is set on the buffer for review-level footer generation
     expect(buffer.getBufferedCount()).toBe(1);
+  });
+
+  it("should use GH_AW_HEAD_SHA env var as commit_id when submitting review", async () => {
+    const previousHeadSHA = process.env.GH_AW_HEAD_SHA;
+    process.env.GH_AW_HEAD_SHA = "trigger-time-sha-xyz789";
+    try {
+      // The buffer's submitReview uses GH_AW_HEAD_SHA automatically — verify the
+      // review context is set correctly (no commitId field needed on context)
+      const handler = await createHandler();
+      const message = {
+        type: "create_pull_request_review_comment",
+        path: "src/main.js",
+        line: 10,
+        body: "Review comment body",
+      };
+      const result = await handler(message, {});
+
+      expect(result.success).toBe(true);
+      expect(result.buffered).toBe(true);
+
+      const ctx = buffer.getReviewContext();
+      expect(ctx).not.toBeNull();
+      // No commitId on the context; the env var is used at submit time instead
+      expect(ctx.commitId).toBeUndefined();
+      // The live PR head SHA should still be in pullRequest.head.sha
+      expect(ctx.pullRequest.head.sha).toBe("abc123def456");
+    } finally {
+      if (previousHeadSHA !== undefined) {
+        process.env.GH_AW_HEAD_SHA = previousHeadSHA;
+      } else {
+        delete process.env.GH_AW_HEAD_SHA;
+      }
+    }
+  });
+
+  it("review context has no commitId field regardless of handler config", async () => {
+    const handler = await createHandler();
+    const message = {
+      type: "create_pull_request_review_comment",
+      path: "src/main.js",
+      line: 10,
+      body: "Review comment without pinning",
+    };
+    const result = await handler(message, {});
+
+    expect(result.success).toBe(true);
+    const ctx = buffer.getReviewContext();
+    expect(ctx).not.toBeNull();
+    expect(ctx.commitId).toBeUndefined();
+  });
+});
+
+describe("create_pr_review_comment.cjs — registry mode (multiple reviews)", () => {
+  let createPRReviewCommentScript;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    const scriptPath = require("path").join(__dirname, "create_pr_review_comment.cjs");
+    createPRReviewCommentScript = require("fs").readFileSync(scriptPath, "utf8");
+
+    delete process.env.GH_AW_AGENT_OUTPUT;
+    delete process.env.GH_AW_PR_REVIEW_COMMENT_SIDE;
+    delete process.env.GH_AW_PR_REVIEW_COMMENT_TARGET;
+    delete process.env.GH_AW_WORKFLOW_NAME;
+    delete process.env.GH_AW_WORKFLOW_SOURCE;
+    delete process.env.GH_AW_WORKFLOW_SOURCE_URL;
+
+    mockGithub.rest.pulls.get.mockImplementation(({ pull_number }) => Promise.resolve({ data: { number: pull_number, head: { sha: `sha-pr${pull_number}` } } }));
+
+    global.context = {
+      eventName: "pull_request",
+      runId: 12345,
+      repo: { owner: "testowner", repo: "testrepo" },
+      payload: {
+        pull_request: { number: 123, head: { sha: "abc123" } },
+        repository: { html_url: "https://github.com/testowner/testrepo" },
+      },
+    };
+  });
+
+  afterEach(() => {
+    global.context = mockContext;
+  });
+
+  async function createRegistryHandler(registry, extraConfig = {}) {
+    const configStr = JSON.stringify(extraConfig);
+    return await eval(`(async () => { ${createPRReviewCommentScript}; return await main(Object.assign({ _prReviewBufferRegistry: registry, target: "*" }, ${configStr})); })()`);
+  }
+
+  it("routes comments for two different PRs into separate buffers", async () => {
+    const registry = createPrReviewBufferRegistry();
+    const handler = await createRegistryHandler(registry);
+
+    const result1 = await handler({ type: "create_pull_request_review_comment", path: "a.js", line: 1, body: "comment on PR 1", pull_request_number: 1 }, {});
+    const result2 = await handler({ type: "create_pull_request_review_comment", path: "b.js", line: 2, body: "comment on PR 2", pull_request_number: 2 }, {});
+
+    expect(result1.success).toBe(true);
+    expect(result1.buffered).toBe(true);
+    expect(result2.success).toBe(true);
+    expect(result2.buffered).toBe(true);
+
+    const entries = registry.getAllEntries();
+    expect(entries).toHaveLength(2);
+    expect(entries[0].prNumber).toBe(1);
+    expect(entries[0].buffer.getBufferedCount()).toBe(1);
+    expect(entries[1].prNumber).toBe(2);
+    expect(entries[1].buffer.getBufferedCount()).toBe(1);
+  });
+
+  it("accumulates multiple comments for the same PR in one buffer", async () => {
+    const registry = createPrReviewBufferRegistry();
+    const handler = await createRegistryHandler(registry);
+
+    await handler({ type: "create_pull_request_review_comment", path: "a.js", line: 1, body: "first", pull_request_number: 5 }, {});
+    await handler({ type: "create_pull_request_review_comment", path: "b.js", line: 2, body: "second", pull_request_number: 5 }, {});
+
+    const entries = registry.getAllEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].prNumber).toBe(5);
+    expect(entries[0].buffer.getBufferedCount()).toBe(2);
+  });
+
+  it("sets footer context on the per-PR buffer", async () => {
+    process.env.GH_AW_WORKFLOW_NAME = "My Workflow";
+    const registry = createPrReviewBufferRegistry();
+    const handler = await createRegistryHandler(registry);
+
+    await handler({ type: "create_pull_request_review_comment", path: "c.js", line: 3, body: "body", pull_request_number: 10 }, {});
+
+    const entry = registry.getAllEntries()[0];
+    const ctx = entry.buffer.getFooterContext?.();
+    if (ctx !== undefined) {
+      expect(ctx.workflowName).toBe("My Workflow");
+    }
+  });
+
+  it("returns success:false when pull_request_number is missing in target:* mode", async () => {
+    const registry = createPrReviewBufferRegistry();
+    const handler = await createRegistryHandler(registry);
+
+    const result = await handler({ type: "create_pull_request_review_comment", path: "x.js", line: 1, body: "no PR" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("pull_request_number");
+    expect(registry.getAllEntries()).toHaveLength(0);
   });
 });

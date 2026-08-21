@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"github.com/github/gh-aw/pkg/logger"
 )
@@ -40,6 +42,10 @@ func ValidateAbsolutePath(path string) (string, error) {
 		fileutilLog.Print("ValidateAbsolutePath: rejected empty path")
 		return "", errors.New("path cannot be empty")
 	}
+	if strings.IndexFunc(path, unicode.IsControl) >= 0 {
+		fileutilLog.Printf("ValidateAbsolutePath: rejected path with control characters: %q", path)
+		return "", fmt.Errorf("path contains invalid control characters: %q", path)
+	}
 
 	// Sanitize the filepath to prevent path traversal attacks
 	cleanPath := filepath.Clean(path)
@@ -59,6 +65,11 @@ func ValidateAbsolutePath(path string) (string, error) {
 // fallback when a path does not yet exist) before comparison, so neither ".."
 // components nor symlinks pointing outside base can be used to escape.
 //
+// For candidate paths that do not yet exist on disk, the longest existing ancestor is
+// resolved through EvalSymlinks before the non-existing suffix is re-appended. This
+// prevents an in-base symlinked directory from being used to write outside the base
+// even when the final file does not exist yet.
+//
 // Returns an error when:
 //   - Either path cannot be resolved to an absolute form.
 //   - The resolved candidate path starts outside the resolved base directory.
@@ -73,12 +84,9 @@ func ValidatePathWithinBase(base, candidate string) error {
 			return fmt.Errorf("failed to resolve base path %q: %w", base, err)
 		}
 	}
-	absCand, err := filepath.EvalSymlinks(candidate)
+	absCand, err := resolvePathWithExistingAncestorSymlinks(candidate)
 	if err != nil {
-		absCand, err = filepath.Abs(candidate)
-		if err != nil {
-			return fmt.Errorf("failed to resolve candidate path %q: %w", candidate, err)
-		}
+		return fmt.Errorf("failed to resolve candidate path %q: %w", candidate, err)
 	}
 	rel, err := filepath.Rel(absBase, absCand)
 	if err != nil || !filepath.IsLocal(rel) {
@@ -87,6 +95,48 @@ func ValidatePathWithinBase(base, candidate string) error {
 	}
 	fileutilLog.Printf("ValidatePathWithinBase: path is safe: candidate=%q (rel=%s) within base=%q", candidate, rel, base)
 	return nil
+}
+
+// resolvePathWithExistingAncestorSymlinks resolves a path to its absolute real form, following
+// symlinks for every existing component. For paths whose final component does not
+// yet exist on disk, it walks up to the longest existing ancestor, resolves that
+// through filepath.EvalSymlinks (catching any symlinked directories along the way),
+// and then re-appends the non-existing suffix. This prevents a symlinked directory
+// inside base from being used to escape the boundary when the target file is new.
+func resolvePathWithExistingAncestorSymlinks(p string) (string, error) {
+	// Fast path: path exists — EvalSymlinks fully resolves it.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved, nil
+	}
+	// Path does not fully exist yet. Get a clean absolute path.
+	absp, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	// Walk upward until we find the longest existing prefix and resolve it.
+	suffix := ""
+	cur := absp
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if suffix == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, suffix), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without finding an existing component.
+			// Fall back to the lexical absolute path.
+			return absp, nil
+		}
+		component := filepath.Base(cur)
+		if suffix == "" {
+			suffix = component
+		} else {
+			suffix = filepath.Join(component, suffix)
+		}
+		cur = parent
+	}
 }
 
 // EnsureParentDir ensures the parent directory for path exists, creating it recursively when needed.
@@ -138,7 +188,7 @@ type syncWriteCloser interface {
 	Close() error
 }
 
-func copyFileContents(in io.Reader, out syncWriteCloser, dst string) (err error) {
+func copyToFileAndSync(in io.Reader, out syncWriteCloser, dst string) (err error) {
 	removePartial := false
 
 	defer func() {
@@ -175,7 +225,7 @@ func CopyFile(src, dst string) error {
 		fileutilLog.Printf("Failed to create destination file: %s", err)
 		return err
 	}
-	err = copyFileContents(in, out, dst)
+	err = copyToFileAndSync(in, out, dst)
 	if err != nil {
 		return err
 	}

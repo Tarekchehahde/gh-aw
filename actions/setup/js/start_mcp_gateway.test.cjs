@@ -1,5 +1,107 @@
+import fs from "fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyOTLPIgnoreIfMissing, detectEngineType, getJSONParseErrorContext, getOTLPIfMissingMode, hasNonEmptyOTLPHeaders, resolveCopilotConfigPaths } from "./start_mcp_gateway.cjs";
+import {
+  applyOTLPIgnoreIfMissing,
+  customGatewayEnvNamesVar,
+  customGatewayReservedEnvPrefix,
+  customGatewayEnvTransportPrefix,
+  detectEngineType,
+  extractOptionalServerNames,
+  getJSONParseErrorContext,
+  getOTLPIfMissingMode,
+  hasNonEmptyOTLPHeaders,
+  injectCustomGatewayEnvArgs,
+  normalizeSinkVisibilityEncoding,
+  resolveCopilotConfigPaths,
+} from "./start_mcp_gateway.cjs";
+
+describe("start_mcp_gateway logging", () => {
+  it("does not create the legacy MCP gateway stderr log", () => {
+    const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
+    expect(source).not.toContain("/tmp/gh-aw/mcp-logs/stderr.log");
+  });
+
+  it("does not create the MCP gateway startup log", () => {
+    const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
+    expect(source).not.toContain("/tmp/gh-aw/mcp-logs/start-gateway.log");
+  });
+
+  it("discards the gateway child process stderr", () => {
+    const source = fs.readFileSync(new URL("./start_mcp_gateway.cjs", import.meta.url), "utf8");
+    expect(source).toContain(`stdio: ["pipe", outputFd, "ignore"]`);
+  });
+});
+
+describe("start_mcp_gateway custom environment arguments", () => {
+  const marker = "__GH_AW_MCP_GATEWAY_CUSTOM_ENV__";
+
+  it("passes hostile values as one atomic Docker argument", () => {
+    const hostileValue = `x" --privileged -v /workspace/evil:/evil --entrypoint /evil -e X="x`;
+    const args = injectCustomGatewayEnvArgs(["run", "--rm", marker, "gateway-image"], {
+      [customGatewayEnvNamesVar]: '["BASH_ENV"]',
+      [`${customGatewayEnvTransportPrefix}0`]: hostileValue,
+    });
+
+    expect(args).toEqual(["run", "--rm", "-e", `BASH_ENV=${hostileValue}`, "gateway-image"]);
+  });
+
+  it("preserves sorted multi-value index mapping and empty values", () => {
+    const args = injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+      [customGatewayEnvNamesVar]: '["ALPHA","EMPTY","OMEGA"]',
+      [`${customGatewayEnvTransportPrefix}0`]: "first",
+      [`${customGatewayEnvTransportPrefix}1`]: "",
+      [`${customGatewayEnvTransportPrefix}2`]: "last\nline",
+    });
+
+    expect(args).toEqual(["run", "-e", "ALPHA=first", "-e", "EMPTY=", "-e", "OMEGA=last\nline", "gateway-image"]);
+  });
+
+  it("uses an empty value when transport metadata is missing", () => {
+    const args = injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+      [customGatewayEnvNamesVar]: '["PRESENT","MISSING"]',
+      [`${customGatewayEnvTransportPrefix}0`]: "value",
+    });
+
+    expect(args).toEqual(["run", "-e", "PRESENT=value", "-e", "MISSING=", "gateway-image"]);
+  });
+
+  it("leaves commands without the marker unchanged", () => {
+    const args = ["run", "--rm", "gateway-image"];
+    expect(injectCustomGatewayEnvArgs(args, { [customGatewayEnvNamesVar]: "not-json" })).toBe(args);
+  });
+
+  it("rejects malformed JSON metadata", () => {
+    expect(() =>
+      injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+        [customGatewayEnvNamesVar]: "not-json",
+      })
+    ).toThrow(/must be valid JSON/);
+  });
+
+  it("rejects malformed or unsafe environment variable names", () => {
+    expect(() =>
+      injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+        [customGatewayEnvNamesVar]: '["BAD-NAME"]',
+      })
+    ).toThrow(/valid environment variable names/);
+  });
+
+  it.each([[`${customGatewayEnvTransportPrefix}0`], [customGatewayEnvNamesVar], [`${customGatewayReservedEnvPrefix}FOO`]])("rejects the reserved name %s", reservedName => {
+    expect(() =>
+      injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+        [customGatewayEnvNamesVar]: JSON.stringify([reservedName]),
+      })
+    ).toThrow(/reserved/);
+  });
+
+  it("rejects duplicate environment variable names", () => {
+    expect(() =>
+      injectCustomGatewayEnvArgs(["run", marker, "gateway-image"], {
+        [customGatewayEnvNamesVar]: '["API_TOKEN","API_TOKEN"]',
+      })
+    ).toThrow(/duplicate/);
+  });
+});
 
 describe("start_mcp_gateway OTLP if-missing helpers", () => {
   let originalWarning;
@@ -219,5 +321,53 @@ describe("start_mcp_gateway getJSONParseErrorContext", () => {
     expect(context).toBeTruthy();
     expect(context?.key).toBe("GITHUB_HOST");
     expect(context?.lineText).toContain(`"GITHUB_HOST"`);
+  });
+});
+
+describe("start_mcp_gateway normalizeSinkVisibilityEncoding", () => {
+  it("normalizes double-encoded sink visibility values", () => {
+    const invalidConfig = `{
+  "guard-policies": {
+    "write-sink": {
+      "sink-visibility": ""public""
+    }
+  }
+}`;
+    expect(normalizeSinkVisibilityEncoding(invalidConfig)).toContain(`"sink-visibility": "public"`);
+  });
+
+  it("leaves correctly encoded sink visibility values unchanged", () => {
+    const validConfig = `{
+  "guard-policies": {
+    "write-sink": {
+      "sink-visibility": "public"
+    }
+  }
+}`;
+    expect(normalizeSinkVisibilityEncoding(validConfig)).toBe(validConfig);
+  });
+});
+
+describe("start_mcp_gateway extractOptionalServerNames", () => {
+  it("collects servers declared with required: false and strips the flag from every server", () => {
+    const configObj = {
+      mcpServers: {
+        datadog: { type: "http", url: "https://example.com/mcp", required: false },
+        grafana: { type: "http", url: "https://example.com/grafana" },
+        sentry: { type: "http", url: "https://example.com/sentry", required: true },
+      },
+    };
+
+    expect(extractOptionalServerNames(configObj)).toEqual(["datadog"]);
+    // The gateway configuration specification has no `required` field, so it is
+    // removed for every server regardless of its value.
+    expect(configObj.mcpServers.datadog).not.toHaveProperty("required");
+    expect(configObj.mcpServers.sentry).not.toHaveProperty("required");
+    expect(configObj.mcpServers.grafana).not.toHaveProperty("required");
+  });
+
+  it("returns an empty list when no servers are configured", () => {
+    expect(extractOptionalServerNames({})).toEqual([]);
+    expect(extractOptionalServerNames({ mcpServers: null })).toEqual([]);
   });
 });

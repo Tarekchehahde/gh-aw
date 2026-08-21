@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -14,9 +15,15 @@ var virtualFsLog = logger.New("parser:virtual_fs")
 
 // builtinVirtualFiles holds embedded built-in files registered at startup.
 // Keys use the "@builtin:" path prefix (e.g. "@builtin:engines/copilot.md").
-// The map is populated once and then read-only; concurrent reads are safe.
+// Registration swaps a pointer to an immutable snapshot rather than assigning
+// a map directly. The named snapshot type makes this copy-on-write pattern
+// explicit: readers only see fully-populated, read-only snapshots.
+type builtinVirtualFileSnapshot struct {
+	files map[string][]byte
+}
+
 var (
-	builtinVirtualFiles   map[string][]byte
+	builtinVirtualFiles   = &builtinVirtualFileSnapshot{files: map[string][]byte{}}
 	builtinVirtualFilesMu sync.RWMutex
 )
 
@@ -31,24 +38,25 @@ func RegisterBuiltinVirtualFile(path string, content []byte) {
 	}
 	builtinVirtualFilesMu.Lock()
 	defer builtinVirtualFilesMu.Unlock()
-	if builtinVirtualFiles == nil {
-		builtinVirtualFiles = make(map[string][]byte)
-	}
-	if existing, ok := builtinVirtualFiles[path]; ok {
+	current := builtinVirtualFiles.files
+	if existing, ok := current[path]; ok {
 		if !bytes.Equal(existing, content) {
 			panic(fmt.Sprintf("RegisterBuiltinVirtualFile: path %q already registered with different content", path))
 		}
 		return // idempotent: same content, no-op
 	}
 	virtualFsLog.Printf("Registering builtin virtual file: %s (%d bytes)", path, len(content))
-	builtinVirtualFiles[path] = content
+	next := make(map[string][]byte, len(current)+1)
+	maps.Copy(next, current)
+	next[path] = bytes.Clone(content)
+	builtinVirtualFiles = &builtinVirtualFileSnapshot{files: next}
 }
 
 // BuiltinVirtualFileExists returns true if the given path is registered as a builtin virtual file.
 func BuiltinVirtualFileExists(path string) bool {
 	builtinVirtualFilesMu.RLock()
 	defer builtinVirtualFilesMu.RUnlock()
-	_, ok := builtinVirtualFiles[path]
+	_, ok := builtinVirtualFiles.files[path]
 	virtualFsLog.Printf("BuiltinVirtualFileExists: path=%s exists=%t", path, ok)
 	return ok
 }
@@ -114,9 +122,9 @@ const BuiltinPathPrefix = "@builtin:"
 var readFileFunc = func(path string) ([]byte, error) {
 	builtinVirtualFilesMu.RLock()
 	defer builtinVirtualFilesMu.RUnlock()
-	content, ok := builtinVirtualFiles[path]
+	content, ok := builtinVirtualFiles.files[path]
 	if ok {
-		return content, nil
+		return bytes.Clone(content), nil
 	}
 	return os.ReadFile(path)
 }

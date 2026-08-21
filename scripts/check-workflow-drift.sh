@@ -59,6 +59,12 @@ SNAPSHOT_DIR=$(mktemp -d)
 PRE_LOCKFILES_FILE="$SNAPSHOT_DIR/pre-lockfiles.txt"
 POST_LOCKFILES_FILE="$SNAPSHOT_DIR/post-lockfiles.txt"
 SNAPSHOT_ROOT="$SNAPSHOT_DIR/original"
+# Keep this list aligned with the generated filenames in
+# pkg/workflow/central_slash_command_workflow.go.
+MAINTENANCE_FILES=(
+    ".github/workflows/agentic_commands.yml"
+    ".github/workflows/agentic_slash_commands.yml"
+)
 
 restore_lockfiles() {
     local file
@@ -70,6 +76,15 @@ restore_lockfiles() {
         mkdir -p "$(dirname "$file")"
         cp "$SNAPSHOT_ROOT/$file" "$file"
     done < "$PRE_LOCKFILES_FILE"
+
+    for file in "${MAINTENANCE_FILES[@]}"; do
+        if [ -f "$SNAPSHOT_ROOT/$file" ]; then
+            mkdir -p "$(dirname "$file")"
+            cp "$SNAPSHOT_ROOT/$file" "$file"
+        else
+            rm -f "$file"
+        fi
+    done
 }
 
 cleanup() {
@@ -86,6 +101,12 @@ while IFS= read -r file; do
     mkdir -p "$SNAPSHOT_ROOT/$(dirname "$file")"
     cp "$file" "$SNAPSHOT_ROOT/$file"
 done < "$PRE_LOCKFILES_FILE"
+for file in "${MAINTENANCE_FILES[@]}"; do
+    if [ -f "$file" ]; then
+        mkdir -p "$SNAPSHOT_ROOT/$(dirname "$file")"
+        cp "$file" "$SNAPSHOT_ROOT/$file"
+    fi
+done
 
 echo "Checking for workflow markdown/lock file drift..."
 echo ""
@@ -100,6 +121,8 @@ echo ""
 if ! "$BINARY" compile --validate --no-check-update --purge 2>&1; then
     echo ""
     echo -e "${RED}ERROR${NC}: Workflow compilation failed — fix the errors above, then run:"
+    echo ""
+    echo "If you edited any .github/workflows/*.md file in this repository, run make recompile before committing so the matching .lock.yml files stay in sync."
     echo ""
     echo "  make recompile"
     echo ""
@@ -137,6 +160,8 @@ echo ""
 while IFS= read -r file; do
     echo "  $file"
 done <<< "$all_drift"
+echo ""
+echo "If you edited any .github/workflows/*.md file in this repository, run make recompile before committing so the generated .lock.yml files stay in sync."
 echo ""
 echo -e "${YELLOW}Fix:${NC} Regenerate and stage the lock files, then use report_progress:"
 echo ""

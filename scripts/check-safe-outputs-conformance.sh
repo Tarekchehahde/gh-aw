@@ -4,8 +4,8 @@ set +o histexpand
 # Safe Outputs Specification Conformance Checker
 # This script implements automated checks for the Safe Outputs specification
 # Specification: docs/src/content/docs/specs/safe-outputs-specification.md
-# Spec Version: 1.24.0 (2026-06-13)
-# Script Version: 1.25.0 (2026-06-22)
+# Spec Version: 1.26.0 (2026-07-16)
+# Script Version: 1.26.0 (2026-07-20)
 
 set -euo pipefail
 
@@ -177,8 +177,8 @@ check_cross_repo() {
             continue
         fi
         
-        # Check if handler supports target-repo
-        if grep -q "target.*[Rr]epo\|targetRepo" "$handler"; then
+        # Check if handler supports target-repo (match explicit config-surface identifiers only)
+        if grep -qE "\btarget-repo\b|\btargetRepo\b|\btarget_repo\b" "$handler"; then
             # Check for allowlist validation
             if ! grep -q "allowed.*[Rr]epos\|validateTargetRepo\|checkAllowedRepo" "$handler"; then
                 log_high "SEC-005: $handler supports target-repo but lacks allowlist check"
@@ -421,6 +421,108 @@ check_schema_consistency() {
     fi
 }
 check_schema_consistency
+
+# IMP-004: Safe Output Config Schema Coverage
+check_safe_output_config_schema_coverage() {
+    local missing_properties
+
+    echo "Running IMP-004: Safe Output Config Schema Coverage..."
+
+    missing_properties=$(python3 - <<'PY'
+import json
+import re
+from pathlib import Path
+
+schema = json.loads(Path("pkg/parser/schemas/main_workflow_schema.json").read_text())
+structs = {}
+handler_fields = {}
+
+for path in Path("pkg/workflow").glob("*.go"):
+    if path.name.endswith("_test.go"):
+        continue
+    content = path.read_text()
+    for match in re.finditer(r"(?ms)^type\s+(\w+)\s+struct\s*\{(.*?)^\}", content):
+        structs[match.group(1)] = match.group(2)
+
+handlers = Path("pkg/workflow/safe_output_handlers.go").read_text()
+handler_key = None
+for line in handlers.splitlines():
+    key_match = re.search(r'Key:\s*"([^"]+)"', line)
+    if key_match:
+        handler_key = key_match.group(1)
+    field_match = re.search(r'StructField:\s*"([^"]+)"', line)
+    if field_match and handler_key:
+        handler_fields[field_match.group(1)] = handler_key
+
+compiler_populated_fields = {
+    "safe-outputs.call-workflow.workflow_files",
+    "safe-outputs.dispatch-workflow.workflow_files",
+    "safe-outputs.dispatch-workflow.aw_context_workflows",
+}
+
+tool_configured_outputs = {"comment-memory"}
+
+
+def yaml_fields(struct_name):
+    for line in structs.get(struct_name, "").splitlines():
+        match = re.match(r'\s*(.*?)\s+`yaml:"([^"]+)"', line)
+        if not match:
+            continue
+        tag = match.group(2).split(",", 1)[0]
+        if tag == "-":
+            continue
+        yield tag, ",inline" in match.group(2)
+
+
+def properties(node):
+    result = dict(node.get("properties", {}))
+    for alternative in ("allOf", "anyOf", "oneOf"):
+        for child in node.get(alternative, []):
+            for name, definition in properties(child).items():
+                if name in result and result[name] != definition:
+                    raise ValueError(f"conflicting schema definitions for property: {name}")
+                result[name] = definition
+    return result
+
+
+missing = []
+
+
+safe_outputs = properties(schema["properties"]["safe-outputs"])
+for line in structs["SafeOutputsConfig"].splitlines():
+    match = re.match(r'\s*(\w+)\s+\*?(\w+)\s+`yaml:"([^"]+)"', line)
+    if not match:
+        continue
+    struct_field, config_type, output_name = match.groups()
+    if struct_field not in handler_fields:
+        continue
+    output_name = output_name.split(",", 1)[0]
+    if output_name in tool_configured_outputs:
+        continue
+    output_schema = safe_outputs.get(output_name)
+    if output_schema is None:
+        missing.append(f"safe-outputs.{output_name}")
+        continue
+
+    output_properties = properties(output_schema)
+    for tag, inline in yaml_fields(config_type):
+        property_path = f"safe-outputs.{output_name}.{tag}"
+        if not inline and property_path not in compiler_populated_fields and tag not in output_properties:
+            missing.append(property_path)
+
+print("\n".join(sorted(set(missing))))
+PY
+)
+
+    if [ -n "$missing_properties" ]; then
+        while IFS= read -r property; do
+            log_high "IMP-004: Safe output config property is missing from schema: $property"
+        done <<< "$missing_properties"
+    else
+        log_pass "IMP-004: All safe output config properties are declared in the schema"
+    fi
+}
+check_safe_output_config_schema_coverage
 
 # MCE-001: Tool Description Constraint Disclosure (Section 8.3 MCE2)
 echo "Running MCE-001: Tool Description Constraint Disclosure..."
@@ -844,7 +946,13 @@ check_mce_actionable_errors() {
     #   1. Identify the violated constraint with specific name and limit
     #   2. Report the actual value that triggered the violation
     #   3. Provide remediation guidance on how to correct the issue
-    #   4. Use standard error codes (E006-E008 for add_comment limits)
+    #   4. Use standard error codes (E006-E008 for add_comment limits in §8.3 MCE table)
+    #
+    # Note: §8.3 assigns E006=body-length, E007=mentions, E008=links for add_comment MCP
+    # constraint violations. §9.5 defines a separate global error catalog where
+    # E006=INVALID_LABEL, E007=API_ERROR, E008=SANITIZATION_FAILED. These two uses are
+    # distinct contexts: §8.3 codes apply to MCP-layer constraint violations; §9.5 codes
+    # apply to processor-layer validation and API errors.
 
     if [ ! -f "$helpers_file" ]; then
         log_high "MCE-005: Constraint helper module missing: $helpers_file"
@@ -930,6 +1038,101 @@ check_mce_core_error_handling() {
     fi
 }
 check_mce_core_error_handling
+
+# SEC-006: Error Code Catalog Completeness (Section 9.5, v1.26.0)
+# Spec v1.26.0 expanded the error catalog to E001-E010, adding E009 (CONFIG_HASH_MISMATCH)
+# and E010 (RATE_LIMIT_EXCEEDED). Implementations MUST use standardized error codes for
+# all validation and execution failures (Section 9.5 normative requirement).
+echo "Running SEC-006: Error Code Catalog Completeness (Section 9.5)..."
+check_error_catalog_completeness() {
+    local spec_file="docs/src/content/docs/specs/safe-outputs-specification.md"
+    local processor_dir="actions/setup/js"
+    local failed=0
+
+    # Verify spec defines the full E001-E010 catalog (introduced in v1.26.0)
+    for code in E009 E010; do
+        if ! grep -q "$code" "$spec_file"; then
+            log_high "SEC-006: Spec does not define error code $code — catalog may be out of date"
+            failed=1
+        fi
+    done
+
+    # Check that E009 (CONFIG_HASH_MISMATCH) and E010 (RATE_LIMIT_EXCEEDED) are referenced
+    # in implementation handler files (processor layer must recognise all catalog codes)
+    if [ -d "$processor_dir" ]; then
+        if ! grep -rqE "E009|CONFIG_HASH_MISMATCH" "$processor_dir"/ 2>/dev/null; then
+            log_medium "SEC-006: No handler references E009 (CONFIG_HASH_MISMATCH) — rate-limit and hash-mismatch error codes may be absent from processor"
+            failed=1
+        fi
+        if ! grep -rqE "E010|RATE_LIMIT_EXCEEDED" "$processor_dir"/ 2>/dev/null; then
+            log_medium "SEC-006: No handler references E010 (RATE_LIMIT_EXCEEDED) — rate-limit retry error code may be absent from processor"
+            failed=1
+        fi
+    fi
+
+    if [ $failed -eq 0 ]; then
+        log_pass "SEC-006: Error code catalog E001-E010 is complete and referenced in spec and implementation"
+    fi
+}
+check_error_catalog_completeness
+
+# SEC-007: EH1 Early Failure Detection - Validation Before API (Section 9.5, v1.26.0)
+# Requirement EH1: Validation errors (E001-E006) MUST be detected before any GitHub API calls.
+# Scope: applies to safe-output processor handlers (files that record NDJSON operations).
+echo "Running SEC-007: EH1 Early Failure Detection (Section 9.5)..."
+check_early_failure_detection() {
+    local failed=0
+
+    # Only check files that are safe-output processors (handle recorded NDJSON operations).
+    # These files directly process NDJSON operations (not just import a helper for staged mode).
+    while IFS= read -r handler; do
+        # Must reference NDJSON/safeOutput in processing context (not just import helpers)
+        if ! grep -qE "output\.ndjson|processOperation|safe_outputs_processor|recordOperation" "$handler" 2>/dev/null; then
+            continue
+        fi
+        if ! grep -qE "octokit\.|github\.rest\." "$handler" 2>/dev/null; then
+            continue
+        fi
+        # The handler must contain validation/sanitization before any octokit call.
+        if ! grep -qE "validate|sanitize|enforce|E00[1-6]|INVALID_SCHEMA|LIMIT_EXCEEDED|UNAUTHORIZED_DOMAIN|INVALID_TARGET_REPO|MISSING_PARENT|INVALID_LABEL" "$handler" 2>/dev/null; then
+            log_medium "SEC-007: $handler is a safe-output handler but may lack pre-API validation (EH1 requirement)"
+            failed=1
+        fi
+    done < <(find actions/setup/js -name "*.cjs" ! -name "*test*" 2>/dev/null)
+
+    if [ $failed -eq 0 ]; then
+        log_pass "SEC-007: Safe-output handlers include pre-API validation checks (EH1)"
+    fi
+}
+check_early_failure_detection
+
+# AR2-001: Artifact-Based Communication (Section 3.1, AR2, v1.26.0)
+# AR2: Agent-to-processor communication MUST use GitHub Actions artifacts.
+# Environment variables, network channels, and shared filesystems MUST NOT be used.
+echo "Running AR2-001: Artifact-Based Communication (Section 3.1 AR2)..."
+check_artifact_communication() {
+    local failed=0
+
+    # Check that compiled workflow files use artifact upload/download for safe outputs
+    local upload_count
+    upload_count=$(grep -rl "upload-artifact\|actions/upload-artifact" .github/workflows/ 2>/dev/null | wc -l)
+    if [ "$upload_count" -eq 0 ]; then
+        log_medium "AR2-001: No workflow found using artifact upload — AR2 artifact-based communication may not be implemented"
+        failed=1
+    fi
+
+    local download_count
+    download_count=$(grep -rl "download-artifact\|actions/download-artifact" .github/workflows/ 2>/dev/null | wc -l)
+    if [ "$download_count" -eq 0 ]; then
+        log_medium "AR2-001: No workflow found using artifact download — AR2 artifact-based communication may not be implemented"
+        failed=1
+    fi
+
+    if [ $failed -eq 0 ]; then
+        log_pass "AR2-001: Workflows use GitHub Actions artifacts for agent-to-processor communication (AR2)"
+    fi
+}
+check_artifact_communication
 
 # TYPE-001: merge_pull_request Handler Existence and Default Branch Protection (Section 7.3, v1.17.0)
 echo "Running TYPE-001: merge_pull_request Handler Existence and Default Branch Protection..."
@@ -1242,7 +1445,20 @@ check_wtd_reviewable_annotation() {
     fi
 
     # Check label string "agentic threat detected" (requirement 2)
-    if ! grep -q "agentic threat detected" "$footer_file"; then
+    # The footer may delegate to a centralised template (threat_detection_caution.md) or
+    # to threat_detection_warning.cjs, so accept those as equivalent evidence.
+    local label_found=0
+    if grep -q "agentic threat detected" "$footer_file" 2>/dev/null; then
+        label_found=1
+    elif grep -q "threat_detection_caution" "$footer_file" 2>/dev/null; then
+        local caution_template="actions/setup/md/threat_detection_caution.md"
+        if [ -f "$caution_template" ] && grep -q "agentic threat detected" "$caution_template" 2>/dev/null; then
+            label_found=1
+        elif [ -f "$threat_warning_file" ] && grep -q "agentic threat detected" "$threat_warning_file" 2>/dev/null; then
+            label_found=1
+        fi
+    fi
+    if [ $label_found -eq 0 ]; then
         log_critical "WTD-001: Footer generator missing 'agentic threat detected' label string (WTD1 requirement 2)"
         failed=1
     fi
@@ -1298,8 +1514,19 @@ check_wtd_convertible_fallback() {
             failed=1
         fi
 
-        # Check that the caution text is emitted in the fallback
-        if ! grep -q "agentic threat detected" "$push_handler"; then
+        # Check that the caution text is emitted in the fallback.
+        # The handler may delegate to threat_detection_warning.cjs via
+        # getThreatWarningPresentation(), so accept that as equivalent evidence.
+        local threat_label_found=0
+        if grep -q "agentic threat detected" "$push_handler" 2>/dev/null; then
+            threat_label_found=1
+        elif grep -q "getThreatWarningPresentation" "$push_handler" 2>/dev/null; then
+            local threat_warning_file="actions/setup/js/threat_detection_warning.cjs"
+            if [ -f "$threat_warning_file" ] && grep -q "agentic threat detected" "$threat_warning_file" 2>/dev/null; then
+                threat_label_found=1
+            fi
+        fi
+        if [ $threat_label_found -eq 0 ]; then
             log_high "WTD-002: push_to_pull_request_branch fallback missing 'agentic threat detected' text (WTD2 / WTD1)"
             failed=1
         fi
@@ -1521,11 +1748,11 @@ check_create_check_run_handler() {
     # Per spec Section 7.3 dual-permission profile: checks:write without target,
     # adds pull-requests:read when target is configured.
     if [ -f "$handler_registry" ]; then
-        if ! grep -q "NewPermissionsContentsReadChecksWrite" "$handler_registry"; then
+        if ! grep -q "NewPermissionsChecksWrite()" "$handler_registry"; then
             log_critical "TYPE-008: create_check_run dual-permission profile missing checks:write base permission (Section 7.3 v1.23.0)"
             failed=1
         fi
-        if ! grep -q "NewPermissionsContentsReadChecksWritePRRead" "$handler_registry"; then
+        if ! grep -q "NewPermissionsChecksWritePRRead" "$handler_registry"; then
             log_high "TYPE-008: create_check_run dual-permission profile missing pull-requests:read when target configured (Section 7.3 v1.23.0)"
             failed=1
         fi
@@ -1701,6 +1928,168 @@ check_close_entity_allow_body() {
     fi
 }
 check_close_entity_allow_body
+
+# TYPE-012: Fork-Backed Pull Request Semantics (Section 7.1, v1.26.0)
+echo "Running TYPE-012: Fork-Backed Pull Request Semantics..."
+check_fork_backed_pr_semantics() {
+    local pr_handler="actions/setup/js/create_pull_request.cjs"
+    local push_handler="actions/setup/js/push_to_pull_request_branch.cjs"
+    local compiler_job="pkg/workflow/compiler_safe_outputs_job.go"
+    local failed=0
+
+    # Per spec Section 7.1 v1.26.0:
+    # 1. head-repo MUST be validated against the configured allowlist (same as target-repo).
+    # 2. When head-repo differs from target-repo, the PR MUST use an owner-qualified head ref.
+    # 3. Implicit reuse of arbitrary pre-existing fork branches MUST NOT occur.
+    # 4. head-github-app takes precedence over head-github-token when both are configured.
+    # 5. Successful executions MUST record head_repo in the safe-output summary and manifest.
+    # 6. push_to_pull_request_branch follow-up is limited to PRs whose head repo matches head-repo.
+
+    if [ ! -f "$pr_handler" ]; then
+        log_high "TYPE-012: create_pull_request handler missing: $pr_handler"
+        failed=1
+    else
+        # Check head-repo is resolved and validated against allowlist (requirement 1)
+        if ! grep -qE "resolveAndValidateRepo.*head.repo|head.*repo.*allowedRepos|headRepo.*allowlist" "$pr_handler"; then
+            log_high "TYPE-012: create_pull_request handler does not validate head-repo against allowlist (Section 7.1 v1.26.0 requirement 1)"
+            failed=1
+        fi
+
+        # Check owner-qualified head ref is used when repos differ (requirement 2)
+        # The pattern `owner:branch` is the owner-qualified form used by GitHub API
+        if ! grep -qE "getPullRequestHeadRef|pushRepoParts\.owner.*branch|owner.*:.*branch" "$pr_handler"; then
+            log_high "TYPE-012: create_pull_request handler missing owner-qualified head reference for fork-backed PRs (Section 7.1 v1.26.0 requirement 2)"
+            failed=1
+        fi
+
+        # Check head_repo is recorded in summary/manifest (requirement 5)
+        if ! grep -q "head_repo" "$pr_handler"; then
+            log_high "TYPE-012: create_pull_request handler does not record head_repo in summary/manifest (Section 7.1 v1.26.0 requirement 5)"
+            failed=1
+        fi
+    fi
+
+    # Check push_to_pull_request_branch restricts to configured head-repo (requirement 6)
+    if [ -f "$push_handler" ]; then
+        if ! grep -qE "head.repo|headRepo|head_repo" "$push_handler"; then
+            log_high "TYPE-012: push_to_pull_request_branch handler does not enforce head-repo restriction (Section 7.1 v1.26.0 requirement 6)"
+            failed=1
+        fi
+    else
+        log_medium "TYPE-012: push_to_pull_request_branch handler missing: $push_handler"
+        failed=1
+    fi
+
+    # Check head-github-app precedence over head-github-token is implemented (requirement 4)
+    if [ -f "$compiler_job" ]; then
+        if ! grep -qE "HeadGitHubApp|head.github.app|headGithubApp" "$compiler_job"; then
+            log_high "TYPE-012: Compiler missing head-github-app support for fork credential precedence (Section 7.1 v1.26.0 requirement 4)"
+            failed=1
+        fi
+    else
+        log_medium "TYPE-012: Compiler job file missing: $compiler_job"
+        failed=1
+    fi
+
+    if [ $failed -eq 0 ]; then
+        log_pass "TYPE-012: Fork-backed PR semantics implemented: allowlist, owner-qualified refs, head_repo provenance, and head-github-app precedence (Section 7.1 v1.26.0)"
+    fi
+}
+check_fork_backed_pr_semantics
+
+# TYPE-013: approve_workflow_run Handler Semantics (Section 7.3, v1.28.4)
+echo "Running TYPE-013: approve_workflow_run Handler Semantics..."
+check_approve_workflow_run_semantics() {
+    local handler="actions/setup/js/approve_workflow_run.cjs"
+    local manager="actions/setup/js/safe_output_handler_manager.cjs"
+    local failed=0
+
+    # Per spec Section 7.3 (approve_workflow_run, v1.28.4):
+    # 1. run_id MUST be validated as a positive safe integer.
+    # 2. Staged mode MUST preview without reading GitHub state or consuming max limit.
+    # 3. Eligibility requires event=pull_request, non-empty pull_requests, status=waiting.
+    # 4. Workflow filename MUST match an allowed-workflows pattern (yml/yaml equivalence).
+    # 5. Every associated pull request MUST be the triggering PR or explicitly allowed.
+    # 6. pull_request_target events and unapproved fork pull requests MUST be rejected.
+    # 7. Protected files on associated pull requests MUST block approval.
+    # 8. Live approvals MUST require an explicit external github-token or GitHub App token.
+    # 9. Handler MUST be classified as an Abort type for warn-mode threat-detection failures.
+
+    if [ ! -f "$handler" ]; then
+        log_high "TYPE-013: approve_workflow_run handler missing: $handler"
+        failed=1
+    else
+        if ! grep -qE "parsePositiveInt" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not validate run_id as a positive integer (Section 7.3 requirement 1)"
+            failed=1
+        fi
+
+        if ! grep -qE "isStagedMode|isStaged" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler missing staged-mode preview support (Section 7.3 requirement 2)"
+            failed=1
+        fi
+
+        if ! grep -qE "run\.event\s*!==\s*[\"']pull_request[\"']" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not verify event is pull_request (Section 7.3 requirement 3)"
+            failed=1
+        fi
+
+        if ! grep -qE "run\.status\s*!==\s*[\"']waiting[\"']" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not verify run status is waiting (Section 7.3 requirement 3)"
+            failed=1
+        fi
+
+        if ! grep -qE "isAllowedWorkflow|allowed_workflows" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not validate allowed-workflows (Section 7.3 requirement 4)"
+            failed=1
+        fi
+
+        if ! grep -qE "\.replace\(/\\\\\.yaml\\\$/i" "$handler"; then
+            log_medium "TYPE-013: approve_workflow_run handler may not normalize .yml/.yaml equivalence (Section 7.3 requirement 4)"
+            failed=1
+        fi
+
+        if ! grep -qE "allowed_pull_requests|allowedPullRequests|currentPullRequest" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not authorize pull requests against triggering/allowed set (Section 7.3 requirement 5)"
+            failed=1
+        fi
+
+        if ! grep -qE "pull_request_target" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not reject pull_request_target events (Section 7.3 requirement 6)"
+            failed=1
+        fi
+
+        if ! grep -qE "isForkPullRequest|config\.fork" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not reject fork pull requests unless fork: true (Section 7.3 requirement 6)"
+            failed=1
+        fi
+
+        if ! grep -qE "checkFileProtectionPostApply|getModifiedPullRequestFiles" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not check protected files before approval (Section 7.3 requirement 7)"
+            failed=1
+        fi
+
+        if ! grep -qE "github-token.*requires an external|requires an external github-token" "$handler"; then
+            log_high "TYPE-013: approve_workflow_run handler does not require an explicit external github-token/App token (Section 7.3 requirement 8)"
+            failed=1
+        fi
+    fi
+
+    if [ -f "$manager" ]; then
+        if ! grep -qE "THREAT_WARNING_ABORT_TYPES" "$manager" || ! sed -n '/THREAT_WARNING_ABORT_TYPES = new Set(\[/,/\]);/p' "$manager" | grep -q "approve_workflow_run"; then
+            log_high "TYPE-013: approve_workflow_run is not classified as an Abort type for warn-mode threat detection (Section 7.3 requirement 9)"
+            failed=1
+        fi
+    else
+        log_medium "TYPE-013: Safe output handler manager missing: $manager"
+        failed=1
+    fi
+
+    if [ $failed -eq 0 ]; then
+        log_pass "TYPE-013: approve_workflow_run implements run-id validation, staged preview, eligibility, workflow/PR authorization, fork rejection, protected-file checks, explicit credentials, and Abort classification (Section 7.3 v1.28.4)"
+    fi
+}
+check_approve_workflow_run_semantics
 
 # Summary
 echo ""

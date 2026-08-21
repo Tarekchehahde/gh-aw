@@ -4,6 +4,8 @@ package cli
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,15 +13,26 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type fakeReleaseClient struct {
+	do func(ctx context.Context, method string, path string, body io.Reader, response any) error
+}
+
+func (f fakeReleaseClient) DoWithContext(ctx context.Context, method string, path string, body io.Reader, response any) error {
+	return f.do(ctx, method, path, body, response)
+}
 
 func TestShouldCheckForUpdate(t *testing.T) {
 	// Save original environment
 	origCI := os.Getenv("CI")
+	origCopilotAgentSessionID := os.Getenv("COPILOT_AGENT_SESSION_ID")
 	origMCP := os.Getenv("GH_AW_MCP_SERVER")
 	origGetLastCheckFilePath := getLastCheckFilePathFunc
 	defer func() {
 		os.Setenv("CI", origCI)
+		os.Setenv("COPILOT_AGENT_SESSION_ID", origCopilotAgentSessionID)
 		os.Setenv("GH_AW_MCP_SERVER", origMCP)
 		getLastCheckFilePathFunc = origGetLastCheckFilePath
 	}()
@@ -89,6 +102,7 @@ func TestShouldCheckForUpdate(t *testing.T) {
 				os.Unsetenv("CI")
 				os.Unsetenv("CONTINUOUS_INTEGRATION")
 				os.Unsetenv("GITHUB_ACTIONS")
+				os.Unsetenv("COPILOT_AGENT_SESSION_ID")
 			} else {
 				os.Setenv("CI", tt.ciEnv)
 			}
@@ -219,101 +233,19 @@ func TestUpdateLastCheckTime(t *testing.T) {
 	}
 }
 
-func TestCheckForUpdatesWithNoCheckUpdateFlag(t *testing.T) {
-	// This test verifies that checkForUpdates respects the noCheckUpdate flag
-	// and doesn't make any API calls when the flag is true
-
-	// Save original environment and function
-	origCI := os.Getenv("CI")
-	origGithubActions := os.Getenv("GITHUB_ACTIONS")
-	origContinuousIntegration := os.Getenv("CONTINUOUS_INTEGRATION")
-	origGetLastCheckFilePath := getLastCheckFilePathFunc
-	defer func() {
-		if origCI != "" {
-			os.Setenv("CI", origCI)
-		} else {
-			os.Unsetenv("CI")
-		}
-		if origGithubActions != "" {
-			os.Setenv("GITHUB_ACTIONS", origGithubActions)
-		} else {
-			os.Unsetenv("GITHUB_ACTIONS")
-		}
-		if origContinuousIntegration != "" {
-			os.Setenv("CONTINUOUS_INTEGRATION", origContinuousIntegration)
-		} else {
-			os.Unsetenv("CONTINUOUS_INTEGRATION")
-		}
-		getLastCheckFilePathFunc = origGetLastCheckFilePath
-	}()
-
-	// Ensure we're not in CI mode
-	os.Unsetenv("CI")
-	os.Unsetenv("GITHUB_ACTIONS")
-	os.Unsetenv("CONTINUOUS_INTEGRATION")
-
-	// Create temporary directory for last check file
-	tmpDir := t.TempDir()
-	lastCheckFile := filepath.Join(tmpDir, lastCheckFileName)
-
-	// Override the function to use temp directory
-	getLastCheckFilePathFunc = func() string {
-		return lastCheckFile
-	}
-
-	// Call checkForUpdates with noCheckUpdate=true
-	checkForUpdates(true, false)
-
-	// Verify that no last check file was created (since check was skipped)
-	if _, err := os.Stat(lastCheckFile); err == nil {
-		t.Error("Last check file should not be created when noCheckUpdate=true")
-	}
-}
-
-func TestCheckForUpdatesInCIMode(t *testing.T) {
-	// Save original environment and function
-	origCI := os.Getenv("CI")
-	origGetLastCheckFilePath := getLastCheckFilePathFunc
-	defer func() {
-		os.Setenv("CI", origCI)
-		getLastCheckFilePathFunc = origGetLastCheckFilePath
-	}()
-
-	// Set CI environment
-	os.Setenv("CI", "true")
-
-	// Create temporary directory for last check file
-	tmpDir := t.TempDir()
-	lastCheckFile := filepath.Join(tmpDir, lastCheckFileName)
-
-	// Override the function to use temp directory
-	getLastCheckFilePathFunc = func() string {
-		return lastCheckFile
-	}
-
-	// Call checkForUpdates
-	checkForUpdates(false, false)
-
-	// Verify that no last check file was created (since check was skipped in CI)
-	if _, err := os.Stat(lastCheckFile); err == nil {
-		t.Error("Last check file should not be created in CI mode")
-	}
-}
-
 func TestCheckForUpdatesAsync_ContextCancellation(t *testing.T) {
 	// Test that async update check respects context cancellation
-	// Save original environment
-	origCI := os.Getenv("CI")
 	origGetLastCheckFilePath := getLastCheckFilePathFunc
 	defer func() {
-		os.Setenv("CI", origCI)
 		getLastCheckFilePathFunc = origGetLastCheckFilePath
 	}()
 
 	// Ensure we're not in CI mode
-	os.Unsetenv("CI")
-	os.Unsetenv("GITHUB_ACTIONS")
-	os.Unsetenv("CONTINUOUS_INTEGRATION")
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("CONTINUOUS_INTEGRATION", "")
+	t.Setenv("COPILOT_AGENT_SESSION_ID", "")
+	t.Setenv("GH_AW_MCP_SERVER", "")
 
 	// Create temporary directory for last check file
 	tmpDir := t.TempDir()
@@ -330,16 +262,73 @@ func TestCheckForUpdatesAsync_ContextCancellation(t *testing.T) {
 	// Cancel immediately
 	cancel()
 
-	// Call CheckForUpdatesAsync with cancelled context
-	CheckForUpdatesAsync(ctx, false, false)
-
-	// Wait a bit to ensure any goroutines would have had time to run
-	time.Sleep(200 * time.Millisecond)
+	// Call CheckForUpdatesAsync with cancelled context and join the goroutine
+	join := CheckForUpdatesAsync(ctx, false, false)
+	join()
 
 	// The update check should not have created a last check file
 	// because the context was cancelled
 	// Note: The check might still run if it started before cancellation,
 	// so we just verify no panics occurred
+}
+
+func TestCheckForUpdatesAsync_JoinsGoroutine(t *testing.T) {
+	// Test that the returned join function waits for the goroutine to complete
+	origGetLastCheckFilePath := getLastCheckFilePathFunc
+	origCheckForUpdatesWithContext := checkForUpdatesWithContextFunc
+	defer func() {
+		getLastCheckFilePathFunc = origGetLastCheckFilePath
+		checkForUpdatesWithContextFunc = origCheckForUpdatesWithContext
+	}()
+
+	// Ensure we're not in CI mode so that shouldCheckForUpdate returns true
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("CONTINUOUS_INTEGRATION", "")
+	t.Setenv("COPILOT_AGENT_SESSION_ID", "")
+	t.Setenv("GH_AW_MCP_SERVER", "")
+
+	// Create temporary directory for last check file
+	tmpDir := t.TempDir()
+	lastCheckFile := filepath.Join(tmpDir, lastCheckFileName)
+	getLastCheckFilePathFunc = func() string {
+		return lastCheckFile
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	checkForUpdatesWithContextFunc = func(_ context.Context, _ bool, _ bool) {
+		close(started)
+		<-release
+	}
+
+	ctx := context.Background()
+
+	join := CheckForUpdatesAsync(ctx, false, false)
+	<-started
+
+	// join() must wait until the worker exits.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		join()
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("join returned before worker exited")
+	case <-time.After(100 * time.Millisecond):
+		// join is correctly blocked waiting for worker completion
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+		// goroutine joined successfully after worker exit
+	case <-time.After(2 * time.Second):
+		t.Fatal("join function did not return within 2 seconds")
+	}
 }
 
 func TestFindLatestPublishedReleaseTag(t *testing.T) {
@@ -388,6 +377,59 @@ func TestFindLatestPublishedReleaseTag(t *testing.T) {
 			assert.Equal(t, tt.want, got, "unexpected latest published release tag")
 		})
 	}
+}
+
+func TestGetLatestReleaseWithClient_StableReleaseUsesLatestEndpoint(t *testing.T) {
+	client := fakeReleaseClient{
+		do: func(ctx context.Context, method string, path string, body io.Reader, response any) error {
+			assert.Equal(t, http.MethodGet, method)
+			assert.Equal(t, "repos/github/gh-aw/releases/latest", path)
+			assert.Nil(t, body)
+			release, ok := response.(*Release)
+			if !ok {
+				t.Fatalf("response type = %T, want *Release", response)
+			}
+			release.TagName = "v1.2.3"
+			return nil
+		},
+	}
+
+	got, err := getLatestReleaseWithClient(context.Background(), client, false)
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got)
+}
+
+func TestGetLatestReleaseWithClient_IncludePrereleasesUsesReleasesEndpoint(t *testing.T) {
+	client := fakeReleaseClient{
+		do: func(ctx context.Context, method string, path string, body io.Reader, response any) error {
+			assert.Equal(t, http.MethodGet, method)
+			assert.Equal(t, "repos/github/gh-aw/releases?per_page=50", path)
+			assert.Nil(t, body)
+			releases, ok := response.(*[]Release)
+			if !ok {
+				t.Fatalf("response type = %T, want *[]Release", response)
+			}
+			*releases = []Release{{TagName: "v1.2.3-beta.1", Prerelease: true}}
+			return nil
+		},
+	}
+
+	got, err := getLatestReleaseWithClient(context.Background(), client, true)
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3-beta.1", got)
+}
+
+func TestGetLatestReleaseWithClient_PropagatesContextErrors(t *testing.T) {
+	client := fakeReleaseClient{
+		do: func(ctx context.Context, method string, path string, body io.Reader, response any) error {
+			return context.Canceled
+		},
+	}
+
+	got, err := getLatestReleaseWithClient(context.Background(), client, false)
+	assert.Empty(t, got)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func TestIsCurrentVersionAtLeastLatest(t *testing.T) {

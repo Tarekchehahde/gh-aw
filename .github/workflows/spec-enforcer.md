@@ -33,33 +33,15 @@ safe-outputs:
 description: Generates and maintains specification-driven test suites for each Go package, relying on README.md specifications rather than source code
 emoji: 📋
 max-turns: 100
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 name: Package Specification Enforcer
 strict: true
 timeout-minutes: 30
 tools:
   bash:
-  - cat pkg/*/README.md
-  - find pkg -maxdepth 1 -type d
-  - find pkg/* -maxdepth 0 -type d
-  - find pkg -name "*_test.go" -type f
-  - find pkg -name "README.md" -type f
-  - ls pkg/*/
-  - head -n * pkg/*/*.go
-  - cat pkg/*/*.go
-  - wc -l pkg/*/*.go
-  - grep -rn "func Test" pkg --include="*_test.go"
-  - grep -rn "func [A-Z]" pkg --include="*.go"
-  - grep -rn "type [A-Z]" pkg --include="*.go"
-  - grep -rn "package " pkg --include="*.go"
-  - "git log --oneline --since=\"7 days ago\" -- pkg/*/README.md"
-  - "git diff HEAD -- pkg/*"
-  - git status
-  - go test -v -run "TestSpec" ./pkg/...
-  - go test -v -list "TestSpec" ./pkg/...
-  - go build ./pkg/...
+  - "*"
   cache-memory: true
   cli-proxy: true
   edit: null
@@ -68,6 +50,11 @@ tools:
     toolsets:
     - default
 tracker-id: spec-enforcer
+evals:
+  - id: packages_processed
+    question: Did the agent process at least one Go package for specification-driven test generation?
+  - id: pr_created_or_noop
+    question: Was a pull request created with new or updated test suites, or was noop used when no packages required test generation?
 ---
 
 # Package Specification Enforcer

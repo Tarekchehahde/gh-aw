@@ -6,128 +6,98 @@ package appendbytestring
 import (
 	"fmt"
 	"go/ast"
-	"go/types"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
+	"github.com/github/gh-aw/pkg/linters/internal/coverage"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
 // Analyzer is the append-byte-string analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "appendbytestring",
-	Doc:      "reports append(b, []byte(s)...) calls where s is a string that can be simplified to append(b, s...)",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/appendbytestring",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
+var Analyzer = analyzerutil.New("appendbytestring", "reports append(b, []byte(s)...) calls where s is a string that can be simplified to append(b, s...)", run)
+
+// hotThreshold gates findings on coverage data; see coverage package docs.
+var hotThreshold *int
+
+func init() {
+	hotThreshold = coverage.RegisterHotThresholdFlag(Analyzer)
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "appendbytestring")
 
-	nodeFilter := []ast.Node{
-		(*ast.CallExpr)(nil),
-	}
-
-	insp.Preorder(nodeFilter, func(n ast.Node) {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return
-		}
-
-		// Match append(b, x...) with exactly 2 arguments and an ellipsis.
-		ident, ok := call.Fun.(*ast.Ident)
-		if !ok || ident.Name != "append" {
-			return
-		}
-		if len(call.Args) != 2 || !call.Ellipsis.IsValid() {
-			return
-		}
-
-		pos := pass.Fset.PositionFor(call.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
-			return
-		}
-		if nolint.HasDirective(pos, noLintLinesByFile) {
-			return
-		}
-
-		// The first argument must be []byte.
-		if !isByteSlice(pass, call.Args[0]) {
-			return
-		}
-
-		// The second argument must be a []byte(s) conversion where s is a string.
-		conv, ok := call.Args[1].(*ast.CallExpr)
-		if !ok {
-			return
-		}
-		if !isByteSliceConversion(pass, conv) {
-			return
-		}
-		if len(conv.Args) != 1 {
-			return
-		}
-		strArg := conv.Args[0]
-		if !isStringType(pass, strArg) {
-			return
-		}
-
-		sText := astutil.NodeText(pass.Fset, strArg)
-		if sText == "" {
-			return
-		}
-
-		pass.Report(analysis.Diagnostic{
-			Pos:            call.Pos(),
-			End:            call.End(),
-			Message:        fmt.Sprintf("append(b, []byte(%s)...) can be simplified to append(b, %s...); the []byte conversion is unnecessary", sText, sText),
-			SuggestedFixes: buildFix(pass, conv, strArg),
-		})
+	nodeFilter := []ast.Node{(*ast.CallExpr)(nil)}
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
+		analyzeAppendByteString(pass, n, generatedFiles, noLintIndex)
 	})
-
-	return nil, nil
 }
 
-// isByteSlice reports whether expr has type []byte.
-func isByteSlice(pass *analysis.Pass, expr ast.Expr) bool {
-	t := pass.TypesInfo.TypeOf(expr)
-	if t == nil {
-		return false
-	}
-	sl, ok := t.Underlying().(*types.Slice)
+// analyzeAppendByteString checks whether a call is an append(b, []byte(s)...)
+// that can be simplified to append(b, s...) and reports a diagnostic if so.
+func analyzeAppendByteString(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex) {
+	call, ok := n.(*ast.CallExpr)
 	if !ok {
-		return false
+		return
 	}
-	elem, ok := sl.Elem().(*types.Basic)
-	return ok && elem.Kind() == types.Byte
-}
 
-// isByteSliceConversion reports whether conv is a []byte/[]uint8 conversion expression.
-func isByteSliceConversion(pass *analysis.Pass, conv *ast.CallExpr) bool {
-	// A type conversion has a type expression as the call function.
-	funTypeInfo, ok := pass.TypesInfo.Types[conv.Fun]
-	if !ok || !funTypeInfo.IsType() {
-		return false
+	// Match append(b, x...) with exactly 2 arguments and an ellipsis.
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "append" {
+		return
 	}
-	return isByteSlice(pass, conv)
-}
+	if len(call.Args) != 2 || !call.Ellipsis.IsValid() {
+		return
+	}
 
-// isStringType reports whether expr has type string.
-func isStringType(pass *analysis.Pass, expr ast.Expr) bool {
-	t := pass.TypesInfo.TypeOf(expr)
-	if t == nil {
-		return false
+	pos := pass.Fset.PositionFor(call.Pos(), false)
+	if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
+		return
 	}
-	basic, ok := t.Underlying().(*types.Basic)
-	return ok && basic.Kind() == types.String
+	if nolint.HasDirectiveForLinter(pos, noLintIndex, "appendbytestring") {
+		return
+	}
+
+	// The first argument must be []byte.
+	if !astutil.IsByteSlice(pass, call.Args[0]) {
+		return
+	}
+
+	// The second argument must be a []byte(s) conversion where s is a string.
+	conv, ok := call.Args[1].(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	if !astutil.IsByteSliceConversion(pass, conv) {
+		return
+	}
+	if len(conv.Args) != 1 {
+		return
+	}
+	strArg := conv.Args[0]
+	if !astutil.IsStringType(pass, strArg) {
+		return
+	}
+
+	sText := astutil.NodeText(pass.Fset, strArg)
+	if sText == "" {
+		return
+	}
+	if !coverage.ShouldApply(pass, call.Pos(), *hotThreshold) {
+		return
+	}
+
+	pass.Report(analysis.Diagnostic{
+		Pos:            call.Pos(),
+		End:            call.End(),
+		Message:        fmt.Sprintf("append(b, []byte(%s)...) can be simplified to append(b, %s...); the []byte conversion is unnecessary", sText, sText),
+		SuggestedFixes: buildFix(pass, conv, strArg),
+	})
 }
 
 // buildFix returns a SuggestedFix rewriting append(b, []byte(s)...) to append(b, s...).

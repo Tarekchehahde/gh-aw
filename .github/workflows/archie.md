@@ -47,7 +47,12 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    runtime: gvisor
+evals:
+  - id: mermaid_diagram_generated
+    question: Did the agent generate a Mermaid diagram visualizing issue and pull request relationships?
+  - id: diagram_posted
+    question: Was the diagram posted as a response to the /archie command in the issue or PR?
 ---
 
 # Archie - Mermaid Diagram Generator

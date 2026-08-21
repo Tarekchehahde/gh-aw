@@ -272,6 +272,21 @@ func TestApplySafeOutputEnvToMap(t *testing.T) {
 				"GH_AW_ASSETS_ALLOWED_EXTS": "\".png,.jpg,.jpeg\"",
 			},
 		},
+		{
+			name: "safe outputs input env vars forwarded to agent step",
+			workflowData: &WorkflowData{
+				SafeOutputs: &SafeOutputsConfig{},
+				SafeOutputsInputEnvVars: map[string]string{
+					"GH_AW_INPUT_OWNER": "${{ inputs.owner }}",
+					"GH_AW_INPUT_REPO":  "${{ inputs.repo }}",
+				},
+			},
+			expected: map[string]string{
+				"GH_AW_SAFE_OUTPUTS": "${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}",
+				"GH_AW_INPUT_OWNER":  "${{ inputs.owner }}",
+				"GH_AW_INPUT_REPO":   "${{ inputs.repo }}",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -563,6 +578,7 @@ func TestBuildEngineMetadataEnvVars(t *testing.T) {
 	tests := []struct {
 		name         string
 		engineConfig *EngineConfig
+		model        string
 		expected     []string
 	}{
 		{
@@ -585,8 +601,8 @@ func TestBuildEngineMetadataEnvVars(t *testing.T) {
 			engineConfig: &EngineConfig{
 				ID:      "copilot",
 				Version: "1.0.0",
-				Model:   "gpt-5",
 			},
+			model: "gpt-5",
 			expected: []string{
 				"          GH_AW_ENGINE_ID: \"copilot\"\n",
 				"          GH_AW_ENGINE_VERSION: \"1.0.0\"\n",
@@ -608,9 +624,9 @@ func TestBuildEngineMetadataEnvVars(t *testing.T) {
 		{
 			name: "engine with model and no version",
 			engineConfig: &EngineConfig{
-				ID:    "copilot",
-				Model: "claude-sonnet-4",
+				ID: "copilot",
 			},
+			model: "claude-sonnet-4",
 			expected: []string{
 				"          GH_AW_ENGINE_ID: \"copilot\"\n",
 				"          GH_AW_ENGINE_MODEL: \"claude-sonnet-4\"\n",
@@ -627,7 +643,7 @@ func TestBuildEngineMetadataEnvVars(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildEngineMetadataEnvVars(tt.engineConfig)
+			result := buildEngineMetadataEnvVars(tt.engineConfig, tt.model)
 
 			if len(result) != len(tt.expected) {
 				t.Errorf("Expected %d env vars, got %d", len(tt.expected), len(result))
@@ -701,7 +717,10 @@ func TestBuildAgentOutputDownloadSteps(t *testing.T) {
 		"id: download-agent-output",
 		"continue-on-error: true",
 		"uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-		"name: agent",
+		// Both the unified agent artifact and the small fallback copy are matched so the
+		// agent output survives a failed upload of the larger agent artifact.
+		`pattern: "{agent,agent-output-fallback}"`,
+		"merge-multiple: true",
 		"path: /tmp/gh-aw/",
 		"- name: Setup agent output environment variable",
 		"id: setup-agent-output-env",
@@ -709,7 +728,9 @@ func TestBuildAgentOutputDownloadSteps(t *testing.T) {
 		"mkdir -p /tmp/gh-aw/",
 		`find "/tmp/gh-aw/" -type f -print`,
 		// Hardcoded path is correct because GetPreBundleSteps ensures LCA is /tmp/gh-aw/
+		`if [ -f "/tmp/gh-aw/agent_output.json" ]; then`,
 		`echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"`,
+		"fi",
 	}
 
 	for _, expected := range expectedComponents {

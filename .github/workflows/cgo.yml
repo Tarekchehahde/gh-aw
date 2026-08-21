@@ -32,7 +32,6 @@ on:
     - 'actions/setup/sh/**'
     - '.github/workflows/ci.yml'
     - '.github/workflows/cgo.yml'
-    - '.github/workflows/**/*.md'
     - '.github/aw/releases.json'
     - '.github/aw/releases.schema.json'
     - '.github/aw/compat.json'
@@ -40,17 +39,139 @@ on:
     - 'install-gh-aw.sh'
   workflow_dispatch:
 jobs:
-  test:
+  checkout-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Verify CGO/CJS workflow purity
+      run: bash scripts/check-cgo-cjs-workflow-purity.sh
+    - name: Cache repository checkout
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+
+  verify-integration-build:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     concurrency:
-      group: ci-${{ github.ref }}-test
+      group: ci-${{ github.ref }}-verify-integration-build
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Set up Go
+      id: setup-go
+      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Report Go cache status
+      run: |
+        if [ "${{ steps.setup-go.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Go cache hit" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Go cache miss" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Download dependencies with retry
+      if: steps.setup-go.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        MAX_RETRIES=3
+        RETRY_DELAY=5
+
+        for i in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt $i of $MAX_RETRIES: Downloading Go modules..."
+          # Use -x for verbose output to see what's being downloaded
+          if go mod download -x; then
+            echo "✅ Successfully downloaded Go modules"
+            break
+          else
+            EXIT_CODE=$?
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "❌ Failed to download Go modules after $MAX_RETRIES attempts (exit code: $EXIT_CODE)"
+              echo "This indicates that proxy.golang.org is unreachable or returning errors"
+              echo ""
+              echo "Diagnostic information:"
+              echo "- GOPROXY: $(go env GOPROXY)"
+              echo "- GOSUMDB: $(go env GOSUMDB)"
+              echo "- Network connectivity: checking proxy.golang.org..."
+              if curl -s -I --connect-timeout 5 https://proxy.golang.org/golang.org/@v/list >/dev/null 2>&1; then
+                echo "  ✓ proxy.golang.org is reachable"
+              else
+                echo "  ✗ proxy.golang.org is NOT reachable"
+              fi
+              exit 1
+            fi
+            echo "⚠️ Download failed, retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          fi
+        done
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Verify integration build
+      run: |
+        # Compile and link all integration-tagged test binaries without
+        # executing package test binaries or TestMain side effects.
+        # Regular unit tests use -tags '!integration', so build errors in
+        # integration-tagged files (e.g. unused imports) would otherwise
+        # go undetected until the fuzz job runs on main.
+        go test -run='^$' -exec=true -tags=integration ./...
+
+  test:
+    name: Unit tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+    - checkout-cache
+    - verify-integration-build
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - name: A-C
+          pattern: ^Test[A-C]
+          shard: a-c
+        - name: D-L
+          pattern: ^Test[D-L]
+          shard: d-l
+        - name: M-R
+          pattern: ^Test[M-R]
+          shard: m-r
+        - name: S-Z and other
+          pattern: ^Test([S-Z]|[^A-R])
+          shard: s-z
+    concurrency:
+      group: ci-${{ github.ref }}-test-${{ matrix.shard }}
+      cancel-in-progress: true
+    steps:
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -144,16 +265,16 @@ jobs:
       run: |
         set -o pipefail
         # Run tests with JSON output for artifacts, but also show failures
-        go test -v -parallel=8 -timeout=3m -run='^Test' -tags '!integration' -coverprofile=coverage.out -json ./... | tee test-result-unit.json
+        go test -v -parallel=8 -timeout=3m -run='${{ matrix.pattern }}' -tags '!integration' -coverprofile=coverage-${{ matrix.shard }}.out -json ./... | tee test-result-unit-${{ matrix.shard }}.json
 
         # Check if tests failed by looking at JSON output
-        if grep -q '"Action":"fail"' test-result-unit.json; then
+        if grep -q '"Action":"fail"' test-result-unit-${{ matrix.shard }}.json; then
           echo "❌ Tests failed - see output above"
           exit 1
         fi
 
         # Generate coverage HTML report
-        go tool cover -html=coverage.out -o coverage.html
+        go tool cover -html=coverage-${{ matrix.shard }}.out -o coverage-${{ matrix.shard }}.html
 
     - name: Report test failures
       if: failure() && steps.run-unit-tests.outcome == 'failure'
@@ -164,7 +285,7 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
 
         # Run the failure report script
-        if ./scripts/report-test-failures.sh test-result-unit.json | tee /tmp/failure-report.txt; then
+        if ./scripts/report-test-failures.sh test-result-unit-${{ matrix.shard }}.json | tee /tmp/failure-report.txt; then
           echo "No failures detected in JSON output (unexpected - tests failed but no failure records found)" >> $GITHUB_STEP_SUMMARY
         else
           # Script found failures - add to summary
@@ -177,29 +298,34 @@ jobs:
     - name: Upload coverage report
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
       with:
-        name: coverage-report
-        path: coverage.html
+        name: coverage-report-${{ matrix.shard }}
+        path: coverage-${{ matrix.shard }}.html
         retention-days: 7
 
     - name: Upload unit test results
       if: always()    # Upload even if tests fail so canary-go can track coverage
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
       with:
-        name: test-result-cgo-unit
-        path: test-result-unit.json
+        name: test-result-cgo-unit-${{ matrix.shard }}
+        path: test-result-unit-${{ matrix.shard }}.json
         retention-days: 7
 
   canary-go:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs:
+    - checkout-cache
     - test
     if: always() && needs.test.result == 'success'  # Skip coverage check for cancelled/failed test runs
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: List unit tests in codebase
       run: |
@@ -212,7 +338,7 @@ jobs:
       uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16   # v4
       with:
         path: test-results
-        pattern: test-result-cgo-unit
+        pattern: test-result-cgo-unit-*
         merge-multiple: false
 
     - name: List downloaded artifacts
@@ -222,6 +348,16 @@ jobs:
         find test-results -type f -name "*.json" | sort
         echo ""
         echo "Total JSON files: $(find test-results -type f -name \"*.json\" | wc -l)"
+
+    - name: Validate pkg/cli and pkg/console tests executed
+      run: |
+        set -euo pipefail
+        for package in pkg/cli pkg/console; do
+          if ! grep -R -q "\"Action\":\"run\",\"Package\":\"github.com/github/gh-aw/${package}\"" test-results; then
+            echo "Missing unit test execution records for ${package}" >&2
+            exit 1
+          fi
+        done
 
     - name: Extract executed tests from artifacts
       run: |
@@ -245,6 +381,7 @@ jobs:
         retention-days: 7
 
   impacted-go-tests:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -253,10 +390,12 @@ jobs:
       group: ci-${{ github.ref }}-impacted-go-tests
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
       with:
-        fetch-depth: 0
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
@@ -270,6 +409,7 @@ jobs:
       run: make test-impacted-go BASE_REF=origin/main CI_COVERAGE_SOURCE_BRANCH=main
 
   build:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -278,8 +418,12 @@ jobs:
       group: ci-${{ github.ref }}-build
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
     - name: Set up Node.js
       id: setup-node
       uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f   # v6
@@ -357,7 +501,9 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
 
+
   build-wasm:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -366,8 +512,12 @@ jobs:
       group: ci-${{ github.ref }}-build-wasm
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -453,13 +603,18 @@ jobs:
       run: node scripts/test-wasm-golden.mjs
 
   validate-yaml:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Check for ANSI escape sequences in YAML files
       run: |
@@ -906,6 +1061,7 @@ jobs:
   bench:
     # Only run benchmarks on main branch for performance tracking
     if: github.ref == 'refs/heads/main'
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -915,8 +1071,12 @@ jobs:
       group: ci-${{ github.ref }}-bench
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1069,6 +1229,7 @@ jobs:
 
   check-validator-sizes:
     name: Check validator file sizes
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Non-blocking: report violations but don't fail the build until existing files are cleaned up
@@ -1076,8 +1237,12 @@ jobs:
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Check validator file sizes
       id: check
@@ -1100,19 +1265,22 @@ jobs:
         fi
         exit "$EXIT_CODE"
 
-  lint-go:
+  lint-go-format:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       contents: read
     concurrency:
-      group: ci-${{ github.ref }}-lint-go
+      group: ci-${{ github.ref }}-lint-go-format
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
       with:
-        fetch-depth: 0    # Fetch all history for incremental linting
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1146,6 +1314,38 @@ jobs:
           exit 1
         fi
         echo "✅ Go formatting check passed" >> $GITHUB_STEP_SUMMARY
+
+  lint-go-golangci:
+    needs: [checkout-cache]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    concurrency:
+      group: ci-${{ github.ref }}-lint-go-golangci
+      cancel-in-progress: true
+    steps:
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Set up Go
+      id: setup-go
+      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Report Go cache status
+      run: |
+        if [ "${{ steps.setup-go.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Go cache hit" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Go cache miss" >> $GITHUB_STEP_SUMMARY
+        fi
 
       # Install golangci-lint binary (avoiding GPL dependencies)
       # Downloads pre-built binary from GitHub releases instead of using go install
@@ -1197,24 +1397,114 @@ jobs:
           make golint
         fi
 
-      # Error message linting (requires Go only)
-    - name: Lint error messages
-      run: make lint-errors
+  lint-go-custom:
+    needs: [checkout-cache]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    concurrency:
+      group: ci-${{ github.ref }}-lint-go-custom
+      cancel-in-progress: true
+    steps:
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Set up Go
+      id: setup-go
+      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Report Go cache status
+      run: |
+        if [ "${{ steps.setup-go.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Go cache hit" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ Go cache miss" >> $GITHUB_STEP_SUMMARY
+        fi
 
       # Enforce selected production custom analyzers without blocking on unrelated
       # legacy custom analyzer findings in tests or other analyzer families.
       # Note: -test=false intentionally scopes this gate to production code only.
+      # The errormessage analyzer is scoped to changed Go files only, preventing
+      # legacy violations elsewhere in the repo from blocking incremental adoption.
     - name: Run custom linters
-      run: make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -timeafterleak -errortypeassertion -execcommandwithoutcontext -sprintfint -test=false"
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF: origin/${{ github.base_ref }}
+        BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        files=""
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          if git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+            files=$(git diff --name-only "$BASE_REF...HEAD" -- '*.go' | tr '\n' ',' | sed 's/,$//')
+          else
+            echo "Base ref $BASE_REF not found, falling back to all Go files"
+            files=$(git ls-files '*.go' | tr '\n' ',' | sed 's/,$//')
+          fi
+        elif [ "$EVENT_NAME" = "push" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+          if git rev-parse --verify "$BEFORE_SHA^{commit}" >/dev/null 2>&1; then
+            # Push events compare the before and after commit trees directly;
+            # PR events use base...HEAD above to match GitHub's pull request diff.
+            files=$(git diff --name-only "$BEFORE_SHA" HEAD -- '*.go' | tr '\n' ',' | sed 's/,$//')
+          else
+            echo "Before SHA $BEFORE_SHA not found, skipping push diff"
+          fi
+        fi
+
+        errormessage_flags=""
+        if [ -n "$files" ]; then
+          echo "linting files with errormessage: $files"
+          errormessage_flags="-errormessage -errormessage.changed-files=$files"
+        else
+          echo "No changed Go files to lint with errormessage"
+        fi
+
+        make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -logfatallibrary -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -timeafterleak -errortypeassertion -execcommandwithoutcontext -sprintfint -stringsindexcontains -stringscountcontains -bytesbufferstring -ioutildeprecated -mapclearloop -mapdeletecheck -sprintfbool -appendoneelement -timenowsub -stringsjoinone -writebytestring -lenstringsplit -stringreplaceminusone -osgetenvlibrary -ossetenvlibrary -stringsindexhasprefix -contextcancelnotdeferred -ctxbackground -wgdonenotdeferred -goroutinemissingrecover -trimleftright -walkfuncerrshadow -uncheckedflushreturn -bytescomparestring -nilctxpassed -stringbytesroundtrip -fileclosenotdeferred -timesleepnocontext -sprintferrorsnew -globwalkignorederror -appendbytestring -sortslice -deferinloop -regexpdynamicpattern -test=false $errormessage_flags"
 
     - name: Run custom linters (wasm)
-      run: GOOS=js GOARCH=wasm make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -timeafterleak -errortypeassertion -execcommandwithoutcontext -sprintfint -test=false" LINTER_PACKAGES="./pkg/console ./pkg/parser ./pkg/styles ./pkg/tty ./pkg/workflow"
+      run: GOOS=js GOARCH=wasm make golint-custom LINTER_FLAGS="-errstringmatch -panicinlibrarycode -manualmutexunlock -osexitinlibrary -rawloginlib -logfatallibrary -regexpcompileinfunction -fprintlnsprintf -strconvparseignorederror -jsonmarshalignoredeerror -uncheckedtypeassertion -fmterrorfnoverbs -tolowerequalfold -httpnoctx -timeafterleak -errortypeassertion -execcommandwithoutcontext -sprintfint -stringsindexcontains -stringscountcontains -bytesbufferstring -ioutildeprecated -mapclearloop -mapdeletecheck -sprintfbool -appendoneelement -timenowsub -stringsjoinone -writebytestring -lenstringsplit -stringreplaceminusone -osgetenvlibrary -ossetenvlibrary -stringsindexhasprefix -ctxbackground -wgdonenotdeferred -goroutinemissingrecover -trimleftright -walkfuncerrshadow -uncheckedflushreturn -bytescomparestring -nilctxpassed -stringbytesroundtrip -fileclosenotdeferred -timesleepnocontext -sprintferrorsnew -globwalkignorederror -appendbytestring -sortslice -deferinloop -regexpdynamicpattern -test=false" LINTER_PACKAGES="./pkg/console ./pkg/parser ./pkg/styles ./pkg/tty ./pkg/workflow"
 
       # Ensure no action shell scripts invoke python or python3
     - name: Lint action shell scripts
       run: make lint-action-sh
 
+  lint-error-messages:
+    needs: [checkout-cache]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: ci-${{ github.ref }}-lint-error-messages
+      cancel-in-progress: true
+    steps:
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
+
+    - name: Set up Go
+      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
+      with:
+        go-version-file: go.mod
+        cache: true
+
+      # Error message linting (requires Go only)
+    - name: Lint error messages
+      run: make lint-errors
+
   actions-build:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1223,8 +1513,12 @@ jobs:
       group: ci-${{ github.ref }}-actions-build
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1277,6 +1571,7 @@ jobs:
   fuzz:
     # Only run fuzz tests on main branch (10s is insufficient for PRs)
     if: github.ref == 'refs/heads/main'
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -1321,8 +1616,12 @@ jobs:
             FuzzParseInputDefinition:./pkg/workflow/
             FuzzParseInputDefinitions:./pkg/workflow/
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1373,6 +1672,15 @@ jobs:
 
     - name: Verify dependencies
       run: go mod verify
+
+    - name: Verify integration build
+      run: |
+        # Compile and link all integration-tagged test binaries without
+        # executing package test binaries or TestMain side effects.
+        # Fuzz tests such as FuzzSanitizeOutput run with -tags=integration; a build
+        # error in any integration-tagged file causes the entire fuzz run to fail
+        # with a misleading error message.
+        go test -run='^$' -exec=true -tags=integration ./...
 
     - name: Run fuzz tests (${{ matrix.group }})
       run: |
@@ -1435,6 +1743,7 @@ jobs:
         retention-days: 7
 
   security:
+    needs: [checkout-cache, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -1443,8 +1752,12 @@ jobs:
       group: ci-${{ github.ref }}-security
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1494,6 +1807,7 @@ jobs:
   security-scan:
     # Only run security scans on main branch to reduce PR overhead
     if: github.ref == 'refs/heads/main'
+    needs: [checkout-cache, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # Prevent jobs from hanging indefinitely
     permissions:
@@ -1515,55 +1829,26 @@ jobs:
       cancel-in-progress: true
     name: "Security Scan: ${{ matrix.tool.name }}"
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
-
-    - name: Set up Go
-      id: setup-go
-      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c   # v6
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
       with:
-        go-version-file: go.mod
-        cache: true
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
-    - name: Report Go cache status
-      run: |
-        if [ "${{ steps.setup-go.outputs.cache-hit }}" == "true" ]; then
-          echo "✅ Go cache hit" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "⚠️ Go cache miss" >> $GITHUB_STEP_SUMMARY
-        fi
+    - name: Download gh-aw binary
+      uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16   # v4
+      with:
+        name: gh-aw-linux-amd64
 
-    - name: Download dependencies with retry
-      if: steps.setup-go.outputs.cache-hit != 'true'
-      run: |
-        set -e
-        MAX_RETRIES=3
-        RETRY_DELAY=5
-
-        for i in $(seq 1 $MAX_RETRIES); do
-          echo "Attempt $i of $MAX_RETRIES: Downloading Go modules..."
-          if go mod download; then
-            echo "✅ Successfully downloaded Go modules"
-            break
-          else
-            if [ $i -eq $MAX_RETRIES ]; then
-              echo "❌ Failed to download Go modules after $MAX_RETRIES attempts"
-              echo "This may indicate that proxy.golang.org is unreachable"
-              echo "Please check network connectivity or consider vendoring dependencies"
-              exit 1
-            fi
-            echo "⚠️ Download failed, retrying in ${RETRY_DELAY}s..."
-            sleep $RETRY_DELAY
-          fi
-        done
-
-    - name: Build gh-aw
-      run: make build
+    - name: Make gh-aw executable
+      run: chmod +x gh-aw
 
     - name: Run ${{ matrix.tool.name }} security scan on poem workflow
       run: ./gh-aw compile poem-bot ${{ matrix.tool.flag }} --verbose
 
   mcp-server-compile-test:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1572,8 +1857,12 @@ jobs:
       group: ci-${{ github.ref }}-mcp-server-compile-test
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -1735,6 +2024,7 @@ jobs:
         echo "✅ Test completed successfully" >> $GITHUB_STEP_SUMMARY
 
   cross-platform-build:
+    needs: [checkout-cache, build]
     name: Build & Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -2121,6 +2411,7 @@ jobs:
 
   alpine-container-test:
     name: Alpine Container Test
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -2129,8 +2420,12 @@ jobs:
       group: ci-${{ github.ref }}-alpine-container
       cancel-in-progress: true
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Set up Go
       id: setup-go
@@ -2257,13 +2552,18 @@ jobs:
         rm -rf test-workspace
 
   safe-outputs-conformance:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
+    - name: Restore checkout
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: .
+        key: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        fail-on-cache-miss: true
 
     - name: Run Safe Outputs Conformance Checker
       id: conformance
@@ -2308,20 +2608,23 @@ jobs:
         path: conformance-output.txt
         retention-days: 7
 
-  notify-failure:
-    name: Notify on CGO Failure
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: always() && github.ref == 'refs/heads/main'
+  summarize-timing:
+    name: Summarize workflow timing
     needs:
+    - checkout-cache
+    - verify-integration-build
     - test
     - canary-go
+    - impacted-go-tests
     - build
     - build-wasm
     - validate-yaml
     - bench
     - check-validator-sizes
-    - lint-go
+    - lint-go-format
+    - lint-go-golangci
+    - lint-go-custom
+    - lint-error-messages
     - actions-build
     - fuzz
     - security
@@ -2330,188 +2633,67 @@ jobs:
     - cross-platform-build
     - alpine-container-test
     - safe-outputs-conformance
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
-      issues: write
+      actions: write
     steps:
-    - name: Check for job failures and create issue
+    - name: Delete checkout cache
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CACHE_KEY: checkout-cgo-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+      run: |
+        cache_id=$(gh cache list --key "$CACHE_KEY" --ref "$GITHUB_REF" --limit 1 --json id,key --jq '.[] | select(.key == env.CACHE_KEY) | .id')
+        if [ -n "$cache_id" ]; then
+          gh cache delete "$cache_id"
+        fi
+    - name: Summarize job and step durations
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3   # v9
       with:
         script: |
-          const needs = ${{ toJSON(needs) }};
-          const failedJobs = Object.entries(needs)
-            .filter(([, job]) => job.result === 'failure')
-            .map(([name]) => name);
-          const hasFuzzFailure = failedJobs.some(name => name === 'fuzz' || name.startsWith('fuzz-'));
+          const fs = require('fs');
 
-          if (failedJobs.length === 0) {
-            core.info('No jobs failed. Nothing to do.');
-            return;
-          }
+          const formatDuration = (startedAt, completedAt) => {
+            if (!startedAt || !completedAt) return 'n/a';
+            const milliseconds = new Date(completedAt) - new Date(startedAt);
+            if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'n/a';
+            const totalSeconds = Math.round(milliseconds / 1000);
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+            if (minutes > 0) return `${minutes}m ${seconds}s`;
+            return `${seconds}s`;
+          };
 
-          core.info(`Failed jobs: ${failedJobs.join(', ')}`);
-
-          // Check for an existing open CGO failure issue to avoid duplicates
-          const existingIssues = await github.rest.issues.listForRepo({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            labels: 'cgo-failure',
-            state: 'open',
-          });
-
-          if (existingIssues.data.length > 0 && !hasFuzzFailure) {
-            core.info(`Existing CGO failure issue #${existingIssues.data[0].number} is still open. Skipping.`);
-            return;
-          }
-
-          if (hasFuzzFailure) {
-            const existingFuzzIssues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: 'cgo-fuzz-failure',
-              state: 'open',
-            });
-
-            const existingFuzzIssueForRun = existingFuzzIssues.data.find(issue =>
-              issue.title.includes(`Run #${context.runNumber}`),
-            );
-            if (existingFuzzIssueForRun) {
-              core.info(`Fuzz failure issue #${existingFuzzIssueForRun.number} already exists for run #${context.runNumber}. Skipping.`);
-              return;
-            }
-          }
-
-          // Ensure required labels exist, creating them if missing
-          const requiredLabels = [['cookie', 'e4e669'], ['cgo-failure', 'b60205']];
-          if (hasFuzzFailure) {
-            requiredLabels.push(['cgo-fuzz-failure', 'd93f0b']);
-          }
-
-          for (const [label, color] of requiredLabels) {
-            try {
-              await github.rest.issues.getLabel({ owner: context.repo.owner, repo: context.repo.repo, name: label });
-            } catch (e) {
-              if (e.status === 404) {
-                await github.rest.issues.createLabel({ owner: context.repo.owner, repo: context.repo.repo, name: label, color });
-              }
-            }
-          }
-
-          // Fetch all jobs for this run to get direct job links
-          const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
+          const cell = (value) => String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+          const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
             owner: context.repo.owner,
             repo: context.repo.repo,
             run_id: context.runId,
             per_page: 100,
           });
 
-          // Build a map from job name to job URL for failed jobs
-          const jobUrlMap = {};
-          for (const job of jobsResponse.data.jobs) {
-            if (failedJobs.includes(job.name)) {
-              jobUrlMap[job.name] = job.html_url;
+          const rows = [];
+          for (const job of jobs) {
+            if (job.name === 'Summarize workflow timing' || job.name === 'summarize-timing') continue;
+            rows.push(`| [${cell(job.name)}](${job.html_url}) | job | ${cell(job.conclusion || job.status)} | ${formatDuration(job.started_at, job.completed_at)} |`);
+            for (const step of job.steps || []) {
+              rows.push(`| ${cell(`- ${step.name}`)} | step | ${cell(step.conclusion || step.status)} | ${formatDuration(step.started_at, step.completed_at)} |`);
             }
           }
 
-          const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-          const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+          const summary = [
+            '## Workflow timing summary',
+            '',
+            'Step-level timing collected from the GitHub Actions API for this run.',
+            '',
+            '| Name | Type | Result | Duration |',
+            '| --- | --- | --- | --- |',
+            ...rows,
+            '',
+          ].join('\n');
 
-          const parseUTCOffsetMinutes = (rawOffset) => {
-            const offset = typeof rawOffset === 'string' ? rawOffset.trim() : '';
-            const match = offset.match(/^([+-])(\d{2}):(\d{2})$/);
-            if (!match) return Number.NaN;
-            const [, sign, hoursText, minutesText] = match;
-            const hours = Number.parseInt(hoursText, 10);
-            const minutes = Number.parseInt(minutesText, 10);
-            if (hours > 14 || minutes > 59 || (hours === 14 && minutes !== 0)) {
-              return Number.NaN;
-            }
-            const direction = sign === '-' ? -1 : 1;
-            return direction * (hours * 60 + minutes);
-          };
-
-          let repoUTCOffset = '';
-          try {
-            const awConfigFile = await github.rest.repos.getContent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              path: '.github/workflows/aw.json',
-              ref: context.sha,
-            });
-            if (!Array.isArray(awConfigFile.data) && awConfigFile.data.type === 'file' && awConfigFile.data.content) {
-              const awConfigRaw = Buffer.from(awConfigFile.data.content, 'base64').toString('utf8');
-              const awConfig = JSON.parse(awConfigRaw);
-              const rawUTC = typeof awConfig?.utc === 'string' ? awConfig.utc.trim() : '';
-              if (!Number.isNaN(parseUTCOffsetMinutes(rawUTC))) {
-                repoUTCOffset = rawUTC;
-              } else if (rawUTC) {
-                core.warning(`Ignoring invalid utc offset in .github/workflows/aw.json: ${rawUTC}`);
-              }
-            }
-          } catch (error) {
-            core.warning(`Unable to read .github/workflows/aw.json UTC offset: ${error?.message || String(error)}`);
-          }
-
-          // Format expiration line using the gh-aw-expires XML comment format
-          const expiresDate = new Date(expiresAt);
-          const repoOffsetMinutes = parseUTCOffsetMinutes(repoUTCOffset);
-          const hasRepoUTCOffset = !Number.isNaN(repoOffsetMinutes);
-          const displayDate = hasRepoUTCOffset
-            ? new Date(expiresDate.getTime() + repoOffsetMinutes * 60 * 1000)
-            : expiresDate;
-          const humanReadableDate = displayDate.toLocaleString('en-US', {
-            dateStyle: 'medium',
-            timeStyle: 'short',
-            timeZone: 'UTC',
-          });
-          const humanReadableSuffix = hasRepoUTCOffset ? `UTC${repoUTCOffset}` : 'UTC';
-          const expirationLine = `- [x] expires <!-- gh-aw-expires: ${expiresAt} --> on ${humanReadableDate} ${humanReadableSuffix}`;
-
-          const body = [
-            `## CGO Workflow Failure`,
-            ``,
-            `Workflow run [#${context.runNumber}](${runUrl}) on the \`main\` branch completed with failed jobs.`,
-            ``,
-            `| Field | Value |`,
-            `| --- | --- |`,
-            `| Run ID | ${context.runId} |`,
-            `| Commit | ${context.sha} |`,
-            `| Expires | ${expiresAt} |`,
-            ``,
-            `## Failed Jobs`,
-            ``,
-            // Map job names to direct links; fall back to plain text if a job ID wasn't found
-            ...failedJobs.map(name => jobUrlMap[name]
-              ? `- [\`${name}\`](${jobUrlMap[name]})`
-              : `- \`${name}\``),
-            ``,
-            `> This issue expires at ${expiresAt}. Please investigate the failed jobs above and close once resolved.`,
-            `> ${expirationLine}`,
-          ];
-
-          if (hasFuzzFailure) {
-            body.splice(
-              4,
-              0,
-              `Detected failure in the \`fuzz\` job matrix. A dedicated fuzz failure label was applied so this run is tracked.`,
-              ``,
-            );
-          }
-
-          const issueBody = body.join('\n');
-
-          const issueLabels = ['cookie', 'cgo-failure'];
-          if (hasFuzzFailure) {
-            issueLabels.push('cgo-fuzz-failure');
-          }
-
-          const issue = await github.rest.issues.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            title: hasFuzzFailure
-              ? `[CGO][FUZZ] Workflow failure on main - Run #${context.runNumber}`
-              : `[CGO] Workflow failure on main - Run #${context.runNumber}`,
-            body: issueBody,
-            labels: issueLabels,
-          });
-
-          core.info(`Created issue #${issue.data.number}: ${issue.data.html_url}`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);

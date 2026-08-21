@@ -32,7 +32,7 @@ function delay(ms) {
  */
 function validateCreationDate(createdAt) {
   const creationDate = new Date(createdAt);
-  return !isNaN(creationDate.getTime());
+  return !Number.isNaN(creationDate.getTime());
 }
 
 /**
@@ -131,7 +131,7 @@ async function processExpiredEntities(expiredEntities, { entityLabel, maxPerRun 
       core.info(`✓ Successfully processed ${entityLabel.toLowerCase()} #${entity.number}: ${entity.url}`);
     } catch (error) {
       core.error(`✗ Failed to close ${entityLabel.toLowerCase()} #${entity.number}: ${getErrorMessage(error)}`);
-      core.error(`  Error details: ${JSON.stringify(error, null, 2)}`);
+      core.error(`  Error details: ${getErrorMessage(error)}`);
       failed.push({
         number: entity.number,
         url: entity.url,

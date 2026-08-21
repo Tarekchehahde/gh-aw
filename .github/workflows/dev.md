@@ -12,10 +12,9 @@ name: Dev
 description: Daily status report for gh-aw project
 timeout-minutes: 30
 strict: false
+model: gpt-5.4
 engine:
   id: codex
-  model: gpt-5.4
-
 permissions:
   contents: read
   issues: read
@@ -34,9 +33,11 @@ tools:
     mode: gh-proxy
   cli-proxy: true
 
-sandbox:
-  agent:
-    sudo: false
+evals:
+  - id: project_activity_analyzed
+    question: Did the agent analyze recent gh-aw project activity for the daily status report?
+  - id: status_report_created
+    question: Did the agent create a daily status report with relevant project updates?
 ---
 
 <!--

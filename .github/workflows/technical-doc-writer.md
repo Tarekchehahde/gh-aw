@@ -28,8 +28,10 @@ network:
 imports:
   - ../skills/documentation/SKILL.md
   - ../agents/technical-doc-writer.agent.md
+  - shared/ai-coding-dictionary.md
 
   - shared/otlp.md
+  - shared/reporting.md
 safe-outputs:
   add-comment:
     max: 1
@@ -49,7 +51,7 @@ safe-outputs:
 
 steps:
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: '24'
       cache: 'npm'
@@ -79,6 +81,11 @@ tools:
 
 timeout-minutes: 10
 
+evals:
+  - id: topic_reviewed
+    question: Did the agent review and improve documentation for the specified topic input?
+  - id: pr_or_comment_created
+    question: Was a pull request or comment created with documentation improvements for the requested topic?
 
 ---
 
@@ -123,6 +130,7 @@ When reviewing documentation for the specified topic in the **docs/** folder:
 3. **Make improvements** to the documentation as needed:
    - Fix clarity and conciseness issues
    - Improve tone and voice consistency with GitHub Docs
+   - Normalize AI-coding terminology using the shared AI Coding Dictionary reference
    - Enhance code block formatting and examples
    - Improve structure and organization
    - Add missing prerequisites or setup steps

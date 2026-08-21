@@ -8,6 +8,7 @@ on:
       - 'actions/setup/md/**'
       - 'pkg/cli/data/models.json'
       - 'scripts/**/*.js'
+      - 'scripts/check-cgo-cjs-workflow-purity.sh'
       - 'Makefile'
       - '.github/workflows/ci.yml'
       - '.github/workflows/cjs.yml'
@@ -18,13 +19,34 @@ on:
       - 'actions/setup/md/**'
       - 'pkg/cli/data/models.json'
       - 'scripts/**/*.js'
+      - 'scripts/check-cgo-cjs-workflow-purity.sh'
       - 'Makefile'
       - '.github/workflows/ci.yml'
       - '.github/workflows/cjs.yml'
   workflow_dispatch:
 
 jobs:
+  checkout-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify CGO/CJS workflow purity
+        run: bash scripts/check-cgo-cjs-workflow-purity.sh
+      - name: Cache repository checkout
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+
   js-typecheck:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -33,8 +55,12 @@ jobs:
       group: ci-${{ github.ref }}-js-typecheck
       cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          fail-on-cache-miss: true
       - name: Set up Node.js
         id: setup-node
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
@@ -60,6 +86,7 @@ jobs:
 
   js-tests:
     name: JS Tests (shard ${{ matrix.shard }}/4)
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -71,8 +98,12 @@ jobs:
       group: ci-${{ github.ref }}-js-tests-${{ matrix.shard }}
       cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          fail-on-cache-miss: true
       - name: Set up Node.js
         id: setup-node
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
@@ -98,6 +129,7 @@ jobs:
         run: cd actions/setup/js && npm run test:js -- --no-file-parallelism --shard=${{ matrix.shard }}/4
 
   impacted-js-tests:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -106,10 +138,12 @@ jobs:
       group: ci-${{ github.ref }}-impacted-js-tests
       cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          fetch-depth: 0
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          fail-on-cache-miss: true
       - name: Set up Node.js
         id: setup-node
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
@@ -121,6 +155,7 @@ jobs:
         run: make test-impacted-js BASE_REF=origin/main
 
   lint-js:
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -129,8 +164,12 @@ jobs:
       group: ci-${{ github.ref }}-lint-js
       cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          fail-on-cache-miss: true
 
       - name: Set up Node.js
         id: setup-node
@@ -162,17 +201,22 @@ jobs:
 
   artifact-integration:
     name: Artifact API Integration
+    needs: [checkout-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write
+      actions: read
     concurrency:
       group: ci-${{ github.ref }}-artifact-integration
       cancel-in-progress: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore checkout
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .
+          key: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+          fail-on-cache-miss: true
       - name: Set up Node.js
         id: setup-node
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
@@ -193,3 +237,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cd actions/setup/js && npm run test:js-integration-artifact
+
+  cleanup-cache:
+    name: Cleanup checkout cache
+    needs:
+      - checkout-cache
+      - js-typecheck
+      - js-tests
+      - impacted-js-tests
+      - lint-js
+      - artifact-integration
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete checkout cache
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CACHE_KEY: checkout-cjs-${{ github.head_ref || github.ref_name }}-${{ github.sha }}
+        run: |
+          cache_id=$(gh cache list --key "$CACHE_KEY" --ref "$GITHUB_REF" --limit 1 --json id,key --jq '.[] | select(.key == env.CACHE_KEY) | .id')
+          if [ -n "$cache_id" ]; then
+            gh cache delete "$cache_id"
+          fi

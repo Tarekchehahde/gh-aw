@@ -38,7 +38,7 @@ async function appendRoutingSummary(existingCommands, selectedCommand) {
     }
     await summary.write({ overwrite: false });
   } catch (error) {
-    core.warning(`Failed to write centralized routing details to step summary: ${String(error)}`);
+    core.warning(`Failed to write centralized routing details to step summary: ${getErrorMessage(error)}`);
   }
 }
 
@@ -103,7 +103,7 @@ async function resolveIssueBackedPRHeadRef() {
     }
     return normalizeDispatchRef(headRef);
   } catch (error) {
-    core.warning(`Failed to resolve PR head ref for #${pullNumber}: ${String(error)}`);
+    core.warning(`Failed to resolve PR head ref for #${pullNumber}: ${getErrorMessage(error)}`);
     return "";
   }
 }
@@ -132,25 +132,43 @@ async function resolveDispatchRef() {
   return normalizeDispatchRef(defaultBranch);
 }
 
+/** @typedef {"+1" | "-1" | "confused" | "eyes" | "heart" | "hooray" | "laugh" | "rocket"} ReactionName */
+
+/**
+ * @param {string} value
+ * @returns {value is ReactionName}
+ */
+function isReactionName(value) {
+  return Object.hasOwn(REACTION_MAP, value);
+}
+
+/**
+ * @param {unknown} reaction
+ * @returns {ReactionName | ""}
+ */
 function normalizeReaction(reaction) {
   if (typeof reaction !== "string") {
     return "";
   }
   const trimmed = reaction.trim();
-  if (!trimmed || trimmed === "none" || !Object.hasOwn(REACTION_MAP, trimmed)) {
+  if (!trimmed || trimmed === "none") {
     return "";
   }
-  return trimmed;
+  return isReactionName(trimmed) ? trimmed : "";
 }
 
 function maintainsStatusComment(route) {
   return route?.status_comment === true;
 }
 
+function routeEmoji(route) {
+  return typeof route?.emoji === "string" ? route.emoji : "";
+}
+
 /**
  * Returns the first valid non-"none" ai_reaction configured on matching routes.
  * @param {Array<{ai_reaction?: unknown}>} routes
- * @returns {string}
+ * @returns {ReactionName | ""}
  */
 function resolveImmediateReaction(routes) {
   for (const route of routes) {
@@ -177,7 +195,10 @@ async function addImmediateReaction(reaction) {
           core.warning("Skipping immediate reaction: issue number was not found in payload.");
           return;
         }
-        await github.request(`POST /repos/${owner}/${repo}/issues/${issueNumber}/reactions`, {
+        await github.request("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
+          owner,
+          repo,
+          issue_number: issueNumber,
           content: normalized,
           headers: { Accept: "application/vnd.github+json" },
         });
@@ -189,7 +210,10 @@ async function addImmediateReaction(reaction) {
           core.warning("Skipping immediate reaction: comment id was not found in payload.");
           return;
         }
-        await github.request(`POST /repos/${owner}/${repo}/issues/comments/${commentId}/reactions`, {
+        await github.request("POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", {
+          owner,
+          repo,
+          comment_id: commentId,
           content: normalized,
           headers: { Accept: "application/vnd.github+json" },
         });
@@ -201,7 +225,10 @@ async function addImmediateReaction(reaction) {
           core.warning("Skipping immediate reaction: pull request number was not found in payload.");
           return;
         }
-        await github.request(`POST /repos/${owner}/${repo}/issues/${prNumber}/reactions`, {
+        await github.request("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
+          owner,
+          repo,
+          issue_number: prNumber,
           content: normalized,
           headers: { Accept: "application/vnd.github+json" },
         });
@@ -213,7 +240,10 @@ async function addImmediateReaction(reaction) {
           core.warning("Skipping immediate reaction: review comment id was not found in payload.");
           return;
         }
-        await github.request(`POST /repos/${owner}/${repo}/pulls/comments/${reviewCommentId}/reactions`, {
+        await github.request("POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", {
+          owner,
+          repo,
+          comment_id: reviewCommentId,
           content: normalized,
           headers: { Accept: "application/vnd.github+json" },
         });
@@ -272,15 +302,16 @@ async function addImmediateReaction(reaction) {
         return;
     }
   } catch (error) {
-    core.warning(`Immediate reaction '${normalized}' failed: ${String(error)}`);
+    core.warning(`Immediate reaction '${normalized}' failed: ${getErrorMessage(error)}`);
   }
 }
 
-async function addImmediateStatusComment() {
+async function addImmediateStatusComment(workflowEmoji) {
   try {
     const comment = await createOrReuseStatusComment({
       ...context,
       nonFatalStatusCommentErrors: true,
+      workflowEmoji,
     });
     if (!comment?.id) {
       return null;
@@ -291,7 +322,7 @@ async function addImmediateStatusComment() {
       ...(comment.repo?.owner && comment.repo?.repo ? { status_comment_repo: `${comment.repo.owner}/${comment.repo.repo}` } : {}),
     };
   } catch (error) {
-    core.warning(`Immediate status comment failed: ${String(error)}`);
+    core.warning(`Immediate status comment failed: ${getErrorMessage(error)}`);
     return null;
   }
 }
@@ -372,7 +403,7 @@ async function dispatchWorkflow(workflowId, ref, inputs) {
       core.info(`Skipping workflow '${workflowId}' because it is disabled.`);
       return { dispatched: false };
     }
-    throw new Error(`Failed to dispatch workflow '${workflowId}' on ref '${ref}': ${String(error)}`);
+    throw new Error(`Failed to dispatch workflow '${workflowId}' on ref '${ref}': ${getErrorMessage(error)}`, { cause: error });
   }
 }
 
@@ -382,8 +413,9 @@ async function dispatchWorkflow(workflowId, ref, inputs) {
  * @param {string} eventName
  * @param {string} workflowId
  * @param {string|undefined} runUrl
+ * @param {string|undefined} workflowEmoji
  */
-async function updateStatusCommentWithDispatch(statusCommentContext, eventName, workflowId, runUrl) {
+async function updateStatusCommentWithDispatch(statusCommentContext, eventName, workflowId, runUrl, workflowEmoji) {
   if (!statusCommentContext?.status_comment_id) {
     return;
   }
@@ -406,9 +438,10 @@ async function updateStatusCommentWithDispatch(statusCommentContext, eventName, 
         },
       },
       nonFatalStatusCommentErrors: true,
+      workflowEmoji,
     });
   } catch (error) {
-    core.warning(`Failed to update immediate status comment with dispatched run details: ${String(error)}`);
+    core.warning(`Failed to update immediate status comment with dispatched run details: ${getErrorMessage(error)}`);
   }
 }
 
@@ -451,7 +484,7 @@ function parseHelpCommandsMetadata() {
       })
       .sort((left, right) => left.command.localeCompare(right.command));
   } catch (error) {
-    core.warning(`Failed to parse GH_AW_HELP_COMMANDS metadata: ${String(error)}`);
+    core.warning(`Failed to parse GH_AW_HELP_COMMANDS metadata: ${getErrorMessage(error)}`);
     return [];
   }
 }
@@ -574,7 +607,7 @@ async function postBuiltinHelpComment(commentBody) {
     core.warning(`Unable to post builtin /help response for event '${context.eventName}'.`);
     return false;
   } catch (error) {
-    core.warning(`Failed to post builtin /help comment: ${String(error)}`);
+    core.warning(`Failed to post builtin /help comment: ${getErrorMessage(error)}`);
     return false;
   }
 }
@@ -606,13 +639,15 @@ function isDisabledWorkflowDispatchError(error) {
 }
 
 /**
- * @param {Record<string, Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, status_comment?: unknown}>>} slashRouteMap
+ * @param {Record<string, Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, emoji?: unknown, status_comment?: unknown}>>} slashRouteMap
  * @param {string} actualCommand
- * @returns {Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, status_comment?: unknown}>}
+ * @returns {Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, emoji?: unknown, status_comment?: unknown}>}
  */
 function resolveMatchingSlashRoutes(slashRouteMap, actualCommand) {
-  /** @type {Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, status_comment?: unknown}>} */
-  const matchedRoutes = [];
+  /** @type {Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, emoji?: unknown, status_comment?: unknown}>} */
+  const specificRoutes = [];
+  /** @type {Array<{workflow?: unknown, events?: unknown, ai_reaction?: unknown, emoji?: unknown, status_comment?: unknown}>} */
+  const catchAllRoutes = [];
   const seen = new Set();
 
   for (const [configuredCommand, configuredRoutes] of Object.entries(slashRouteMap)) {
@@ -620,19 +655,28 @@ function resolveMatchingSlashRoutes(slashRouteMap, actualCommand) {
       continue;
     }
 
+    // Catch-all ("*") routes are only used as a fallback when no specific
+    // routes match.  Keeping them separate ensures that a command like
+    // /smoke-opencode dispatches only smoke-opencode and not skillet.
+    const isCatchAll = configuredCommand === "*";
+
     for (const route of configuredRoutes) {
       // Keep the de-duplication key explicit so routes that differ only by
       // status-comment behavior remain distinct dispatch targets.
-      const key = JSON.stringify([route?.workflow ?? "", route?.ai_reaction ?? "", route?.status_comment === true, Array.isArray(route?.events) ? route.events : []]);
+      const key = JSON.stringify([route?.workflow ?? "", route?.ai_reaction ?? "", route?.emoji ?? "", route?.status_comment === true, Array.isArray(route?.events) ? route.events : []]);
       if (seen.has(key)) {
         continue;
       }
       seen.add(key);
-      matchedRoutes.push(route);
+      if (isCatchAll) {
+        catchAllRoutes.push(route);
+      } else {
+        specificRoutes.push(route);
+      }
     }
   }
 
-  return matchedRoutes;
+  return specificRoutes.length > 0 ? specificRoutes : catchAllRoutes;
 }
 
 async function main() {
@@ -684,6 +728,12 @@ async function main() {
       core.info(`Adding immediate '${immediateReaction}' reaction for label '${labelName}'.`);
       await addImmediateReaction(immediateReaction);
     }
+    /** @type {any} */
+    let statusCommentContext = null;
+    if (routes.some(maintainsStatusComment)) {
+      core.info(`Adding immediate status comment for label '${labelName}'.`);
+      statusCommentContext = await addImmediateStatusComment(firstNonEmptyString(routes.filter(maintainsStatusComment).map(routeEmoji)));
+    }
     for (const route of routes) {
       const workflowID = toWorkflowDispatchID(route);
       if (!workflowID) {
@@ -695,6 +745,7 @@ async function main() {
         ...buildAwContext(),
         command_name: "",
         ...(routeReaction ? { desired_ai_reaction: routeReaction } : {}),
+        ...(maintainsStatusComment(route) && statusCommentContext ? statusCommentContext : {}),
       };
       core.info(`Dispatching workflow '${workflowID}' for label '${labelName}'.`);
       const dispatched = await dispatchWorkflow(workflowID, ref, {
@@ -702,6 +753,9 @@ async function main() {
       });
       if (dispatched.dispatched) {
         core.info(`Dispatched '${workflowID}' for label '${labelName}'`);
+        if (maintainsStatusComment(route) && statusCommentContext) {
+          await updateStatusCommentWithDispatch(statusCommentContext, identifier, workflowID, dispatched.run_url, routeEmoji(route));
+        }
       }
     }
     core.info(`Completed decentralized label routing for '${labelName}'.`);
@@ -743,10 +797,11 @@ async function main() {
     core.info(`Adding immediate '${immediateReaction}' reaction for '/${commandName}'.`);
     await addImmediateReaction(immediateReaction);
   }
+  /** @type {any} */
   let statusCommentContext = null;
   if (routes.some(maintainsStatusComment)) {
     core.info(`Adding immediate status comment for '/${commandName}'.`);
-    statusCommentContext = await addImmediateStatusComment();
+    statusCommentContext = await addImmediateStatusComment(firstNonEmptyString(routes.filter(maintainsStatusComment).map(routeEmoji)));
   }
 
   core.info(`Dispatch ref resolved to '${ref}'.`);
@@ -770,7 +825,7 @@ async function main() {
     if (dispatched.dispatched) {
       core.info(`Dispatched '${workflowID}' for '/${commandName}'`);
       if (maintainsStatusComment(route) && statusCommentContext) {
-        await updateStatusCommentWithDispatch(statusCommentContext, identifier, workflowID, dispatched.run_url);
+        await updateStatusCommentWithDispatch(statusCommentContext, identifier, workflowID, dispatched.run_url, routeEmoji(route));
       }
     }
   }

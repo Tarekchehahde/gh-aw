@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,4 +90,152 @@ func TestResolveLatestRelease_MixedPrereleaseAndStable(t *testing.T) {
 	result, err := resolveLatestReleaseWithDeps(context.Background(), deps, "owner/repo", "v1.1.0", false, false, 0)
 	require.NoError(t, err, "should not error when stable v1.x releases exist")
 	assert.Equal(t, "v1.3.0", result, "should select latest stable v1.x release, skipping prereleases")
+}
+
+// TestResolveLatestRelease_CooldownFallback verifies that when the newest upgrade
+// candidate is within the cooldown window the resolver falls back to the next
+// older release that has already passed the cooldown period.
+func TestResolveLatestRelease_CooldownFallback(t *testing.T) {
+	t.Parallel()
+
+	deps := mockWorkflowUpdateDeps(func(_ context.Context, _ string) ([]byte, error) {
+		// v1.3.0 is the newest; v1.2.0 is one step older and has cooled down.
+		return []byte("v1.3.0\nv1.2.0\nv1.0.0"), nil
+	})
+	deps.checkCoolDown = func(_ context.Context, repo, tag string, cd time.Duration) coolDownCheckResult {
+		switch tag {
+		case "v1.3.0":
+			// Too new: published 2 days ago.
+			return checkReleaseCoolDownWithDate(repo, tag, time.Now().Add(-2*24*time.Hour), cd)
+		case "v1.2.0":
+			// Cooled down: published 10 days ago.
+			return checkReleaseCoolDownWithDate(repo, tag, time.Now().Add(-10*24*time.Hour), cd)
+		default:
+			return coolDownCheckResult{}
+		}
+	}
+
+	result, err := resolveLatestReleaseWithDeps(context.Background(), deps, "owner/repo", "v1.0.0", false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.0", result, "should fall back to v1.2.0 when v1.3.0 is in cooldown")
+}
+
+// TestResolveLatestRelease_CooldownAllInWindow returns currentRef when every
+// upgrade candidate is still within the cooldown window.
+func TestResolveLatestRelease_CooldownAllInWindow(t *testing.T) {
+	t.Parallel()
+
+	deps := mockWorkflowUpdateDeps(func(_ context.Context, _ string) ([]byte, error) {
+		return []byte("v1.2.0\nv1.1.0\nv1.0.0"), nil
+	})
+	// All upgrade candidates are too new.
+	deps.checkCoolDown = func(_ context.Context, repo, tag string, cd time.Duration) coolDownCheckResult {
+		return checkReleaseCoolDownWithDate(repo, tag, time.Now().Add(-1*24*time.Hour), cd)
+	}
+
+	result, err := resolveLatestReleaseWithDeps(context.Background(), deps, "owner/repo", "v1.0.0", false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "v1.0.0", result, "should return currentRef when all upgrade candidates are in cooldown")
+}
+
+func TestResolveLatestRef_BranchCommitCooldownReturnsCurrentBranch(t *testing.T) {
+	t.Parallel()
+
+	deps := defaultWorkflowUpdateDeps()
+	deps.getLatestBranchCommit = func(_ context.Context, repo, branch string) (latestBranchCommitInfo, error) {
+		require.Equal(t, "owner/repo", repo)
+		require.Equal(t, "main", branch)
+		return latestBranchCommitInfo{
+			SHA:         "abc123def456abc123def456abc123def456abc1",
+			CommittedAt: time.Now().Add(-2 * 24 * time.Hour),
+		}, nil
+	}
+
+	result, err := resolveLatestRefWithDeps(context.Background(), deps, "owner/repo", "main", false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "main", result.Ref, "branch update should be skipped while latest commit is in cooldown")
+	assert.True(t, result.CoolDownBlocked, "branch update should report cooldown block")
+}
+
+func TestResolveLatestRef_CommitCooldownReturnsCurrentSHA(t *testing.T) {
+	t.Parallel()
+
+	deps := defaultWorkflowUpdateDeps()
+	deps.getRepoDefaultBranch = func(_ context.Context, repo string) (string, error) {
+		require.Equal(t, "owner/repo", repo)
+		return "main", nil
+	}
+	deps.getLatestBranchCommit = func(_ context.Context, repo, branch string) (latestBranchCommitInfo, error) {
+		require.Equal(t, "owner/repo", repo)
+		require.Equal(t, "main", branch)
+		return latestBranchCommitInfo{
+			SHA:         "abc123def456abc123def456abc123def456abc1",
+			CommittedAt: time.Now().Add(-1 * 24 * time.Hour),
+		}, nil
+	}
+
+	currentSHA := "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	result, err := resolveLatestRefWithDeps(context.Background(), deps, "owner/repo", currentSHA, false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, currentSHA, result.Ref, "commit-pinned update should be skipped while latest default-branch commit is in cooldown")
+	assert.True(t, result.CoolDownBlocked, "commit-pinned update should report cooldown block")
+}
+
+func TestResolveLatestRef_ExemptRepoBypassesBranchCommitCooldown(t *testing.T) {
+	t.Parallel()
+
+	deps := defaultWorkflowUpdateDeps()
+	deps.getLatestBranchCommit = func(_ context.Context, repo, branch string) (latestBranchCommitInfo, error) {
+		require.Equal(t, "actions/checkout", repo)
+		require.Equal(t, "main", branch)
+		return latestBranchCommitInfo{
+			SHA:         "abc123def456abc123def456abc123def456abc1",
+			CommittedAt: time.Now().Add(-1 * time.Hour),
+		}, nil
+	}
+
+	result, err := resolveLatestRefWithDeps(context.Background(), deps, "actions/checkout", "main", false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "abc123def456abc123def456abc123def456abc1", result.Ref)
+	assert.False(t, result.CoolDownBlocked)
+}
+
+func TestResolveLatestRef_ExemptRepoBypassesDefaultBranchCommitCooldown(t *testing.T) {
+	t.Parallel()
+
+	deps := defaultWorkflowUpdateDeps()
+	deps.getRepoDefaultBranch = func(_ context.Context, repo string) (string, error) {
+		require.Equal(t, "github/codeql-action", repo)
+		return "main", nil
+	}
+	deps.getLatestBranchCommit = func(_ context.Context, repo, branch string) (latestBranchCommitInfo, error) {
+		require.Equal(t, "github/codeql-action", repo)
+		require.Equal(t, "main", branch)
+		return latestBranchCommitInfo{
+			SHA:         "abc123def456abc123def456abc123def456abc1",
+			CommittedAt: time.Now().Add(-1 * time.Hour),
+		}, nil
+	}
+
+	currentSHA := "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	result, err := resolveLatestRefWithDeps(context.Background(), deps, "github/codeql-action", currentSHA, false, false, 7*24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, "abc123def456abc123def456abc123def456abc1", result.Ref)
+	assert.False(t, result.CoolDownBlocked)
+}
+
+func TestParseLatestBranchCommitInfo_MissingCommitterDateIsAllowed(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+	  "sha":"abc123def456abc123def456abc123def456abc1",
+	  "commit":{
+	    "committer":{"date":""},
+	    "author":{"date":"2026-07-20T10:00:00Z"}
+	  }
+	}`)
+	info, err := parseLatestBranchCommitInfo("main", data)
+	require.NoError(t, err)
+	assert.Equal(t, "abc123def456abc123def456abc123def456abc1", info.SHA)
+	assert.True(t, info.CommittedAt.IsZero())
 }

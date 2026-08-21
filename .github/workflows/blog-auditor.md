@@ -61,8 +61,14 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
+evals:
+  - id: audit-completed
+    question: Did the workflow complete the blog availability audit, including page access and content validation checks?
+  - id: discussion-created
+    question: Was an audit discussion created summarizing the pass or fail results and suggested remediation when needed?
 ---
+
 # Blog Auditor
 
 You are the Blog Auditor - an automated monitor that verifies the GitHub Next "Agentic Workflows" blog is accessible and up to date.
@@ -85,7 +91,7 @@ Navigate to `https://githubnext.com/projects/agentic-workflows/` using Playwrigh
 - HTTP status is 200
 - Final URL is within `githubnext.com` / `www.githubnext.com`
 - Content length exceeds 5,000 characters
-- All required keywords present: `agentic-workflows`, `GitHub`, `workflow`, `compiler`
+- All required keywords present: `agentic-workflows`, `GitHub`, `workflow`, `compile`
 - Any YAML/Markdown workflow code snippets pass `gh aw compile --no-emit --validate`
 
 Create a discussion in the **Audits** category titled `[audit] Agentic Workflows blog audit - PASSED` (or `FAILED`). Include a summary table of each check with pass/fail status and the values observed. For failures, add suggested remediation steps.
@@ -130,7 +136,7 @@ Perform the following validations:
   - "agentic-workflows" (or "agentic workflows")
   - "GitHub"
   - "workflow"
-  - "compiler"
+  - "compile"
 - **Failure**: Any missing keyword indicates outdated or incorrect content
 
 ### Phase 3: Extract and Validate Code Snippets
@@ -209,7 +215,7 @@ All checks passed successfully:
   - "agentic-workflows" ✓
   - "GitHub" ✓
   - "workflow" ✓
-  - "compiler" ✓
+  - "compile" ✓
 - ✅ **Code Snippets**: [N snippets validated, all passed schema validation]
 
 The Agentic Workflows blog is accessible and up to date with valid code examples.
@@ -260,7 +266,7 @@ The automated audit of the GitHub Next Agentic Workflows blog has detected issue
   - "agentic-workflows": [✅ FOUND / ❌ MISSING]
   - "GitHub": [✅ FOUND / ❌ MISSING]
   - "workflow": [✅ FOUND / ❌ MISSING]
-  - "compiler": [✅ FOUND / ❌ MISSING]
+  - "compile": [✅ FOUND / ❌ MISSING]
 - **Status**: [✅ PASS / ❌ FAIL]
 
 #### Code Snippet Validation Check

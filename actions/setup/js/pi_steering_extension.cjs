@@ -4,8 +4,7 @@
  * Pi Steering Extension for gh-aw
  *
  * Monitors elapsed time and injects steering messages into a Pi agent session
- * when remaining time falls below configured thresholds. Implements the
- * steering extension described in the aw-harness specification §8.3.
+ * when remaining time falls below configured thresholds.
  *
  * This extension is automatically added to every Pi agent invocation by the
  * gh-aw compiler. No workflow frontmatter configuration is required.
@@ -92,4 +91,6 @@ function piSteeringExtension(pi) {
 }
 
 module.exports = piSteeringExtension;
-module.exports.loadSteeringConfig = loadSteeringConfig;
+/** @type {any} */
+const _steeringExports = module.exports;
+_steeringExports.loadSteeringConfig = loadSteeringConfig;

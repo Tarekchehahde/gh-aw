@@ -27,6 +27,7 @@ type slashCommandRoute struct {
 	Workflow      string   `json:"workflow"`
 	Events        []string `json:"events"`
 	AIReaction    string   `json:"ai_reaction,omitempty"`
+	Emoji         string   `json:"emoji,omitempty"`
 	StatusComment bool     `json:"status_comment,omitempty"`
 }
 
@@ -68,7 +69,14 @@ func GenerateCentralSlashCommandWorkflow(ctx context.Context, workflowDataList [
 	}
 
 	actionMode := DetectActionMode(GetVersion())
-	setupActionRef := ResolveSetupActionReference(ctx, actionMode, GetVersion(), "", nil)
+	var resolver SHAResolver
+	for _, workflowData := range workflowDataList {
+		if workflowData != nil && workflowData.ActionResolver != nil {
+			resolver = workflowData.ActionResolver
+			break
+		}
+	}
+	setupActionRef := ResolveSetupActionReference(ctx, actionMode, GetVersion(), "", resolver)
 
 	helpCommands := buildHelpCommandEntries(workflowDataList)
 	helpCommandEnabled := repoConfig.IsHelpCommandEnabled()
@@ -106,7 +114,7 @@ func centralRoutingCommandNames(wd *WorkflowData) []string {
 	return nil
 }
 
-func collectCentralCommandRoutes(workflowDataList []*WorkflowData) (map[string][]slashCommandRoute, map[string][]slashCommandRoute, map[string]map[string]bool) {
+func collectCentralCommandRoutes(workflowDataList []*WorkflowData) (map[string][]slashCommandRoute, map[string][]slashCommandRoute, map[string]map[string]struct{}) {
 	slashRoutesByCommand, mergedEvents := collectCentralSlashCommandRoutes(workflowDataList)
 	labelRoutesByCommand := collectCentralLabelCommandRoutes(workflowDataList, mergedEvents)
 	return slashRoutesByCommand, labelRoutesByCommand, mergedEvents
@@ -128,9 +136,9 @@ func removeIfExists(path string) error {
 	return nil
 }
 
-func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[string][]slashCommandRoute, map[string]map[string]bool) {
+func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[string][]slashCommandRoute, map[string]map[string]struct{}) {
 	routesByCommand := make(map[string][]slashCommandRoute)
-	mergedEvents := make(map[string]map[string]bool)
+	mergedEvents := make(map[string]map[string]struct{})
 
 	for _, wd := range workflowDataList {
 		commandNames := centralRoutingCommandNames(wd)
@@ -153,10 +161,10 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 		// Merge workflow-level subscriptions using YAML-ready GitHub event names.
 		for _, event := range MergeEventsForYAML(filteredEvents) {
 			if mergedEvents[event.EventName] == nil {
-				mergedEvents[event.EventName] = make(map[string]bool)
+				mergedEvents[event.EventName] = make(map[string]struct{})
 			}
 			for _, t := range event.Types {
-				mergedEvents[event.EventName][t] = true
+				mergedEvents[event.EventName][t] = struct{}{}
 			}
 		}
 
@@ -187,6 +195,10 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 				return -1
 			case left.AIReaction > right.AIReaction:
 				return 1
+			case left.Emoji < right.Emoji:
+				return -1
+			case left.Emoji > right.Emoji:
+				return 1
 			case !left.StatusComment && right.StatusComment:
 				return -1
 			case left.StatusComment && !right.StatusComment:
@@ -200,7 +212,7 @@ func collectCentralSlashCommandRoutes(workflowDataList []*WorkflowData) (map[str
 	return routesByCommand, mergedEvents
 }
 
-func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEvents map[string]map[string]bool) map[string][]slashCommandRoute {
+func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEvents map[string]map[string]struct{}) map[string][]slashCommandRoute {
 	routesByLabel := make(map[string][]slashCommandRoute)
 
 	for _, wd := range workflowDataList {
@@ -223,13 +235,13 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 
 		for _, eventName := range routeEvents {
 			if mergedEvents[eventName] == nil {
-				mergedEvents[eventName] = make(map[string]bool)
+				mergedEvents[eventName] = make(map[string]struct{})
 			}
-			mergedEvents[eventName]["labeled"] = true
+			mergedEvents[eventName]["labeled"] = struct{}{}
 		}
 
 		for _, labelName := range wd.LabelCommand {
-			routesByLabel[labelName] = append(routesByLabel[labelName], buildCentralizedRoutes(wd, routeEvents, false)...)
+			routesByLabel[labelName] = append(routesByLabel[labelName], buildCentralizedRoutes(wd, routeEvents, true)...)
 		}
 	}
 
@@ -254,6 +266,10 @@ func collectCentralLabelCommandRoutes(workflowDataList []*WorkflowData, mergedEv
 				return -1
 			case left.AIReaction > right.AIReaction:
 				return 1
+			case left.Emoji < right.Emoji:
+				return -1
+			case left.Emoji > right.Emoji:
+				return 1
 			case !left.StatusComment && right.StatusComment:
 				return -1
 			case left.StatusComment && !right.StatusComment:
@@ -271,14 +287,21 @@ func buildCentralizedRoutes(wd *WorkflowData, routeEvents []string, includeStatu
 	if wd == nil {
 		return nil
 	}
-	eventGroups := map[string][]string{}
-	groupOrder := make([]string, 0, len(routeEvents))
+	type routeGroup struct {
+		reaction      string
+		emoji         string
+		statusComment bool
+	}
+	eventGroups := map[routeGroup][]string{}
+	groupOrder := make([]routeGroup, 0, len(routeEvents))
 	for _, eventName := range routeEvents {
 		reaction := resolveCentralizedEventReaction(wd, eventName)
 		statusComment := includeStatusComment && resolveCentralizedEventStatusComment(wd, eventName)
-		// Reactions are limited to GitHub's fixed enum values, so "|" is a safe
-		// separator for grouping the per-event route metadata deterministically.
-		groupKey := reaction + "|" + strconv.FormatBool(statusComment)
+		groupKey := routeGroup{
+			reaction:      reaction,
+			emoji:         wd.FrontmatterEmoji,
+			statusComment: statusComment,
+		}
 		if _, exists := eventGroups[groupKey]; !exists {
 			groupOrder = append(groupOrder, groupKey)
 		}
@@ -286,14 +309,12 @@ func buildCentralizedRoutes(wd *WorkflowData, routeEvents []string, includeStatu
 	}
 	routes := make([]slashCommandRoute, 0, len(groupOrder))
 	for _, groupKey := range groupOrder {
-		parts := strings.SplitN(groupKey, "|", 2)
-		reaction := parts[0]
-		statusComment := len(parts) == 2 && parts[1] == "true"
 		routes = append(routes, slashCommandRoute{
 			Workflow:      wd.WorkflowID,
 			Events:        slices.Clone(eventGroups[groupKey]),
-			AIReaction:    reaction,
-			StatusComment: statusComment,
+			AIReaction:    groupKey.reaction,
+			Emoji:         groupKey.emoji,
+			StatusComment: groupKey.statusComment,
 		})
 	}
 	return routes
@@ -342,7 +363,7 @@ func resolveCentralizedEventStatusComment(wd *WorkflowData, eventName string) bo
 func buildCentralSlashCommandWorkflowYAML(
 	slashRoutesByCommand map[string][]slashCommandRoute,
 	labelRoutesByCommand map[string][]slashCommandRoute,
-	mergedEvents map[string]map[string]bool,
+	mergedEvents map[string]map[string]struct{},
 	runsOn string,
 	setupActionRef string,
 	helpCommands []helpCommandEntry,
@@ -400,6 +421,7 @@ jobs:
 
       - name: Route slash command
         uses: ` + getActionPin("actions/github-script") + `
+        # runner-guard:ignore RGS-016 -- routing tables below contain emoji variation selectors (U+FE0F) and zero-width joiners (U+200D) used to render standard emoji sequences, not steganographic payloads.
         env:
           GH_AW_SLASH_ROUTING: '` + escapeYAMLSingleQuoted(string(slashRoutesJSON)) + `'
           GH_AW_LABEL_ROUTING: '` + escapeYAMLSingleQuoted(string(labelRoutesJSON)) + `'
@@ -413,7 +435,11 @@ jobs:
             const { main } = require('` + SetupActionDestination + `/route_slash_command.cjs');
             await main();
 `)
-	return b.String(), nil
+	finalYAML, err := finalizeRunnerTempSafety(b.String())
+	if err != nil {
+		return "", err
+	}
+	return finalYAML, nil
 }
 
 func buildHelpCommandEntries(workflowDataList []*WorkflowData) []helpCommandEntry {
@@ -592,7 +618,7 @@ func writeCentralRouteTypeSummary(b *strings.Builder, routesByTrigger map[string
 	}
 }
 
-func writeCentralSlashRoutePermissions(b *strings.Builder, mergedEvents map[string]map[string]bool) {
+func writeCentralSlashRoutePermissions(b *strings.Builder, mergedEvents map[string]map[string]struct{}) {
 	b.WriteString(`    permissions:
       actions: write
       contents: read
@@ -608,7 +634,7 @@ func writeCentralSlashRoutePermissions(b *strings.Builder, mergedEvents map[stri
 	}
 }
 
-func needsPullRequestsPermission(mergedEvents map[string]map[string]bool) bool {
+func needsPullRequestsPermission(mergedEvents map[string]map[string]struct{}) bool {
 	// issue_comment and issues events can target pull requests (issue-backed PR payloads),
 	// and runtime branch resolution uses pulls.get for those cases.
 	pullRequestEvents := []string{"issues", "issue_comment", "pull_request", "pull_request_comment", "pull_request_review_comment", "pull_request_review"}
@@ -710,7 +736,7 @@ func formatRunsOnSnippetForInlineValue(runsOn string) string {
 	return "\n" + strings.Join(lines, "\n")
 }
 
-func writeCentralSlashEventsYAML(b *strings.Builder, mergedEvents map[string]map[string]bool) {
+func writeCentralSlashEventsYAML(b *strings.Builder, mergedEvents map[string]map[string]struct{}) {
 	eventOrder := []string{
 		"issues",
 		"issue_comment",

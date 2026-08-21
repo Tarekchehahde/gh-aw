@@ -10,8 +10,10 @@ import (
 
 func (c *Compiler) maybeAddActivationAppTokenMintStep(ctx *activationJobBuildContext) {
 	if !activationJobNeedsAppToken(ctx) {
+		compilerActivationJobLog.Print("Skipping activation app-token mint step (no reaction/status-comment/label/access/guardrail trigger requires it)")
 		return
 	}
+	compilerActivationJobLog.Print("Adding activation app-token mint step")
 	appPerms := buildActivationAppTokenPermissions(ctx)
 	ctx.steps = append(ctx.steps, c.buildActivationAppTokenMintStep(ctx.data.ActivationGitHubApp, appPerms)...)
 	ctx.outputs["activation_app_token_minting_failed"] = "${{ steps.activation-app-token.outcome == 'failure' }}"
@@ -126,6 +128,7 @@ func (c *Compiler) buildActivationPermissions(ctx *activationJobBuildContext) (s
 	if err := c.addActivationScriptPermissions(permsMap, ctx); err != nil {
 		return "", err
 	}
+	compilerActivationJobLog.Printf("Computed activation job permissions across %d scope(s)", len(permsMap))
 	return NewPermissionsFromMap(permsMap).RenderToYAML(), nil
 }
 
@@ -135,6 +138,11 @@ func (c *Compiler) buildActivationBasePermissions(ctx *activationJobBuildContext
 	}
 	if !ctx.data.StaleCheckDisabled || hasMaxDailyAICGuardrail(ctx.data) {
 		permsMap[PermissionActions] = PermissionRead
+	}
+	if isPreCreatePullRequestEnabled(ctx.data) {
+		permsMap[PermissionContents] = PermissionWrite
+		permsMap[PermissionPullRequests] = PermissionWrite
+		permsMap[PermissionChecks] = PermissionWrite
 	}
 	addActivationInteractionPermissionsMap(permsMap, activationInteractionPermissionsOptions{
 		onSection:                         ctx.data.On,
@@ -147,6 +155,12 @@ func (c *Compiler) buildActivationBasePermissions(ctx *activationJobBuildContext
 		statusCommentIncludesPullRequests: ctx.statusCommentPRs,
 		statusCommentIncludesDiscussions:  ctx.statusCommentDiscussions,
 	})
+	// When observability.otlp.github-app is configured without app-id/private-key
+	// credentials, id-token: write is needed so the activation job can mint the OTLP
+	// OIDC token via core.getIDToken(audience) (mirrors threat_detection_job.go).
+	if hasOTLPGitHubOIDCAuth(ctx.data.ParsedFrontmatter, ctx.data.RawFrontmatter) {
+		permsMap[PermissionIdToken] = PermissionWrite
+	}
 	return permsMap
 }
 
@@ -232,6 +246,7 @@ func (c *Compiler) addActivationScriptPermissions(permsMap map[PermissionScope]P
 			return err
 		}
 		if len(writeCmds) > 0 {
+			compilerActivationJobLog.Printf("Rejecting activation job: %d write gh command(s) detected in activation step scripts", len(writeCmds))
 			return fmt.Errorf(
 				"activation job uses write gh command(s) [%s]; write operations are not permitted in activation job steps because the activation job runs with read-only permissions. Move write operations to the agent job steps or use safe-outputs. See: https://github.github.com/gh-aw/reference/safe-outputs/",
 				strings.Join(writeCmds, ", "),

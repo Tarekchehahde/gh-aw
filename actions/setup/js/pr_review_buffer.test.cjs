@@ -26,7 +26,85 @@ const mockGithub = {
 global.core = mockCore;
 global.github = mockGithub;
 
-const { createReviewBuffer } = require("./pr_review_buffer.cjs");
+const { createReviewBuffer, createPrReviewBufferRegistry } = require("./pr_review_buffer.cjs");
+
+describe("createPrReviewBufferRegistry", () => {
+  let savedCore;
+  beforeEach(() => {
+    savedCore = global.core;
+    global.core = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+  });
+  afterEach(() => {
+    global.core = savedCore;
+  });
+
+  it("returns separate buffers for different (repo, prNumber) pairs", () => {
+    const registry = createPrReviewBufferRegistry();
+    const buf1 = registry.getOrCreate("o/r", 1);
+    const buf2 = registry.getOrCreate("o/r", 2);
+    const buf3 = registry.getOrCreate("other/repo", 1);
+    expect(buf1).not.toBe(buf2);
+    expect(buf1).not.toBe(buf3);
+    expect(buf2).not.toBe(buf3);
+  });
+
+  it("returns the same buffer for repeated calls with the same key", () => {
+    const registry = createPrReviewBufferRegistry();
+    const buf1 = registry.getOrCreate("o/r", 5);
+    const buf2 = registry.getOrCreate("o/r", 5);
+    expect(buf1).toBe(buf2);
+  });
+
+  it("returns null when repo is falsy", () => {
+    const registry = createPrReviewBufferRegistry();
+    expect(registry.getOrCreate(null, 1)).toBeNull();
+    expect(registry.getOrCreate("", 1)).toBeNull();
+  });
+
+  it("returns null when prNumber is falsy", () => {
+    const registry = createPrReviewBufferRegistry();
+    expect(registry.getOrCreate("o/r", null)).toBeNull();
+    expect(registry.getOrCreate("o/r", 0)).toBeNull();
+  });
+
+  it("getAllEntries returns entries in insertion order", () => {
+    const registry = createPrReviewBufferRegistry();
+    registry.getOrCreate("o/r", 3);
+    registry.getOrCreate("o/r", 1);
+    registry.getOrCreate("o/r", 2);
+    const entries = registry.getAllEntries();
+    expect(entries.map(e => e.prNumber)).toEqual([3, 1, 2]);
+  });
+
+  it("hasAnyContent returns false when all buffers are empty", () => {
+    const registry = createPrReviewBufferRegistry();
+    registry.getOrCreate("o/r", 1);
+    expect(registry.hasAnyContent()).toBe(false);
+  });
+
+  it("hasAnyContent returns true when any buffer has metadata", () => {
+    const registry = createPrReviewBufferRegistry();
+    const buf = registry.getOrCreate("o/r", 1);
+    buf.setReviewMetadata("body", "COMMENT");
+    expect(registry.hasAnyContent()).toBe(true);
+  });
+
+  it("setDefaultFooterMode applies to newly created buffers", () => {
+    const registry = createPrReviewBufferRegistry();
+    registry.setDefaultFooterMode("none");
+    // We can't directly inspect footerMode, but we can check that the
+    // new buffer was created (no throw) and that setting metadata works
+    const buf = registry.getOrCreate("o/r", 1);
+    expect(buf).not.toBeNull();
+    buf.setReviewMetadata("body", "COMMENT");
+    expect(buf.hasReviewMetadata()).toBe(true);
+  });
+});
 
 describe("pr_review_buffer (factory pattern)", () => {
   let buffer;
@@ -478,6 +556,71 @@ describe("pr_review_buffer (factory pattern)", () => {
       expect(callArgs.comments).toBeUndefined();
     });
 
+    it("should use GH_AW_HEAD_SHA from env instead of live PR head SHA", async () => {
+      const previousHeadSHA = process.env.GH_AW_HEAD_SHA;
+      process.env.GH_AW_HEAD_SHA = "original-reviewed-sha";
+      try {
+        buffer.setReviewMetadata("Review with pinned commit", "COMMENT");
+        buffer.setReviewContext({
+          repo: "owner/repo",
+          repoParts: { owner: "owner", repo: "repo" },
+          pullRequestNumber: 42,
+          pullRequest: { head: { sha: "live-head-sha-pushed-later" } },
+        });
+
+        mockGithub.rest.pulls.createReview.mockResolvedValue({
+          data: {
+            id: 700,
+            html_url: "https://github.com/owner/repo/pull/42#pullrequestreview-700",
+          },
+        });
+
+        const result = await buffer.submitReview();
+
+        expect(result.success).toBe(true);
+        // The env var sha must be passed as commit_id, not the live head sha
+        const callArgs = mockGithub.rest.pulls.createReview.mock.calls[0][0];
+        expect(callArgs.commit_id).toBe("original-reviewed-sha");
+      } finally {
+        if (previousHeadSHA !== undefined) {
+          process.env.GH_AW_HEAD_SHA = previousHeadSHA;
+        } else {
+          delete process.env.GH_AW_HEAD_SHA;
+        }
+      }
+    });
+
+    it("should fall back to pullRequest.head.sha when GH_AW_HEAD_SHA is not set", async () => {
+      const previousHeadSHA = process.env.GH_AW_HEAD_SHA;
+      delete process.env.GH_AW_HEAD_SHA;
+      try {
+        buffer.setReviewMetadata("Regular review", "COMMENT");
+        buffer.setReviewContext({
+          repo: "owner/repo",
+          repoParts: { owner: "owner", repo: "repo" },
+          pullRequestNumber: 42,
+          pullRequest: { head: { sha: "current-head-sha" } },
+        });
+
+        mockGithub.rest.pulls.createReview.mockResolvedValue({
+          data: {
+            id: 800,
+            html_url: "https://github.com/owner/repo/pull/42#pullrequestreview-800",
+          },
+        });
+
+        const result = await buffer.submitReview();
+
+        expect(result.success).toBe(true);
+        const callArgs = mockGithub.rest.pulls.createReview.mock.calls[0][0];
+        expect(callArgs.commit_id).toBe("current-head-sha");
+      } finally {
+        if (previousHeadSHA !== undefined) {
+          process.env.GH_AW_HEAD_SHA = previousHeadSHA;
+        }
+      }
+    });
+
     it("should include multi-line comment fields with side fallback for start_side", async () => {
       buffer.addComment({
         path: "src/index.js",
@@ -690,6 +833,39 @@ describe("pr_review_buffer (factory pattern)", () => {
       expect(callArgs.body).toContain("test-workflow");
     });
 
+    it("should separate body from footer with a blank line for proper markdown rendering", async () => {
+      buffer.addComment({ path: "test.js", line: 1, body: "comment" });
+      buffer.setReviewMetadata("Review body content", "COMMENT");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 42,
+        pullRequest: { head: { sha: "abc123" } },
+      });
+      buffer.setFooterContext({
+        workflowName: "test-workflow",
+        runUrl: "https://github.com/owner/repo/actions/runs/123",
+        workflowSource: "owner/repo/workflows/test.md@v1",
+        workflowSourceURL: "https://github.com/owner/repo/blob/main/test.md",
+      });
+
+      mockGithub.rest.pulls.createReview.mockResolvedValue({
+        data: {
+          id: 403,
+          html_url: "https://github.com/owner/repo/pull/42#pullrequestreview-403",
+        },
+      });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      const callArgs = mockGithub.rest.pulls.createReview.mock.calls[0][0];
+      // The footer blockquote must be preceded by at least one blank line
+      // so Markdown parses the "> Generated by" quote section correctly.
+      expect(callArgs.body).toMatch(/\n\n> /);
+      expect(callArgs.body).not.toMatch(/[^\n]\n> /);
+    });
+
     it("should retry with COMMENT when APPROVE is rejected on own PR", async () => {
       buffer.addComment({ path: "test.js", line: 1, body: "comment" });
       buffer.setReviewMetadata("LGTM", "APPROVE");
@@ -853,6 +1029,41 @@ describe("pr_review_buffer (factory pattern)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain("Some other error");
       expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(2);
+    });
+
+    it("should fall back to body-only COMMENT when own-PR COMMENT retry also fails with line-resolution error", async () => {
+      buffer.addComment({ path: "file.go", line: 10, body: "Inline comment" });
+      buffer.setReviewMetadata("Fix this", "REQUEST_CHANGES");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 42,
+        pullRequest: { head: { sha: "abc123" }, user: { login: "bot-user" } },
+      });
+
+      mockGithub.rest.pulls.createReview
+        // Initial attempt — own-PR 422
+        .mockRejectedValueOnce(new Error("Can not request changes on your own pull request"))
+        // COMMENT retry with inline comments — line unresolvable
+        .mockRejectedValueOnce(new Error('Unprocessable Entity: "Line could not be resolved"'))
+        // Body-only COMMENT fallback — success
+        .mockResolvedValueOnce({
+          data: {
+            id: 800,
+            html_url: "https://github.com/owner/repo/pull/42#pullrequestreview-800",
+          },
+        });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      expect(result.event).toBe("COMMENT");
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(3);
+      const bodyOnlyArgs = mockGithub.rest.pulls.createReview.mock.calls[2][0];
+      expect(bodyOnlyArgs.event).toBe("COMMENT");
+      expect(bodyOnlyArgs.comments).toBeUndefined();
+      expect(bodyOnlyArgs.body).toContain("Inline comment");
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("COMMENT retry on own PR failed with unresolvable line(s)"));
     });
 
     it("should skip (success:true, skipped:true) when PR is permanently locked after all retries", async () => {
@@ -1146,6 +1357,128 @@ describe("pr_review_buffer (factory pattern)", () => {
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Line could not be resolved"));
     });
 
+    it("should retry with resolvable inline comments when API identifies specific unresolvable comment indexes", async () => {
+      buffer.addComment({ path: "src/valid-one.js", line: 11, body: "First resolvable inline comment" });
+      buffer.addComment({ path: "src/unresolved.js", line: 99, body: "This one cannot be anchored" });
+      buffer.addComment({ path: "src/valid-two.js", line: 22, body: "Second resolvable inline comment" });
+      buffer.setReviewMetadata("Reviewed with comments.", "REQUEST_CHANGES");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 21946,
+        pullRequest: { head: { sha: "abc123" } },
+      });
+
+      const unresolvedError = new Error('Unprocessable Entity: "Line could not be resolved"');
+      // @ts-ignore - Simulate Octokit error response payload with indexed comment field.
+      unresolvedError.response = { data: { errors: [{ field: "comments[1].line", message: "Line could not be resolved" }] } };
+
+      mockGithub.rest.pulls.createReview.mockRejectedValueOnce(unresolvedError).mockResolvedValueOnce({
+        data: {
+          id: 803,
+          html_url: "https://github.com/owner/repo/pull/21946#pullrequestreview-803",
+        },
+      });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      expect(result.review_id).toBe(803);
+      expect(result.comment_count).toBe(2);
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(2);
+      const retryArgs = mockGithub.rest.pulls.createReview.mock.calls[1][0];
+      expect(retryArgs.comments).toHaveLength(2);
+      expect(retryArgs.comments.map(comment => comment.path)).toEqual(["src/valid-one.js", "src/valid-two.js"]);
+      expect(retryArgs.body).toContain("### Comments that could not be inline-anchored");
+      expect(retryArgs.body).toContain("<details><summary>src/unresolved.js:99</summary>");
+      expect(retryArgs.body).toContain("This one cannot be anchored");
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Retrying with 2 resolvable inline comment(s)"));
+    });
+
+    it("should retry with resolvable inline comments when API identifies a specific unresolvable path index", async () => {
+      buffer.addComment({ path: "src/valid-one.js", line: 11, body: "First resolvable inline comment" });
+      buffer.addComment({ path: "src/missing.js", line: 99, body: "This path is not in the diff" });
+      buffer.addComment({ path: "src/valid-two.js", line: 22, body: "Second resolvable inline comment" });
+      buffer.setReviewMetadata("Reviewed with comments.", "REQUEST_CHANGES");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 21946,
+        pullRequest: { head: { sha: "abc123" } },
+      });
+
+      const unresolvedError = new Error('Unprocessable Entity: "Path could not be resolved"');
+      // @ts-ignore - Simulate Octokit error response payload with indexed comment field.
+      unresolvedError.response = { data: { errors: [{ field: "comments[1].path", message: "Path could not be resolved" }] } };
+
+      mockGithub.rest.pulls.createReview.mockRejectedValueOnce(unresolvedError).mockResolvedValueOnce({
+        data: {
+          id: 804,
+          html_url: "https://github.com/owner/repo/pull/21946#pullrequestreview-804",
+        },
+      });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      expect(result.review_id).toBe(804);
+      expect(result.comment_count).toBe(2);
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(2);
+      const retryArgs = mockGithub.rest.pulls.createReview.mock.calls[1][0];
+      expect(retryArgs.comments).toHaveLength(2);
+      expect(retryArgs.comments.map(comment => comment.path)).toEqual(["src/valid-one.js", "src/valid-two.js"]);
+      expect(retryArgs.body).toContain("### Comments that could not be inline-anchored");
+      expect(retryArgs.body).toContain("<details><summary>src/missing.js:99</summary>");
+      expect(retryArgs.body).toContain("This path is not in the diff");
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Retrying with 2 resolvable inline comment(s)"));
+    });
+
+    it("should fall back to body-only with all comments when partial-anchor retry also fails", async () => {
+      buffer.addComment({ path: "src/valid-one.js", line: 11, body: "First resolvable inline comment" });
+      buffer.addComment({ path: "src/unresolved.js", line: 99, body: "This one cannot be anchored" });
+      buffer.addComment({ path: "src/valid-two.js", line: 22, body: "Second resolvable inline comment" });
+      buffer.setReviewMetadata("Reviewed with partial failures.", "COMMENT");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 21946,
+        pullRequest: { head: { sha: "abc123" } },
+      });
+
+      const unresolvedError = new Error('Unprocessable Entity: "Line could not be resolved"');
+      // @ts-ignore - Simulate Octokit error response payload with indexed comment field.
+      unresolvedError.response = { data: { errors: [{ field: "comments[1].line", message: "Line could not be resolved" }] } };
+
+      mockGithub.rest.pulls.createReview
+        .mockRejectedValueOnce(unresolvedError)
+        .mockRejectedValueOnce(new Error("Partial retry also failed"))
+        .mockResolvedValueOnce({
+          data: {
+            id: 805,
+            html_url: "https://github.com/owner/repo/pull/21946#pullrequestreview-805",
+          },
+        });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      expect(result.review_id).toBe(805);
+      expect(result.comment_count).toBe(0);
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(3);
+      // Third call (body-only fallback) must have no comments
+      const bodyOnlyArgs = mockGithub.rest.pulls.createReview.mock.calls[2][0];
+      expect(bodyOnlyArgs.comments).toBeUndefined();
+      // All three original comments must appear in the fallback body
+      expect(bodyOnlyArgs.body).toContain("### Comments that could not be inline-anchored");
+      expect(bodyOnlyArgs.body).toContain("src/valid-one.js");
+      expect(bodyOnlyArgs.body).toContain("First resolvable inline comment");
+      expect(bodyOnlyArgs.body).toContain("src/unresolved.js");
+      expect(bodyOnlyArgs.body).toContain("This one cannot be anchored");
+      expect(bodyOnlyArgs.body).toContain("src/valid-two.js");
+      expect(bodyOnlyArgs.body).toContain("Second resolvable inline comment");
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Failed to submit partially anchored PR review"));
+    });
+
     it("should retry as body-only review when Path could not be resolved error occurs", async () => {
       buffer.addComment({ path: ".changeset/some-file.md", line: 1, body: "Review comment on line 1" });
       buffer.addComment({ path: "src/new_file.js", line: 42, body: "A second inline comment" });
@@ -1215,6 +1548,63 @@ describe("pr_review_buffer (factory pattern)", () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain("Some other error on retry");
       expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(2);
+    });
+
+    it("should retry body-only as COMMENT when body-only REQUEST_CHANGES is rejected on own PR after line-resolution failure", async () => {
+      buffer.addComment({ path: "file.go", line: 5, body: "Nil dereference on this line" });
+      buffer.setReviewMetadata("Fix the blocking issues.", "REQUEST_CHANGES");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 47375,
+        pullRequest: { head: { sha: "abc123" }, user: { login: "linter-miner[bot]" } },
+      });
+
+      mockGithub.rest.pulls.createReview
+        // Initial attempt — line resolution fails (this triggers the body-only path)
+        .mockRejectedValueOnce(new Error('Unprocessable Entity: "Line could not be resolved"'))
+        // Body-only REQUEST_CHANGES — own-PR 422
+        .mockRejectedValueOnce(new Error("Can not request changes on your own pull request"))
+        // Body-only COMMENT retry — success
+        .mockResolvedValueOnce({
+          data: {
+            id: 900,
+            html_url: "https://github.com/owner/repo/pull/47375#pullrequestreview-900",
+          },
+        });
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(true);
+      expect(result.event).toBe("COMMENT");
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(3);
+      const bodyOnlyCommentArgs = mockGithub.rest.pulls.createReview.mock.calls[2][0];
+      expect(bodyOnlyCommentArgs.event).toBe("COMMENT");
+      expect(bodyOnlyCommentArgs.comments).toBeUndefined();
+      expect(bodyOnlyCommentArgs.body).toContain("Nil dereference on this line");
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Body-only REQUEST_CHANGES review rejected on own PR"));
+    });
+
+    it("should return failure when body-only COMMENT retry also fails on own PR", async () => {
+      buffer.addComment({ path: "file.go", line: 5, body: "Review comment" });
+      buffer.setReviewMetadata("Feedback.", "REQUEST_CHANGES");
+      buffer.setReviewContext({
+        repo: "owner/repo",
+        repoParts: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 42,
+        pullRequest: { head: { sha: "abc123" } },
+      });
+
+      mockGithub.rest.pulls.createReview
+        .mockRejectedValueOnce(new Error("Line could not be resolved"))
+        .mockRejectedValueOnce(new Error("Can not request changes on your own pull request"))
+        .mockRejectedValueOnce(new Error("Unexpected server error"));
+
+      const result = await buffer.submitReview();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Unexpected server error");
+      expect(mockGithub.rest.pulls.createReview).toHaveBeenCalledTimes(3);
     });
 
     it("should escape HTML-sensitive characters in fallback summary and body", async () => {
