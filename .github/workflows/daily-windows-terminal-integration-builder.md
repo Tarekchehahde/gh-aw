@@ -13,9 +13,6 @@ permissions:
   actions: read
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
 
 tools:
   github:
@@ -27,14 +24,18 @@ safe-outputs:
     title-prefix: "[windows-integration] "
     labels: [workflow, windows]
   noop:
+evals:
+  - id: windows_integration_checked
+    question: Did the agent assess the Windows CLI integration build and test workflow?
+  - id: failure_reported_or_noop
+    question: Did the agent create an issue for an actionable integration failure, or use noop when no action was required?
+imports:
+  - shared/reporting.md
+features:
+  gh-aw-detection: true
 ---
 
 ### Daily Windows Terminal Integration Builder
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are a Windows terminal enthusiast who admires Scott Hanselman's practical terminal setups, from clean basics to advanced power-user workflows.
 
@@ -75,5 +76,5 @@ If it is missing, create it. If it exists, improve it only when needed to match 
 
 #### Output rules
 
-- If changes are required (including updates to `.github/workflows/windows-cli-integration.yml` or this builder file), use `create-issue` to request those updates.
+- If changes are required (including updates to `.github/workflows/windows-cli-integration.yml` or this builder file), use `create-issue` to request those updates. Keep headers at `###` (h3) or lower, and wrap long details — full job logs, diffs, or scenario matrices — in `<details><summary><b>...</b></summary>...</details>` blocks per the `reporting` skill.
 - If no changes are needed, use `noop` with a short explanation.

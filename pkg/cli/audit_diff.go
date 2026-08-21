@@ -20,10 +20,17 @@ var auditDiffLog = logger.New("cli:audit_diff")
 // >100% increase means the request count more than doubled.
 const volumeChangeThresholdPercent = 100.0
 
+// DiffEntryBase holds common anomaly-flagging fields shared by all diff entry types.
+type DiffEntryBase struct {
+	Status      string `json:"status"`
+	IsAnomaly   bool   `json:"is_anomaly,omitempty"`   // Flagged as anomalous
+	AnomalyNote string `json:"anomaly_note,omitempty"` // Human-readable anomaly explanation
+}
+
 // DomainDiffEntry represents the diff for a single domain between two runs
 type DomainDiffEntry struct {
-	Domain       string `json:"domain"`
-	Status       string `json:"status"`                  // "new", "removed", "status_changed", "volume_changed"
+	Domain string `json:"domain"`
+	DiffEntryBase
 	Run1Allowed  int    `json:"run1_allowed"`            // Allowed requests in run 1
 	Run1Blocked  int    `json:"run1_blocked"`            // Blocked requests in run 1
 	Run2Allowed  int    `json:"run2_allowed"`            // Allowed requests in run 2
@@ -31,8 +38,6 @@ type DomainDiffEntry struct {
 	Run1Status   string `json:"run1_status,omitempty"`   // "allowed", "denied", or "" for new domains
 	Run2Status   string `json:"run2_status,omitempty"`   // "allowed", "denied", or "" for removed domains
 	VolumeChange string `json:"volume_change,omitempty"` // e.g. "+287%" or "-50%"
-	IsAnomaly    bool   `json:"is_anomaly,omitempty"`    // Flagged as anomalous (new denied, status flip to allowed)
-	AnomalyNote  string `json:"anomaly_note,omitempty"`  // Human-readable anomaly explanation
 }
 
 // FirewallDiff represents the complete diff between two runs' firewall behavior
@@ -66,130 +71,22 @@ func computeFirewallDiff(run1ID, run2ID int64, run1, run2 *FirewallAnalysis) *Fi
 		Run2ID: run2ID,
 	}
 
-	// Handle nil cases
-	run1Stats := make(map[string]DomainRequestStats)
-	run2Stats := make(map[string]DomainRequestStats)
-
-	if run1 != nil {
-		run1Stats = run1.RequestsByDomain
-	}
-	if run2 != nil {
-		run2Stats = run2.RequestsByDomain
-	}
+	run1Stats, run2Stats := firewallDomainStats(run1, run2)
 
 	// If both are nil/empty, return empty diff
 	if len(run1Stats) == 0 && len(run2Stats) == 0 {
 		return diff
 	}
 
-	// Collect all domains
-	allDomains := make(map[string]struct{})
-	for domain := range run1Stats {
-		allDomains[domain] = struct{}{}
-	}
-	for domain := range run2Stats {
-		allDomains[domain] = struct{}{}
-	}
-
 	// Sorted domain list for deterministic output
-	sortedDomains := sliceutil.SortedKeys(allDomains)
+	sortedDomains := sliceutil.SortedKeys(collectAllDomains(run1Stats, run2Stats))
 
 	anomalyCount := 0
 
 	for _, domain := range sortedDomains {
 		stats1, inRun1 := run1Stats[domain]
 		stats2, inRun2 := run2Stats[domain]
-
-		if !inRun1 && inRun2 {
-			// New domain in run 2
-			entry := DomainDiffEntry{
-				Domain:      domain,
-				Status:      "new",
-				Run2Allowed: stats2.Allowed,
-				Run2Blocked: stats2.Blocked,
-				Run2Status:  classifyFirewallDomainStatus(stats2),
-			}
-			// Anomaly: new denied domain
-			if stats2.Blocked > 0 {
-				entry.IsAnomaly = true
-				entry.AnomalyNote = "new denied domain"
-				anomalyCount++
-			}
-			diff.NewDomains = append(diff.NewDomains, entry)
-		} else if inRun1 && !inRun2 {
-			// Removed domain
-			entry := DomainDiffEntry{
-				Domain:      domain,
-				Status:      "removed",
-				Run1Allowed: stats1.Allowed,
-				Run1Blocked: stats1.Blocked,
-				Run1Status:  classifyFirewallDomainStatus(stats1),
-			}
-			// Anomaly: the removed domain was denied in the base run.  This indicates a
-			// transient firewall block that prevented the agent from reaching an MCP server
-			// (e.g. awmg-mcpg:8080) — even though the domain is absent from the comparison
-			// run (and therefore looks "normal"), its prior denial is worth surfacing so
-			// post-completion relaunch failures are detectable in audit diffs.
-			if stats1.Blocked > 0 {
-				entry.IsAnomaly = true
-				entry.AnomalyNote = "denied in base run — absent from comparison run"
-				anomalyCount++
-			}
-			diff.RemovedDomains = append(diff.RemovedDomains, entry)
-		} else {
-			// Domain exists in both runs - check for changes
-			status1 := classifyFirewallDomainStatus(stats1)
-			status2 := classifyFirewallDomainStatus(stats2)
-
-			if status1 != status2 {
-				// Status changed
-				entry := DomainDiffEntry{
-					Domain:      domain,
-					Status:      "status_changed",
-					Run1Allowed: stats1.Allowed,
-					Run1Blocked: stats1.Blocked,
-					Run2Allowed: stats2.Allowed,
-					Run2Blocked: stats2.Blocked,
-					Run1Status:  status1,
-					Run2Status:  status2,
-				}
-				// Anomaly: previously denied, now allowed
-				if status1 == "denied" && status2 == "allowed" {
-					entry.IsAnomaly = true
-					entry.AnomalyNote = "previously denied, now allowed"
-					anomalyCount++
-				}
-				// Anomaly: previously allowed, now denied
-				if status1 == "allowed" && status2 == "denied" {
-					entry.IsAnomaly = true
-					entry.AnomalyNote = "previously allowed, now denied"
-					anomalyCount++
-				}
-				diff.StatusChanges = append(diff.StatusChanges, entry)
-			} else {
-				// Check for significant volume changes (>100% threshold)
-				total1 := stats1.Allowed + stats1.Blocked
-				total2 := stats2.Allowed + stats2.Blocked
-
-				if total1 > 0 {
-					pctChange := (float64(total2-total1) / float64(total1)) * 100
-					if math.Abs(pctChange) > volumeChangeThresholdPercent {
-						entry := DomainDiffEntry{
-							Domain:       domain,
-							Status:       "volume_changed",
-							Run1Allowed:  stats1.Allowed,
-							Run1Blocked:  stats1.Blocked,
-							Run2Allowed:  stats2.Allowed,
-							Run2Blocked:  stats2.Blocked,
-							Run1Status:   status1,
-							Run2Status:   status2,
-							VolumeChange: formatVolumeChange(total1, total2),
-						}
-						diff.VolumeChanges = append(diff.VolumeChanges, entry)
-					}
-				}
-			}
-		}
+		anomalyCount += appendFirewallDomainDiff(diff, domain, stats1, stats2, inRun1, inRun2)
 	}
 
 	diff.Summary = FirewallDiffSummary{
@@ -204,6 +101,131 @@ func computeFirewallDiff(run1ID, run2ID int64, run1, run2 *FirewallAnalysis) *Fi
 	auditDiffLog.Printf("Firewall diff complete: new=%d, removed=%d, status_changes=%d, volume_changes=%d, anomalies=%d",
 		len(diff.NewDomains), len(diff.RemovedDomains), len(diff.StatusChanges), len(diff.VolumeChanges), anomalyCount)
 	return diff
+}
+
+func firewallDomainStats(run1, run2 *FirewallAnalysis) (map[string]DomainRequestStats, map[string]DomainRequestStats) {
+	run1Stats := make(map[string]DomainRequestStats)
+	run2Stats := make(map[string]DomainRequestStats)
+	if run1 != nil {
+		run1Stats = run1.RequestsByDomain
+	}
+	if run2 != nil {
+		run2Stats = run2.RequestsByDomain
+	}
+	return run1Stats, run2Stats
+}
+
+func collectAllDomains(run1Stats, run2Stats map[string]DomainRequestStats) map[string]struct{} {
+	allDomains := make(map[string]struct{})
+	for domain := range run1Stats {
+		allDomains[domain] = struct{}{}
+	}
+	for domain := range run2Stats {
+		allDomains[domain] = struct{}{}
+	}
+	return allDomains
+}
+
+func appendFirewallDomainDiff(diff *FirewallDiff, domain string, stats1, stats2 DomainRequestStats, inRun1, inRun2 bool) int {
+	if !inRun1 && inRun2 {
+		entry, anomalyCount := buildNewFirewallDomainEntry(domain, stats2)
+		diff.NewDomains = append(diff.NewDomains, entry)
+		return anomalyCount
+	}
+	if inRun1 && !inRun2 {
+		entry, anomalyCount := buildRemovedFirewallDomainEntry(domain, stats1)
+		diff.RemovedDomains = append(diff.RemovedDomains, entry)
+		return anomalyCount
+	}
+	return appendExistingFirewallDomainDiff(diff, domain, stats1, stats2)
+}
+
+func buildNewFirewallDomainEntry(domain string, stats2 DomainRequestStats) (DomainDiffEntry, int) {
+	entry := DomainDiffEntry{
+		Domain:        domain,
+		DiffEntryBase: DiffEntryBase{Status: "new"},
+		Run2Allowed:   stats2.Allowed,
+		Run2Blocked:   stats2.Blocked,
+		Run2Status:    classifyFirewallDomainStatus(stats2),
+	}
+	if stats2.Blocked > 0 {
+		entry.IsAnomaly = true
+		entry.AnomalyNote = "new denied domain"
+		return entry, 1
+	}
+	return entry, 0
+}
+
+func buildRemovedFirewallDomainEntry(domain string, stats1 DomainRequestStats) (DomainDiffEntry, int) {
+	entry := DomainDiffEntry{
+		Domain:        domain,
+		DiffEntryBase: DiffEntryBase{Status: "removed"},
+		Run1Allowed:   stats1.Allowed,
+		Run1Blocked:   stats1.Blocked,
+		Run1Status:    classifyFirewallDomainStatus(stats1),
+	}
+	if stats1.Blocked > 0 {
+		entry.IsAnomaly = true
+		entry.AnomalyNote = "denied in base run — absent from comparison run"
+		return entry, 1
+	}
+	return entry, 0
+}
+
+// appendExistingFirewallDomainDiff appends a diff entry for a domain present in both runs.
+// Returns 1 if an anomaly was detected (a security-relevant status flip), 0 otherwise.
+// Volume changes are recorded in diff.VolumeChanges but are not counted as anomalies.
+func appendExistingFirewallDomainDiff(diff *FirewallDiff, domain string, stats1, stats2 DomainRequestStats) int {
+	status1 := classifyFirewallDomainStatus(stats1)
+	status2 := classifyFirewallDomainStatus(stats2)
+	if status1 != status2 {
+		entry := DomainDiffEntry{
+			Domain:        domain,
+			DiffEntryBase: DiffEntryBase{Status: "status_changed"},
+			Run1Allowed:   stats1.Allowed,
+			Run1Blocked:   stats1.Blocked,
+			Run2Allowed:   stats2.Allowed,
+			Run2Blocked:   stats2.Blocked,
+			Run1Status:    status1,
+			Run2Status:    status2,
+		}
+		if status1 == "denied" && status2 == "allowed" {
+			entry.IsAnomaly = true
+			entry.AnomalyNote = "previously denied, now allowed"
+			diff.StatusChanges = append(diff.StatusChanges, entry)
+			return 1 // anomaly: a previously-blocked domain is now allowed
+		}
+		if status1 == "allowed" && status2 == "denied" {
+			entry.IsAnomaly = true
+			entry.AnomalyNote = "previously allowed, now denied"
+			diff.StatusChanges = append(diff.StatusChanges, entry)
+			return 1 // anomaly: a previously-allowed domain is now blocked
+		}
+		diff.StatusChanges = append(diff.StatusChanges, entry)
+		return 0 // status changed (e.g. mixed ↔ allowed) but not a security-relevant flip
+	}
+
+	total1 := stats1.Allowed + stats1.Blocked
+	total2 := stats2.Allowed + stats2.Blocked
+	if total1 == 0 {
+		return 0 // no baseline traffic; nothing to compare
+	}
+	pctChange := (float64(total2-total1) / float64(total1)) * 100
+	if math.Abs(pctChange) <= volumeChangeThresholdPercent {
+		return 0 // volume within threshold; not noteworthy
+	}
+	diff.VolumeChanges = append(diff.VolumeChanges, DomainDiffEntry{
+		Domain:        domain,
+		DiffEntryBase: DiffEntryBase{Status: "volume_changed"},
+		Run1Allowed:   stats1.Allowed,
+		Run1Blocked:   stats1.Blocked,
+		Run2Allowed:   stats2.Allowed,
+		Run2Blocked:   stats2.Blocked,
+		Run1Status:    status1,
+		Run2Status:    status2,
+		VolumeChange:  formatVolumeChange(total1, total2),
+	})
+	return 0 // volume change recorded but not classified as an anomaly
 }
 
 // classifyFirewallDomainStatus returns "allowed", "denied", or "mixed" based on request stats
@@ -222,16 +244,14 @@ func classifyFirewallDomainStatus(stats DomainRequestStats) string {
 
 // MCPToolDiffEntry represents the diff for a single MCP tool between two runs
 type MCPToolDiffEntry struct {
-	ServerName      string `json:"server_name"`
-	ToolName        string `json:"tool_name"`
-	Status          string `json:"status"`                    // "new", "removed", "changed"
+	ServerName string `json:"server_name"`
+	ToolName   string `json:"tool_name"`
+	DiffEntryBase
 	Run1CallCount   int    `json:"run1_call_count,omitempty"` // Call count in run 1
 	Run2CallCount   int    `json:"run2_call_count,omitempty"` // Call count in run 2
 	Run1ErrorCount  int    `json:"run1_error_count,omitempty"`
 	Run2ErrorCount  int    `json:"run2_error_count,omitempty"`
 	CallCountChange string `json:"call_count_change,omitempty"` // e.g. "+2", "-3"
-	IsAnomaly       bool   `json:"is_anomaly,omitempty"`
-	AnomalyNote     string `json:"anomaly_note,omitempty"`
 }
 
 // MCPToolsDiff represents the complete diff of MCP tool invocations between two runs
@@ -280,8 +300,8 @@ type TokenUsageDiff struct {
 // ToolCallDiffEntry represents the diff for a single engine-level tool between two runs.
 // Tool data comes from RunSummary.Metrics.ToolCalls (LogMetrics.ToolCalls).
 type ToolCallDiffEntry struct {
-	Name              string `json:"name"`
-	Status            string `json:"status"`                         // "new", "removed", "changed", "unchanged"
+	Name string `json:"name"`
+	DiffEntryBase
 	Run1CallCount     int    `json:"run1_call_count"`                // Call count in run 1 (0 if new)
 	Run2CallCount     int    `json:"run2_call_count"`                // Call count in run 2 (0 if removed)
 	CallCountChange   string `json:"call_count_change,omitempty"`    // e.g. "+3", "-1"
@@ -453,7 +473,7 @@ func computeMCPToolsDiff(run1, run2 *MCPToolUsageData) *MCPToolsDiff {
 			entry := MCPToolDiffEntry{
 				ServerName:     s2.ServerName,
 				ToolName:       s2.ToolName,
-				Status:         "new",
+				DiffEntryBase:  DiffEntryBase{Status: "new"},
 				Run2CallCount:  s2.CallCount,
 				Run2ErrorCount: s2.ErrorCount,
 			}
@@ -467,7 +487,7 @@ func computeMCPToolsDiff(run1, run2 *MCPToolUsageData) *MCPToolsDiff {
 			diff.RemovedTools = append(diff.RemovedTools, MCPToolDiffEntry{
 				ServerName:     s1.ServerName,
 				ToolName:       s1.ToolName,
-				Status:         "removed",
+				DiffEntryBase:  DiffEntryBase{Status: "removed"},
 				Run1CallCount:  s1.CallCount,
 				Run1ErrorCount: s1.ErrorCount,
 			})
@@ -475,7 +495,7 @@ func computeMCPToolsDiff(run1, run2 *MCPToolUsageData) *MCPToolsDiff {
 			entry := MCPToolDiffEntry{
 				ServerName:      s1.ServerName,
 				ToolName:        s1.ToolName,
-				Status:          "changed",
+				DiffEntryBase:   DiffEntryBase{Status: "changed"},
 				Run1CallCount:   s1.CallCount,
 				Run2CallCount:   s2.CallCount,
 				Run1ErrorCount:  s1.ErrorCount,
@@ -679,7 +699,7 @@ func computeToolCallsDiff(m1, m2 *LogMetrics) *ToolCallsDiff {
 		case !inRun1 && inRun2:
 			entry = ToolCallDiffEntry{
 				Name:              name,
-				Status:            "new",
+				DiffEntryBase:     DiffEntryBase{Status: "new"},
 				Run2CallCount:     tc2.CallCount,
 				Run2MaxInputSize:  tc2.MaxInputSize,
 				Run2MaxOutputSize: tc2.MaxOutputSize,
@@ -688,7 +708,7 @@ func computeToolCallsDiff(m1, m2 *LogMetrics) *ToolCallsDiff {
 		case inRun1 && !inRun2:
 			entry = ToolCallDiffEntry{
 				Name:              name,
-				Status:            "removed",
+				DiffEntryBase:     DiffEntryBase{Status: "removed"},
 				Run1CallCount:     tc1.CallCount,
 				Run1MaxInputSize:  tc1.MaxInputSize,
 				Run1MaxOutputSize: tc1.MaxOutputSize,
@@ -697,7 +717,7 @@ func computeToolCallsDiff(m1, m2 *LogMetrics) *ToolCallsDiff {
 		case tc1.CallCount != tc2.CallCount:
 			entry = ToolCallDiffEntry{
 				Name:              name,
-				Status:            "changed",
+				DiffEntryBase:     DiffEntryBase{Status: "changed"},
 				Run1CallCount:     tc1.CallCount,
 				Run2CallCount:     tc2.CallCount,
 				CallCountChange:   formatCountChange(tc1.CallCount, tc2.CallCount),
@@ -710,7 +730,7 @@ func computeToolCallsDiff(m1, m2 *LogMetrics) *ToolCallsDiff {
 		default:
 			entry = ToolCallDiffEntry{
 				Name:              name,
-				Status:            "unchanged",
+				DiffEntryBase:     DiffEntryBase{Status: "unchanged"},
 				Run1CallCount:     tc1.CallCount,
 				Run2CallCount:     tc2.CallCount,
 				Run1MaxInputSize:  tc1.MaxInputSize,
@@ -775,7 +795,7 @@ func computeBashCommandsDiff(run1Tools, run2Tools map[string]ToolCallInfo) *Bash
 
 		cmd := ToolCallDiffEntry{
 			Name:              name,
-			Status:            status,
+			DiffEntryBase:     DiffEntryBase{Status: status},
 			Run1CallCount:     tc1.CallCount,
 			Run2CallCount:     tc2.CallCount,
 			Run1MaxInputSize:  tc1.MaxInputSize,
@@ -941,7 +961,7 @@ func loadRunSummaryForDiff(ctx context.Context, runID int64, outputDir string, o
 	}
 
 	// Download artifacts if needed
-	if err := downloadRunArtifacts(ctx, runID, runOutputDir, verbose, owner, repo, hostname, artifactFilter); err != nil {
+	if err := downloadRunArtifacts(ctx, downloadArtifactsOptions{runID: runID, outputDir: runOutputDir, verbose: verbose, owner: owner, repo: repo, hostname: hostname, artifactFilter: artifactFilter}); err != nil {
 		if !errors.Is(err, ErrNoArtifacts) {
 			auditDiffLog.Printf("Failed to download artifacts for run %d: %v", runID, err)
 			return nil, fmt.Errorf("failed to download artifacts for run %d: %w", runID, err)
@@ -969,8 +989,10 @@ func loadRunSummaryForDiff(ctx context.Context, runID int64, outputDir string, o
 	}
 
 	return &RunSummary{
-		RunID:                runID,
-		FirewallAnalysis:     analysis,
-		GitHubRateLimitUsage: rateLimitUsage,
+		RunID: runID,
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis:     analysis,
+			GitHubRateLimitUsage: rateLimitUsage,
+		},
 	}, nil
 }

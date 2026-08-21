@@ -10,13 +10,11 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
   - shared/reporting.md
   - uses: shared/pr-review-base.md
@@ -33,6 +31,11 @@ tools:
     file-glob: ["*.json", "*.md"]
     max-file-size: 102400  # 100KB
 safe-outputs:
+  data:
+    pr_number: integer
+    category: string
+    risk: string
+    action: string
   add-labels:
     max: 100
     # Omitting 'allowed' to permit dynamic label creation (pr-type:*, pr-risk:*, etc.)
@@ -47,12 +50,19 @@ safe-outputs:
   messages:
     run-started: "🔍 Starting PR triage analysis... [{workflow_name}]({run_url}) is categorizing and prioritizing agent-created PRs"
     run-success: "✅ PR triage complete! [{workflow_name}]({run_url}) has analyzed and categorized PRs. Check the issue for detailed report."
-    run-failure: "❌ PR triage failed! [{workflow_name}]({run_url}) {status}. Some PRs may not be triaged."
+    run-failure: "❌ PR triage failed! [{workflow_name}]({run_url}) {status}. Some PRs may not be triaged. Check the [run logs]({run_url}) for details before rerunning triage."
 timeout-minutes: 30
 # Default AI credit budget for this workflow.
 max-ai-credits: 1500
 
 
+evals:
+  - id: labels-applied
+    question: Did the agent apply triage labels to at least one pull request?
+  - id: triage-data-set
+    question: Does the agent output confirm that category, risk, and action data were determined for each processed PR?
+  - id: report-produced
+    question: Does the agent output include a triage report summarizing the PRs processed?
 ---
 
 # PR Triage Agent

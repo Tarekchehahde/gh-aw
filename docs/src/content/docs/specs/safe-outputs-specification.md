@@ -7,11 +7,11 @@ sidebar:
 
 # Safe Outputs MCP Gateway Specification
 
-**Version**: 1.24.0  
-**Status**: Working Draft  
-**Publication Date**: 2026-06-13  
-**Editor**: GitHub Agentic Workflows Team  
-**This Version**: [safe-outputs-specification](/gh-aw/specs/safe-outputs-specification/)  
+**Version**: 1.28.5<br>
+**Status**: Working Draft<br>
+**Publication Date**: 2026-08-20<br>
+**Editor**: GitHub Agentic Workflows Team<br>
+**This Version**: [safe-outputs-specification](/gh-aw/specs/safe-outputs-specification/)<br>
 **Latest Published Version**: This document
 
 ---
@@ -368,7 +368,6 @@ Each safe output job MUST request minimal permissions. Jobs SHOULD specialize by
 jobs:
   safe-output-create-issue:
     permissions:
-      contents: read
       issues: write  # Minimal for issue creation
 ```
 
@@ -994,6 +993,7 @@ for (const op of issueOps) {
 When `tools.comment-memory` is enabled, implementations MUST support this additional data-flow path:
 
 1. **GitHub comment → local files (pre-agent setup)**: A setup step reads the managed comment body from the target issue or pull request, extracts content between `<gh-aw-comment-memory id="...">` and `</gh-aw-comment-memory>`, and writes one file per memory entry under `/tmp/gh-aw/comment-memory/<memory_id>.md`.
+   - Setup MUST enforce memory-size safeguards: each materialized file MUST be ≤16 KiB and the aggregate materialized directory MUST be ≤48 KiB. Exceeding either limit MUST emit a warning and skip writing all memory files, leaving the comment-memory directory empty.
 2. **Local files → agent**: The prompt MUST include instructions that memory files are edited directly in `/tmp/gh-aw/comment-memory/`.
 3. **Agent → artifact**: The unified agent artifact MUST include `/tmp/gh-aw/comment-memory/` when comment memory is enabled.
 4. **Artifact → threat detection**: Threat-detection prompt setup MUST include discovered comment-memory files in analysis context.
@@ -1394,6 +1394,113 @@ MUST NOT:
 - Block same-repository operations
 - Silently ignore allowlist configuration
 
+#### GP5: github-app.repositories
+
+**Syntax**: `safe-outputs.github-app.repositories: ["*"] | [<repository-name>, ...]`
+
+**Default**: Implementation-defined repository scope when `github-app` is configured without `repositories`
+
+**Semantics**: Specifies the repository scope requested when minting GitHub App installation tokens for safe outputs execution.
+
+When `safe-outputs.github-app.repositories` is exactly `["*"]`, implementations:
+
+- MUST omit the installation-token `repositories` parameter
+- MUST NOT substitute `${{ github.event.repository.name }}`
+- MUST NOT rewrite the wildcard sentinel to a single repository scope
+
+When `safe-outputs.github-app.repositories` contains one or more explicit repository names, implementations MUST request exactly the configured repository set.
+
+When `safe-outputs.github-app.repositories` is omitted, implementations MAY use the triggering repository as the default repository scope.
+
+The `["*"]` behavior MUST apply to activation-job token minting and to subsequent safe-output-job token minting that inherits the same `safe-outputs.github-app` settings.
+
+In `workflow_call` and other reusable-workflow scenarios, conforming implementations MUST preserve the `["*"]` behavior so that activation can read agent configuration from the callee repository when the App installation grant permits it.
+
+#### GP5a: Type-Specific `github-app` Override
+
+**Syntax**: `safe-outputs.<safe-output-type>.github-app: <github-app-config>`
+
+**Default**: No type-specific app override. Handlers inherit the global `safe-outputs.github-app` fallback when present.
+
+**Semantics**: Allows an individual safe output type to mint and use a dedicated GitHub App installation token instead of sharing the global safe-outputs credential.
+
+**Resolution Rules**:
+
+1. When `safe-outputs.<safe-output-type>.github-app` is configured for a handler that executes GitHub API calls in the `safe_outputs` job, implementations MUST mint a dedicated installation token for that handler using only the permissions required by that handler.
+2. When a handler-specific token is minted, that handler MUST use the dedicated token in preference to the shared `safe-outputs.github-token` or global `safe-outputs.github-app` token.
+3. The global `safe-outputs.github-app` token MUST be computed from only the handlers that do **not** declare a type-specific `github-app` override.
+4. When the effective permission set for a handler is empty (for example, staged-only execution paths or handlers that perform no GitHub API call in `safe_outputs`), implementations MUST NOT mint a dedicated handler token.
+5. When no dedicated handler token is minted, implementations MUST fall back to the handler's configured `github-token` (if any) or to the shared safe-outputs credential flow.
+
+**Security Goal**: Type-specific `github-app` overrides enable least-privilege separation between output types. For example, `add-comment` can use an App with only `issues:write` while `dispatch-workflow` uses a different App with only `actions:write`.
+
+**Example**:
+
+```yaml
+safe-outputs:
+  github-app:
+    app-id: ${{ vars.GLOBAL_APP_ID }}
+    private-key: ${{ secrets.GLOBAL_APP_PRIVATE_KEY }}
+
+  add-comment:
+    github-app:
+      app-id: ${{ vars.ISSUE_APP_ID }}
+      private-key: ${{ secrets.ISSUE_APP_PRIVATE_KEY }}
+    target: ${{ github.event.issue.number }}
+
+  dispatch-workflow:
+    github-app:
+      app-id: ${{ vars.ACTIONS_APP_ID }}
+      private-key: ${{ secrets.ACTIONS_APP_PRIVATE_KEY }}
+    workflows: [downstream.yml]
+```
+
+In this example, `add-comment` and `dispatch-workflow` MUST use separate installation tokens scoped to their respective handler permissions, while any other safe output types continue using the global `safe-outputs.github-app` fallback.
+
+#### GP6: data
+
+**Syntax**: `safe-outputs.data: false | true | <schema-object> | <github-expression>`
+
+**Default**: `false` (disabled)
+
+**Semantics**: Controls whether body-capable safe output types MAY include a top-level `data` object, and optionally enforces the schema of that object.
+
+**Modes**:
+
+1. `false` or omitted: `data` MUST be rejected.
+2. `true`: `data` MUST be allowed and MUST be an object.
+3. `<schema-object>`: `data` MUST be allowed and MUST satisfy the normalized simplified schema.
+4. `<github-expression>`: schema resolution MUST occur at runtime in JavaScript and the resolved schema MUST satisfy this section before `data` validation.
+
+**Conformance Requirement GP6-1: Accepted Frontmatter Shapes**
+
+Implementations MUST accept exactly the four syntactic forms above. Non-boolean scalar literals other than GitHub Actions expressions (for example, `data: "schema.json"`) MUST be rejected.
+
+**Conformance Requirement GP6-2: Simplified Schema Grammar**
+
+When `<schema-object>` is used, implementations MUST support this simplified schema syntax:
+
+- Allowed keywords: `type`, `description`, `properties`, `required`, `items`, `enum`, `additionalProperties`, `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`
+- Supported primitive type names: `object`, `array`, `string`, `number`, `integer`, `boolean`
+- Shorthand property syntax: object literals without schema keywords MUST be interpreted as:
+  - `type: object`
+  - `properties: <literal>`
+
+**Conformance Requirement GP6-3: OpenAI Codex Structured Outputs Compatibility**
+
+For every object schema node, implementations MUST:
+
+1. Set `additionalProperties: false` (or reject if explicitly `true`).
+2. Require every declared property in `required` (lexical ordering of `required` entries is RECOMMENDED for deterministic output).
+
+**Conformance Requirement GP6-4: Runtime Validation Placement**
+
+Compile-time validation SHOULD be applied when schema content is statically available. Runtime validation in JavaScript MUST be applied before operation execution for expression-resolved schemas and for handler-side enforcement.
+
+**Data Validation Errors**
+
+When `data` validation fails, implementations MUST return actionable field-path errors that identify the failing location (for example, `data.extra` or `data.required[0]`).
+
 ### 5.3 Type-Specific Common Parameters
 
 Every safe output type supports these parameters:
@@ -1565,6 +1672,7 @@ create-issue:
 ```yaml
 add-comment:
   target: "issue" | "pull_request" | "discussion" | "*"
+  allows-comment-ids: [12345, 67890] # Required before agents may supply comment_id with target: "*"
   hide-older-comments: true      # Hide previous workflow comments
   discussions: false             # Exclude discussions:write permission (optional)
   target-repo: owner/repo
@@ -1582,6 +1690,8 @@ submit-pull-request-review:
   supersede-older-reviews: true  # Best-effort dismissal of older same-workflow REQUEST_CHANGES reviews (including legacy blockers)
   footer: "always" | "none" | "if-body"     # Footer on review body
 ```
+
+> **Review attribution pinning**: Under `workflow_run` triggers, the compiler automatically injects `GH_AW_HEAD_SHA` (set to `${{ github.event.workflow_run.head_sha }}`) into the safe-outputs job environment. For `pull_request` and `pull_request_target` triggers, it is set to `${{ github.event.pull_request.head.sha }}`. The runtime uses this value as `commit_id` when posting the review, so the review is always attributed to the commit the agent actually saw — not a newer HEAD that may have landed while the agent was running. No user configuration is needed.
 
 **Pull Request Extensions**:
 
@@ -2009,6 +2119,7 @@ The following table defines the exact `createHandlers()` function used for each 
 | `close_discussion` | `defaultHandler("close_discussion")` |
 | `update_pull_request` | `updatePullRequestHandler` |
 | `close_pull_request` | `defaultHandler("close_pull_request")` |
+| `approve_workflow_run` | `approve_workflow_run.cjs` (`main`) |
 | `merge_pull_request` | `defaultHandler("merge_pull_request")` |
 | `mark_pull_request_as_ready_for_review` | `defaultHandler("mark_pull_request_as_ready_for_review")` |
 | `push_to_pull_request_branch` | `pushToPullRequestBranchHandler` |
@@ -2041,13 +2152,21 @@ The following table defines the exact `createHandlers()` function used for each 
 | `missing_data` | `defaultHandler("missing_data")` |
 | `report_incomplete` | `defaultHandler("report_incomplete")` |
 
+### 7.0.3 Declared Field Payload Construction
+
+The MCP Gateway and Safe Output Processor MUST construct downstream safe-output payloads only from the `type` field and fields declared by the applicable MCP schema, built-in validation configuration, or custom safe-job configuration. Agent-supplied fields that are not declared by that contract MUST NOT be forwarded to handlers, privileged jobs, or API clients.
+
+If an optional advisory or enrichment field is declared with `x-strip-on-error: true`, implementations MAY omit that field from the normalized downstream payload when the field is invalid. Implementations MUST NOT use stripped fields for authorization, target selection, transport metadata, or other privileged decisions.
+
+Fields used for privileged transport metadata, including patch anchoring and upload asset file metadata, MUST be derived by trusted workflow steps or privileged processors rather than accepted from agent-controlled NDJSON.
+
 ### 7.1 Core Issue Operations
 
 #### Type: create_issue
 
 **Purpose**: Create GitHub issues for bug tracking, feature requests, or task management.
 
-**Default Max**: 1  
+**Default Max**: 1
 **Cross-Repository Support**: Yes (via `target-repo`)  
 **Mandatory**: Yes (required for full conformance)
 
@@ -2123,10 +2242,9 @@ The following table defines the exact `createHandlers()` function used for each 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and file access
 - `issues: write` - Issue creation and modification
 
-*GitHub App* (if using `safe-outputs.app` configuration):
+*GitHub App* (if using `safe-outputs.github-app` or `safe-outputs.create-issue.github-app` configuration):
 
 - `issues: write` - Issue creation and modification  
 - `metadata: read` - Repository metadata (automatically granted)
@@ -2135,7 +2253,6 @@ The following table defines the exact `createHandlers()` function used for each 
 
 - Both permission modes require the same write scopes
 - GitHub App permissions enable cross-repository operations beyond `allowed-repos` when properly configured
-- The `contents: read` permission is always included for repository context access
 
 ---
 
@@ -2164,6 +2281,10 @@ The following table defines the exact `createHandlers()` function used for each 
       "item_number": {
         "type": "number",
         "description": "Issue/PR/discussion number (auto-resolved from context if omitted)"
+      },
+      "comment_id": {
+        "type": ["number", "string"],
+        "description": "Existing issue or pull request comment ID to update. Valid only when safe-outputs.add-comment.target is \"*\" and the ID appears in safe-outputs.add-comment.allows-comment-ids."
       }
     },
     "additionalProperties": false
@@ -2179,14 +2300,17 @@ The following table defines the exact `createHandlers()` function used for each 
 4. **Footer Injection**: Appends footer according to configuration (typically 200-500 characters).
 5. **Cross-Repository**: Supports `target-repo` configuration.
 
-**Status Comment Reuse Extension (`target: "status"`)**:
+**Controlled Comment Reuse Extensions**:
 
-This extension applies to safe-output processor messages for `add_comment` (including system-generated status updates). It is distinct from the MCP input schema in this section.
+These extensions apply to safe-output processor messages for `add_comment` (including system-generated status updates).
 
-1. When `target: "status"` is set and a reusable status comment ID is available, implementations MUST update the existing issue/PR comment instead of creating a new comment.
-2. When `target: "status"` is set but no reusable status comment ID is available, implementations MUST create a new comment.
-3. `target: "status"` and `comment_id` MUST be rejected for discussion comments; they are valid only for issue and pull request comments.
-4. When updating an existing comment through status-comment reuse, implementations SHOULD skip hide-older-comments behavior for that operation.
+1. When message-level `target: "status"` is set and a reusable status comment ID is available from trusted workflow state, implementations MUST update the existing issue/PR comment instead of creating a new comment.
+2. When message-level `target: "status"` is set but no reusable status comment ID is available from trusted workflow state, implementations MUST create a new comment.
+3. Message-level `target: "status"` MUST be rejected for discussion comments; status-comment reuse is valid only for issue and pull request comments.
+4. The MCP input schema for `add_comment` MAY expose `comment_id` as an agent-controlled input only for workflows that configure `safe-outputs.add-comment.target: "*"`.
+5. When an agent supplies `comment_id`, implementations MUST reject the operation unless `safe-outputs.add-comment.allows-comment-ids` is configured and contains that exact positive integer ID. The allowlist is trusted workflow state and MAY be computed by earlier workflow steps.
+6. Agent-supplied `comment_id` MUST NOT be honored for discussion comments and MUST NOT be treated as a substitute for the trusted status comment ID used by `target: "status"`.
+7. When updating an existing comment through either controlled reuse path, implementations SHOULD skip hide-older-comments behavior for that operation.
 
 **Enforced Constraints**:
 
@@ -2202,6 +2326,7 @@ This extension applies to safe-output processor messages for `add_comment` (incl
 
 - `max`: Operation limit (default: 1)
 - `target`: Filter by type ("issue", "pull_request", "discussion", "*"). This configuration field applies to static workflow configuration (`safe-outputs.add-comment.target`) and is distinct from the runtime per-message `target: "status"` extension above.
+- `allows-comment-ids`: Trusted allowlist of issue/PR comment IDs that the agent may update with `comment_id` when `target: "*"` is configured. This field is REQUIRED before any agent-supplied `comment_id` is honored. Accepts an array of positive integer IDs, strings containing positive integer IDs, or a GitHub Actions expression that resolves to such a list.
 - `hide-older-comments`: Hide previous workflow comments
 - `discussions`: Control `discussions:write` permission (default: false). Set to `true` to comment on discussions.
 - `target-repo`: Cross-repository target
@@ -2211,12 +2336,11 @@ This extension applies to safe-output processor messages for `add_comment` (incl
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and file access
 - `issues: write` - Comment creation on issues
 - `pull-requests: write` - Comment creation on pull requests
 - `discussions: write` - Comment creation on discussions (only when `discussions: true`)
 
-*GitHub App* (if using `safe-outputs.app` configuration):
+*GitHub App* (if using `safe-outputs.github-app` or `safe-outputs.add-comment.github-app` configuration):
 
 - `issues: write` - Comment creation on issues
 - `pull-requests: write` - Comment creation on pull requests
@@ -2251,7 +2375,6 @@ safe-outputs:
 - Set `discussions: true` to add `discussions:write` and enable commenting on discussions
 - Discussion-related safe outputs (`create-discussion`, `close-discussion`, `update-discussion`) independently add `discussions:write` permission when configured
 - Cross-repository commenting requires appropriate permissions in target repository
-- The `contents: read` permission is always included for repository context access
 - When `safe-outputs.add-comment.target` is `"*"`, requests MUST include at least one of `item_number`, `pr_number`, or `pr`; `item_number` is the canonical field.
 
 ---
@@ -2261,7 +2384,7 @@ safe-outputs:
 **Purpose**: Create pull requests to propose code changes.
 
 **Default Max**: 1  
-**Cross-Repository Support**: No (same-repository only)  
+**Cross-Repository Support**: Yes  
 **Mandatory**: Yes (required for full conformance)
 
 **MCP Tool Schema**:
@@ -2301,10 +2424,17 @@ safe-outputs:
    | `false` (default) | n/a | Append random hex suffix to local branch name and continue |
    | `true` | `false` (default) | Surface `push_failed`; caller falls back (e.g. opens an issue when `fallback-as-issue: true`) |
    | `true` | `true` | Force-delete the existing remote ref via `DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}` and let the subsequent push recreate it from the agent's local HEAD (force-push semantics). Concurrent-deletion 422 responses with "Reference does not exist" are treated as success. |
+8. **Distinct Upstream and Head Repositories**: `target-repo` identifies the upstream repository that receives the pull request and owns the base branch. `head-repo`, when configured, identifies the repository that receives the pushed branch. When `head-repo` is omitted, the head repository defaults to `target-repo`.
+9. **Owner-Qualified Head Reference**: When `head-repo` differs from `target-repo`, the created pull request MUST use an owner-qualified head reference identifying the head repository owner and pushed branch. Unqualified same-name branch references MUST NOT be used in fork-backed mode.
+10. **Ephemeral Fork Branch Model**: When `head-repo` differs from `target-repo`, implementations SHOULD create or refresh an ephemeral branch in `head-repo` from the resolved upstream base SHA, apply the agent changes, and open the pull request back to the upstream base. Implementations MAY support explicit synchronization of that ephemeral branch with a newer upstream base, but implicit reuse of arbitrary pre-existing fork branches MUST NOT occur.
+11. **Summary and Manifest Provenance**: Successful executions MUST record `head_repo` in the safe-output summary and machine-readable manifest.
 
 **Configuration Parameters**:
 
 - `max`: Operation limit (default: 1)
+- `target-repo`: Upstream repository that receives the pull request and supplies the base branch
+- `head-repo`: Optional repository that receives the pushed head branch. MUST either equal `target-repo` or identify a configured automation-owned fork
+- `allowed-repos`: Cross-repository allowlist applied to both `target-repo` and `head-repo`
 - `base-branch`: Target base branch for the PR. When omitted, the handler resolves the base branch in this order: (1) the runtime checkout manifest entry for the target repository, (2) the local checkout's `origin/HEAD`, (3) the repository default branch via `GET /repos/{owner}/{repo}`. Explicit configuration is RECOMMENDED when the safe-outputs job runs without repository credentials (e.g. cross-repo private targets).
 - `allowed-branches`: Allowed source branch patterns for `branch` tool input
 - `allowed-base-branches`: Allowed base-branch override patterns for per-run `base` tool input
@@ -2314,6 +2444,9 @@ safe-outputs:
 - `labels`: Auto-apply labels
 - `title-prefix`: Prepend to titles
 - `footer`: Footer override
+- `github-token`: Optional credential for upstream pull request creation and related upstream metadata operations
+- `head-github-token`: Optional credential for `head-repo` branch writes. When specified, it SHOULD be limited to `contents: write` on `head-repo`
+- `head-github-app`: Optional GitHub App configuration to mint an ephemeral credential for `head-repo` branch writes at runtime. When `head-github-app` is configured, the minted token takes precedence over `head-github-token`. The app installation MUST have `contents: write` on `head-repo`
 - `preserve-branch-name`: When `true`, use the agent-supplied branch name verbatim without appending a random salt suffix (default: `false`)
 - `recreate-ref`: When `true` (and `preserve-branch-name: true`), allows the handler to force-delete an existing remote branch ref and recreate it from the agent's local HEAD on collision. When `false` (default), an existing remote branch under `preserve-branch-name: true` causes a fallback rather than overwriting the remote ref. Has no effect when `preserve-branch-name: false`. (default: `false`)
 
@@ -2322,6 +2455,9 @@ safe-outputs:
 - Branch name sanitization (prevent injection)
 - Patch content validation
 - Size limits on commits
+- `head-repo` MUST be either the same repository as `target-repo` or an explicitly configured automation-owned fork; arbitrary contributor forks MUST NOT be used as write targets
+- Both `target-repo` and `head-repo` MUST be validated against the configured allowlist before any push or pull request API call
+- When distinct upstream and head credentials are configured, implementations MUST use the least-privilege head-repository credential only for branch writes and the upstream credential only for upstream pull request management
 
 **Required Permissions**:
 
@@ -2336,11 +2472,16 @@ safe-outputs:
 - `issues: write` - Issue creation fallback when PR creation fails
 - `pull-requests: write` - Pull request creation
 
-*GitHub App* (if using `safe-outputs.app` configuration):
+*GitHub App* (if using `safe-outputs.github-app` or `safe-outputs.create-pull-request.github-app` configuration):
 
 - `contents: write` - Branch creation and commit operations
 - `pull-requests: write` - Pull request creation
 - `metadata: read` - Repository metadata (automatically granted)
+
+**Fork-Backed Pull Request Credential Roles**:
+
+- **Upstream credential**: `pull-requests: write` on `target-repo`; `issues: write` is additionally required when `fallback-as-issue: true`
+- **Head repository credential**: `contents: write` on `head-repo`
 
 **With `fallback-as-issue: true`** (default):
 
@@ -2354,7 +2495,8 @@ safe-outputs:
 - Permission requirements vary based on `fallback-as-issue` configuration
 - When `fallback-as-issue: true` (default), requires `issues: write` for fallback issue creation if PR creation fails
 - When `fallback-as-issue: false`, only requires `contents: write` and `pull-requests: write`
-- Cross-repository pull requests are not supported - operations are limited to same repository
+- Fork-backed pull requests are supported only when `head-repo` is explicitly configured or defaults to `target-repo`; writes to arbitrary contributor forks are forbidden
+- `push_to_pull_request_branch` follow-up support is limited to pull requests whose resolved head repository exactly matches the configured `head-repo` (or `target-repo` when `head-repo` is omitted)
 
 ---
 
@@ -2410,7 +2552,7 @@ System types are always available in every workflow. The types `noop`, `missing-
 
 - No additional permissions required beyond base workflow permissions
 
-*GitHub App* (if using `safe-outputs.app` configuration):
+*GitHub App* (if using `safe-outputs.github-app` configuration):
 
 - No additional permissions required beyond base app installation
 
@@ -2473,6 +2615,7 @@ This section provides complete definitions for all remaining safe output types. 
 
 - `memory_id` MUST be validated as `[A-Za-z0-9_-]+` with path traversal patterns rejected.
 - Managed comment scan MUST be bounded by a maximum page limit.
+- Materialized comment-memory files MUST enforce a per-file cap of 16 KiB and an aggregate cap of 48 KiB during setup.
 - Body content MUST undergo sanitization and comment size/mention/link limit validation before upsert.
 - Cross-repository targets MUST be validated against `allowed-repos`.
 - Only content within managed marker tags is treated as editable memory; footer/provenance text MUST NOT be imported into editable files. For example, in `<gh-aw-comment-memory id="default">MEMORY</gh-aw-comment-memory>\n\n<!-- provenance footer -->`, only `MEMORY` is editable/imported.
@@ -2481,7 +2624,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Managed comment create/update operations on issues and pull requests
 
 *GitHub App*:
@@ -2552,7 +2694,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Issue modification operations
 
 *GitHub App*:
@@ -2633,7 +2774,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Issue state modification and comment creation
 
 *GitHub App*:
@@ -2648,7 +2788,7 @@ This section provides complete definitions for all remaining safe output types. 
 **Purpose**: Create parent-child relationships between issues using task list entries.
 
 **Default Max**: 1  
-**Cross-Repository Support**: No (same repository only)  
+**Cross-Repository Support**: Yes (restricted)  
 **Mandatory**: No
 
 **MCP Tool Schema**:
@@ -2699,7 +2839,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Issue body modification for task list entries
 
 *GitHub App*:
@@ -2774,7 +2913,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Fallback issue creation when discussion creation fails
 - `discussions: write` - Discussion creation operations
 
@@ -2846,7 +2984,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `discussions: write` - Discussion modification operations
 
 *GitHub App*:
@@ -2921,7 +3058,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `discussions: write` - Discussion state modification and comment creation
 
 *GitHub App*:
@@ -2943,7 +3079,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Pull request modification operations
 
 *GitHub App*:
@@ -2971,7 +3106,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Pull request state modification and comment creation
 
 *GitHub App*:
@@ -2984,6 +3118,82 @@ This section provides complete definitions for all remaining safe output types. 
 - Higher default max (10) enables bulk PR cleanup operations
 - Does NOT merge changes - use GitHub's merge functionality for that
 - When `safe-outputs.close-pull-request.target` is `"*"`, requests MUST include `pull_request_number`.
+
+---
+
+#### Type: approve_workflow_run
+
+**Purpose**: Approve a workflow run in the "action required" state.
+
+**Default Max**: 1
+**Cross-Repository Support**: No
+**Mandatory**: No
+
+**Experimental**: Yes. Compiling a workflow with `approve-workflow-run` emits: `Using experimental feature: approve-workflow-run`.
+
+**MCP Tool Schema**:
+
+```json
+{
+  "name": "approve_workflow_run",
+  "description": "Approve a GitHub Actions workflow run awaiting required approval.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["run_id"],
+    "properties": {
+      "run_id": {
+        "type": ["number", "string"],
+        "description": "Positive integer workflow run ID from /actions/runs/<run_id>."
+      }
+    },
+    "additionalProperties": false
+  }
+}
+```
+
+**Operational Semantics**:
+
+1. **Input Validation**: `run_id` MUST be a positive safe integer.
+2. **Staged Preview**: When `staged` is true, the handler MUST return a preview without reading GitHub state or consuming the configured max limit.
+3. **Eligibility**: Before approval, the handler MUST fetch the run and verify `event` is `pull_request`, the `pull_requests` array is non-empty, and `status` is `waiting`.
+4. **Allowed Workflows**: The handler MUST fetch the workflow metadata and permit the run only when the workflow filename matches an `allowed-workflows` wildcard pattern. It MUST compare filenames rather than paths and MUST treat `.yml` and `.yaml` extensions as equivalent.
+5. **Authorization**: A run is eligible only when every associated pull request is either the pull request that triggered the workflow or is listed in `allowed-pull-requests`. This permits all pending workflow runs for the triggering or explicitly allowed pull requests without authorizing mixed runs that include another pull request.
+6. **Forks and Events**: The handler MUST reject `pull_request_target` events. It MUST reject an associated fork pull request unless `fork` is explicitly true.
+7. **Protected Files**: Before approval, the handler MUST list the files modified by every pull request associated with the run and reject approval when any file is protected. `protected-files.exclude` MAY remove specific filenames or path prefixes from the default protected set.
+8. **Execution**: Only after all preceding checks pass MAY the handler invoke GitHub's workflow-run approval API and consume one max-count slot.
+9. **Comment**: After a successful approval, when `comment` is not explicitly false, the handler MUST post a comment on each pull request associated with the approved run announcing the workflow run has started, linking to the run's HTML URL, and including the standard generated attribution footer. Comment posting failures MUST be logged as warnings and MUST NOT fail the approval.
+
+**Configuration Parameters**:
+
+- `max`: Operation limit (default: 1)
+- `fork`: Permit associated fork pull requests (default: false)
+- `comment`: Post a comment on the associated pull request(s) announcing the run has started (default: true)
+- `staged`: Preview without a GitHub API call or max-count consumption
+- `github-token`: Explicit external token for this handler or inherited from `safe-outputs.github-token`
+- `github-app`: GitHub App configuration that mints a handler-scoped token
+- `allowed-workflows`: Required list of workflow filename wildcard patterns. `.yml` and `.yaml` are normalized before matching.
+- `allowed-pull-requests`: Additional authorized pull request numbers as strings or an expression resolving to a list
+- `protected-files.exclude`: Filenames or path prefixes to remove from the default protected-file set
+
+**Security Requirements**:
+
+- Live approvals MUST use an explicit external `github-token` or a GitHub App token; implementations MUST NOT use the default `github.token`.
+- The handler MUST reject `pull_request_target` events, and associated fork pull requests unless `fork` is explicitly true.
+- The handler MUST reject a run that is not a pull request run, is not from an allowed workflow, has any associated pull request that is not authorized, has modified protected files, or is not waiting for approval.
+- The handler MUST be classified as an Abort type for warn-mode threat-detection failures.
+
+**Required Permissions**:
+
+*GitHub Actions Token*:
+
+- `actions: write` - Workflow-run approval
+- `pull-requests: write` - Posting the run-started comment (when `comment` is enabled, the default); `pull-requests: read` is sufficient when `comment: false`
+
+*GitHub App*:
+
+- `actions: write` - Workflow-run approval
+- `pull-requests: write` - Posting the run-started comment (when `comment` is enabled, the default); `pull-requests: read` is sufficient when `comment: false`
+- `metadata: read` - Repository metadata (automatically granted)
 
 ---
 
@@ -3079,7 +3289,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Pull request draft status modification
 
 *GitHub App*:
@@ -3094,7 +3303,7 @@ This section provides complete definitions for all remaining safe output types. 
 **Purpose**: Push commits to pull request branch for automated code changes.
 
 **Default Max**: 1  
-**Cross-Repository Support**: No (same repository only)  
+**Cross-Repository Support**: Yes (restricted)  
 **Mandatory**: No
 
 **Required Permissions**:
@@ -3112,19 +3321,34 @@ This section provides complete definitions for all remaining safe output types. 
 - `pull-requests: write` - Pull request metadata access
 - `metadata: read` - Repository metadata (automatically granted)
 
+**Fork-Backed Follow-Up Push Credential Roles**:
+
+- **Upstream credential**: `pull-requests: write` on `target-repo`; `issues: write` when the implementation posts push-result comments
+- **Head repository credential**: `contents: write` on `head-repo`
+
 **Configuration Parameters**:
 
 - `max`: Operation limit (default: 1)
 - `base-branch`: Target base branch used to compute the incremental patch (e.g. `main`, `master`). When omitted, the handler resolves the base branch in this order: (1) the runtime checkout manifest entry for the target repository, (2) the local checkout's `origin/HEAD`, (3) the repository default branch via `GET /repos/{owner}/{repo}`. Explicit configuration is REQUIRED when the safe-outputs job runs without repository credentials (e.g. cross-repo private targets) and the checkout manifest is unavailable.
 - `target`: Triggering PR selector (see `submit_pull_request_review` semantics)
+- `target-repo`: Upstream repository containing the pull request
+- `head-repo`: Optional expected head repository for fork-backed pull requests. When omitted, the expected head repository is `target-repo`
+- `allowed-repos`: Cross-repository allowlist applied to both `target-repo` and `head-repo`
+- `head-github-token`: Optional credential for `head-repo` branch writes
+- `head-github-app`: Optional GitHub App configuration to mint an ephemeral credential for `head-repo` branch writes at runtime; takes precedence over `head-github-token` when both are specified
 
 **Notes**:
 
 - Requires `contents: write` for git push operations
 - Enforces maximum patch size limit (default: 10 KB, range: 1–100 KB)
 - Validates changes don't exceed size limits before pushing
+- The handler MUST ignore agent-supplied `diff_size` values and validate patch size from the generated patch artifact.
+- For patch transport, the generated patch SHOULD embed `X-GH-AW-Base-Commit` metadata derived by the trusted patch-generation step. The privileged processor MUST derive patch re-anchoring metadata from the generated patch and MUST NOT trust agent-supplied base-commit metadata.
 - Base-branch resolution MUST NOT depend on interactive credential prompts; git operations issued by the handler MUST run with `GIT_TERMINAL_PROMPT=0` and an enforced timeout so credential-less environments fail fast rather than hanging
 - When `safe-outputs.push-to-pull-request-branch.target` is `"*"`, requests MUST include `pull_request_number`.
+- The handler MUST refuse pushes unless the resolved pull request head repository exactly matches the configured `head-repo` (or `target-repo` when `head-repo` is omitted)
+- Arbitrary contributor forks MUST remain unsupported write targets even when the upstream repository itself is allowlisted
+- Successful executions MUST record `head_repo` in the safe-output summary and machine-readable manifest
 
 ---
 
@@ -3140,7 +3364,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and diff access
 - `pull-requests: write` - Review comment creation
 
 *GitHub App*:
@@ -3168,7 +3391,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Review submission operations
 
 *GitHub App*:
@@ -3198,7 +3420,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Review thread resolution operations
 
 *GitHub App*:
@@ -3226,7 +3447,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Review comment reply creation
 
 *GitHub App*:
@@ -3254,7 +3474,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Label addition to issues
 - `pull-requests: write` - Label addition to pull requests
 
@@ -3283,7 +3502,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Label removal from issues
 - `pull-requests: write` - Label removal from pull requests
 
@@ -3312,7 +3530,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `pull-requests: write` - Reviewer assignment operations
 
 *GitHub App*:
@@ -3339,7 +3556,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Milestone assignment operations
 
 *GitHub App*:
@@ -3388,7 +3604,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Agent assignment operations
 
 *GitHub App*:
@@ -3419,7 +3634,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - User assignment operations (for issues)
 - `pull-requests: write` - User assignment operations (for pull requests)
 
@@ -3448,7 +3662,6 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - User unassignment operations
 
 *GitHub App*:
@@ -3469,7 +3682,7 @@ This section provides complete definitions for all remaining safe output types. 
 **Configuration Parameters**:
 
 - `max`: Operation limit (default: 5)
-- `discussions`: Control `discussions:write` permission (default: true)
+- `discussions`: Control `discussions:write` permission (default: false)
 - `target-repo`: Cross-repository target
 - `allowed-repos`: Cross-repo allowlist
 - `allowed-reasons`: Allowed reasons for hiding comments
@@ -3478,24 +3691,23 @@ This section provides complete definitions for all remaining safe output types. 
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Comment hiding on issues
 - `pull-requests: write` - Comment hiding on pull requests
-- `discussions: write` - Comment hiding on discussions (when `discussions: true` or omitted)
+- `discussions: write` - Comment hiding on discussions (when `discussions: true`)
 
 *GitHub App*:
 
 - `issues: write` - Comment hiding on issues
 - `pull-requests: write` - Comment hiding on pull requests
-- `discussions: write` - Comment hiding on discussions (when `discussions: true` or omitted)
+- `discussions: write` - Comment hiding on discussions (when `discussions: true`)
 - `metadata: read` - Repository metadata (automatically granted)
 
 **Permission Control via `discussions` Field**:
 
 The optional `discussions` boolean field controls whether `discussions:write` permission is requested:
 
-- **Default behavior** (`discussions: true` or omitted): Includes `discussions:write` permission for maximum compatibility. Use this when the GitHub App has Discussions permission granted.
-- **Opt-out** (`discussions: false`): Excludes `discussions:write` permission. Use this when the GitHub App lacks Discussions permission to prevent 422 errors during token generation.
+- **Default behavior** (`discussions: false` or omitted): Excludes `discussions:write` permission. The `discussions:write` permission is now opt-in.
+- **Opt-in** (`discussions: true`): Includes `discussions:write` permission. Use this when comments on discussions may need to be hidden.
 
 **Example Configuration**:
 
@@ -3508,14 +3720,14 @@ safe-outputs:
     repositories: ['myrepo']
   hide-comment:
     max: 5
-    discussions: false  # Exclude discussions:write permission
+    discussions: true  # Include discussions:write permission
     allowed-reasons: [spam, abuse, off_topic]
 ```
 
 **Notes**:
 
-- By default, requires all three write permissions to support hiding comments across all entity types
-- When `discussions: false`, the workflow only requests `issues:write` and `pull-requests:write` permissions
+- By default, only requests `issues:write` and `pull-requests:write` permissions
+- When `discussions: true`, the workflow additionally requests `discussions:write` permission
 - Discussion-related safe outputs independently add `discussions:write` permission when configured
 - Comments are minimized, not deleted - reversible by moderators
 
@@ -3533,12 +3745,13 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `organization-projects: write` - Project creation operations (note: only valid for GitHub Apps)
+- `issues: read` - Required to resolve issue/PR references when adding items to the project
 
 *GitHub App*:
 
 - `organization-projects: write` - Project creation operations
+- `issues: read` - Required to resolve issue/PR references when adding items to the project
 - `metadata: read` - Repository metadata (automatically granted)
 
 **Notes**:
@@ -3561,12 +3774,13 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `organization-projects: write` - Project management operations (note: only valid for GitHub Apps)
+- `issues: read` - Required to resolve issue/PR references when adding items to the project
 
 *GitHub App*:
 
 - `organization-projects: write` - Project management operations
+- `issues: read` - Required to resolve issue/PR references when adding items to the project
 - `metadata: read` - Repository metadata (automatically granted)
 
 **Notes**:
@@ -3589,7 +3803,6 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `organization-projects: write` - Project status update operations (note: only valid for GitHub Apps)
 
 *GitHub App*:
@@ -3599,7 +3812,7 @@ safe-outputs:
 
 **Notes**:
 
-- Same permission requirements as `create_project` and `update_project`
+- Does not require `issues: read` — status updates operate on the project board itself, not on issue/PR items
 
 ---
 
@@ -3653,6 +3866,9 @@ safe-outputs:
 - Creates or updates orphaned branch for asset storage
 - Enforces maximum file size limit (default: 10 MB = 10240 KB)
 - Files accessible via raw.githubusercontent.com URLs
+- Staged asset filenames MUST be keyed by a hash of the declared source path, with the original extension preserved where applicable, so distinct source paths with the same basename do not collide.
+- The privileged upload job MUST validate that staged asset paths remain contained within the staged-assets directory and that the expected staged filename matches the declared source path.
+- The privileged upload job MUST compute asset size, SHA-256 digest, target filename, and published URL from staged file contents and trusted runtime context. It MUST NOT trust agent-supplied `size`, `sha`, `path`, `targetFileName`, or URL metadata for privileged decisions.
 
 ---
 
@@ -3660,7 +3876,7 @@ safe-outputs:
 
 **Purpose**: Trigger workflow_dispatch events to invoke other workflows.
 
-**Default Max**: 3  
+**Default Max**: 1  
 **Cross-Repository Support**: Yes (via `target-repo`)  
 **Mandatory**: No
 
@@ -3677,19 +3893,21 @@ safe-outputs:
 
 **Configuration Parameters**:
 
-- `max`: Operation limit (default: 3)
+- `max`: Operation limit (default: 1)
 - `workflows`: Allowlist of workflow names that may be dispatched
 - `target-repo`: Cross-repository target (owner/repo)
 - `target-ref`: Git ref (branch, tag, or SHA) to use when dispatching the workflow. In `workflow_call` relay scenarios this is auto-injected by the compiler from `needs.activation.outputs.target_ref`, ensuring the correct platform branch is used instead of the caller's `GITHUB_REF`.
 - `allowed-repos`: Cross-repo allowlist (supports wildcards, e.g. `org/*`)
+- `allowed-refs`: Allowlist of ref glob patterns allowed for per-call `message.ref` overrides. When omitted, the repository default branch is implicitly allowed.
 
 **Notes**:
 
-- Requires ONLY `actions: write` permission (no `contents: read` needed)
+- Requires ONLY `actions: write` permission
 - Target workflow must support `workflow_dispatch` trigger
 - Workflow inputs are validated against target workflow's input schema
 - Cross-repository dispatch requires appropriate `actions: write` permissions in the target repository
 - In `workflow_call` relay (CentralRepoOps) scenarios, the compiler automatically injects both `target-repo` and `target-ref` from `needs.activation.outputs.*` so the dispatch targets the correct platform repository and branch
+- Per-call `message.ref` values MUST match the configured `allowed-refs` patterns (or the implicit default-branch allowance when `allowed-refs` is omitted); non-matching refs MUST be rejected.
 
 ---
 
@@ -3705,7 +3923,6 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `security-events: write` - SARIF report upload and alert creation
 
 *GitHub App*:
@@ -3733,22 +3950,18 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `security-events: write` - Alert metadata access
 - `actions: read` - Workflow run metadata for alert correlation
 
 *GitHub App*:
 
 - `security-events: write` - Alert metadata access
-- `contents: write` - Pull request branch creation
-- `pull-requests: write` - Pull request creation
 - `actions: read` - Workflow run metadata for alert correlation
 - `metadata: read` - Repository metadata (automatically granted)
 
 **Notes**:
 
-- Most complex permission set - requires security-events, contents, pull-requests, and actions scopes
-- Creates pull request with proposed fix referencing the alert
+- The handler calls the GitHub code-scanning autofix API (`POST /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}/fixes`) directly; it does not create a branch or pull request, so `contents: write` and `pull-requests: write` are not required
 - Alert must exist and be fixable
 
 ---
@@ -3822,12 +4035,10 @@ safe-outputs:
 
 *GitHub Actions Token* (when `target` is NOT configured):
 
-- `contents: read` - Repository metadata and context
 - `checks: write` - Check run creation
 
 *GitHub Actions Token* (when `target` IS configured):
 
-- `contents: read` - Repository metadata and context
 - `checks: write` - Check run creation
 - `pull-requests: read` - PR head SHA resolution via `GET /repos/{owner}/{repo}/pulls/{pull_number}`
 
@@ -3881,7 +4092,6 @@ safe-outputs:
 
 *GitHub Actions Token*:
 
-- `contents: read` - Repository metadata and context
 - `issues: write` - Issue creation and agent assignment
 
 *GitHub App*:
@@ -4468,7 +4678,7 @@ Operations execute in:
 
 When threat detection executes in `warn` mode and reports a threat signal for a safe output, implementations MUST apply a type-specific fallback policy before any safe output side effect is committed.
 
-**Requirement WTD1 (Reviewable Annotation)**: For safe output types classified as **Reviewable** in Table WTD-A, implementations MUST convert the output into a review-first artifact that includes all of the following:
+**Requirement WTD1 (Reviewable Annotation)**: For safe output types classified as **Reviewable** in Table WTD-A, implementations MUST convert the output into a review-first artifact that includes all of the following when threat detection reports an actual threat verdict (`threat_detected`):
 
 1. A prominent caution section:
 
@@ -4479,7 +4689,18 @@ When threat detection executes in `warn` mode and reports a threat signal for a 
 2. A visible threat label string: `agentic threat detected`.
 3. An XML comment marker in emitted markdown content: `<!-- gh-aw-threat-detected -->`.
 
-**Requirement WTD2 (Convertible Fallback)**: For safe output types classified as **Convertible**, implementations MUST transform the operation into the mapped Reviewable type before execution. For this specification, `push_to_pull_request_branch` (also referred to as `update-pull-request-branch`) MUST fall back to `create_pull_request` with the WTD1 caution, label, and XML marker.
+**Requirement WTD1a (Threat Engine Error Annotation)**: When warn-mode threat detection produces a tooling-failure reason (`agent_failure` or `parse_error`) instead of a real threat verdict, implementations MUST emit a review-first artifact with all of the following:
+
+1. A prominent warning section:
+
+   > [!WARNING]
+   > threat detection engine error
+   > The threat detection engine encountered an error and could not complete analysis. This is a tooling failure, not a security finding.
+
+2. A visible warning label string: `threat detection engine error`.
+3. An XML comment marker in emitted markdown content: `<!-- gh-aw-threat-engine-error -->`.
+
+**Requirement WTD2 (Convertible Fallback)**: For safe output types classified as **Convertible**, implementations MUST transform the operation into the mapped Reviewable type before execution. For this specification, `push_to_pull_request_branch` (also referred to as `update-pull-request-branch`) MUST fall back to `create_pull_request` with the WTD1 or WTD1a review annotation that matches the detection reason.
 
 **Requirement WTD3 (Non-Reviewable Abort)**: For safe output types classified as **Abort**, implementations MUST NOT apply the original safe output. Implementations MUST activate a threat-detected code path, emit an explicit failure summary, and return a machine-readable threat-detected error outcome.
 
@@ -4500,6 +4721,7 @@ When threat detection executes in `warn` mode and reports a threat signal for a 
 | `close_discussion` | Abort |
 | `update_pull_request` | Reviewable |
 | `close_pull_request` | Abort |
+| `approve_workflow_run` | Abort |
 | `merge_pull_request` | Abort |
 | `mark_pull_request_as_ready_for_review` | Abort |
 | `push_to_pull_request_branch` | Convertible (`create_pull_request`) |
@@ -4530,7 +4752,7 @@ When threat detection executes in `warn` mode and reports a threat signal for a 
 
 **Compliance Testing**:
 
-- **T-WTD-001**: Reviewable outputs include CAUTION block, label text `agentic threat detected`, and XML comment marker.
+- **T-WTD-001**: Reviewable outputs include the threat-appropriate annotation: WTD1 CAUTION block/label/marker for `threat_detected`, or WTD1a WARNING block/label/marker for `agent_failure` and `parse_error`.
 - **T-WTD-002**: `push_to_pull_request_branch` in warn-mode threat failure is converted to `create_pull_request`.
 - **T-WTD-003**: Abort-class outputs are not applied and produce threat-detected error outcomes.
 
@@ -4645,6 +4867,19 @@ This section defines required behavior for unusual or boundary conditions.
 - If this creates ambiguity (e.g., two issues both want to be "aw_parent"), MUST reject with E005
 
 *Rationale*: Deterministic behavior prevents confusion.
+
+**Replay Authorization with Custom Repository Roles**
+
+*Scenario*: A user manually replays safe outputs through the Agentic Maintenance workflow in a repository that uses custom organization repository roles.
+
+*Behavior*:
+
+- Implementations MUST authorize replay only for actors whose effective standard repository role is exactly `admin` or `maintain`.
+- When GitHub reports a custom repository role name, implementations MUST resolve authorization from the inherited standard role metadata supplied by GitHub, not from the custom role name string.
+- Implementations MUST NOT infer exact authorization from the legacy `permission` bucket alone, because that bucket may collapse `maintain` to `write` and `triage` to `read`.
+- If the inherited standard role for a custom repository role cannot be resolved, the replay request MUST be rejected.
+
+*Rationale*: This preserves exact-match authorization semantics for standard roles while still permitting custom organization roles that inherit an authorized standard role.
 
 ---
 
@@ -5190,6 +5425,39 @@ safe-outputs:
 
 **Effect**: First issue becomes parent, subsequent issues link to it.
 
+### Pattern 11: Least-Privilege Per-Output Apps
+
+Assign separate GitHub Apps to outputs with different permission needs:
+
+```yaml
+safe-outputs:
+  github-app:
+    app-id: ${{ vars.GLOBAL_APP_ID }}
+    private-key: ${{ secrets.GLOBAL_APP_PRIVATE_KEY }}
+
+  add-comment:
+    github-app:
+      app-id: ${{ vars.ISSUE_APP_ID }}
+      private-key: ${{ secrets.ISSUE_APP_PRIVATE_KEY }}
+    target: ${{ github.event.issue.number }}
+    max: 1
+
+  dispatch-workflow:
+    github-app:
+      app-id: ${{ vars.ACTIONS_APP_ID }}
+      private-key: ${{ secrets.ACTIONS_APP_PRIVATE_KEY }}
+    workflows: [downstream.yml]
+    max: 1
+```
+
+**Use case**: One workflow needs both issue-comment writes and workflow-dispatch writes, but repository policy requires separate Apps for those permission domains.
+
+**Security note**:
+
+- The global `github-app` remains the fallback for handlers without a type-specific override
+- Each overridden handler receives its own installation token scoped to that handler's permissions only
+- Shared/global app permissions exclude handlers that declare their own `github-app`
+
 ### Best Practices
 
 **Start Conservative**:
@@ -5222,14 +5490,84 @@ safe-outputs:
 
 ## Appendix F: Document History
 
-### Changelog Alignment (Reviewer and Status-Comment Updates)
+### Changelog Alignment (Reviewer, Status-Comment, and Hardening Updates)
 
 This specification revision aligns with directly relevant `CHANGELOG.md` entries and with the current reviewer/status-comment PR updates:
 
+- **Commit 9d80a262**: safe-output field validation was hardened so normalized downstream payloads contain only schema/config-declared fields, unconditional agent-controlled `add_comment.comment_id` was removed, upload asset metadata is re-derived by the privileged job, and patch base metadata is embedded in the generated patch.
+- **Commit 178ff313**: `add_comment.comment_id` was reintroduced only for workflows that configure `safe-outputs.add-comment.target: "*"` and provide a trusted `safe-outputs.add-comment.allows-comment-ids` allowlist containing the requested comment ID.
 - **v0.40.1**: `add_comment` discussion handling was updated to auto-detect discussion context without requiring a `discussion` flag.
 - **v0.40.1**: append-only status comment behavior was documented for smoke workflow execution.
 - **Earlier changelog entry**: status comments were decoupled from default AI reaction behavior; explicit `on.status-comment` configuration is required when status comments are desired.
 - **Earlier changelog entry**: `command` trigger was renamed to `slash_command` with deprecation compatibility.
+
+**Version 1.28.5** (2026-08-20):
+
+- **Changed**: Default value of the `discussions` field on `hide-comment` inverted from `true` to `false`. The `discussions:write` permission is now opt-in, matching `add-comment`. Set `discussions: true` to hide comments on discussions; omitting the field no longer requests `discussions:write`.
+- **Updated**: Section 7 `hide_comment` permission documentation, configuration examples, and notes to reflect the opt-in default.
+- **Updated**: Publication metadata to 1.28.5.
+
+**Version 1.28.4** (2026-08-15):
+
+- **Added**: `approve_workflow_run` safe output definition, including its positive run-ID schema, fork-approval eligibility checks, triggering-PR authorization default, optional `allowed-pull-requests`, explicit credential requirement, and `actions: write` permission.
+- **Specified**: Staged approval previews MUST not access GitHub or consume the handler max limit; live approvals are Abort operations for warn-mode threat-detection failures.
+- **Updated**: Publication metadata to 1.28.4.
+
+**Version 1.28.3** (2026-08-14):
+
+- **Editorial-only**: Added the [safe-outputs scratchpad removal checklist](https://github.com/github/gh-aw/blob/main/specs/safe-outputs-scratchpad-removal.md) to track deletion of a deprecated scratchpad document by 2026-09-21; no normative requirements changed.
+- **Updated**: Publication metadata to 1.28.3.
+
+**Version 1.28.2** (2026-08-07):
+
+- **Added**: Controlled `add_comment.comment_id` support for wildcard comment targets. Agent-supplied comment IDs MAY be accepted only when `safe-outputs.add-comment.target` is `"*"` and the exact positive integer ID appears in trusted `safe-outputs.add-comment.allows-comment-ids` workflow state.
+- **Specified**: `allows-comment-ids` is REQUIRED before any agent-supplied `comment_id` is honored and accepts literal positive integer IDs, stringified positive integer IDs, or GitHub Actions expressions that resolve to such a list.
+- **Updated**: Publication metadata to 1.28.2.
+
+**Version 1.28.1** (2026-08-07):
+
+- **Specified**: Normalized downstream safe-output payloads MUST include only `type` plus schema/config-declared fields, with undeclared agent-supplied fields stripped before handler or privileged-job consumption.
+- **Removed**: Unconditional agent-controlled `add_comment.comment_id` from the default MCP input contract; status-comment reuse is limited to `target: "status"` with reusable comment IDs obtained from trusted workflow state.
+- **Specified**: Optional advisory/enrichment fields marked `x-strip-on-error` MAY be omitted when invalid.
+- **Specified**: Upload asset staging and publication MUST derive collision-resistant staged filenames and asset metadata from trusted staged files rather than agent-supplied metadata.
+- **Specified**: Patch base metadata MUST be derived from the generated patch, and agent-supplied `diff_size` and base-commit metadata MUST NOT control privileged patch processing.
+- **Updated**: Publication metadata to 1.28.1.
+
+**Version 1.28.0** (2026-07-31):
+
+- **Added**: GP5a specifying `safe-outputs.<type>.github-app` as a per-handler GitHub App override for safe output types.
+- **Specified**: Type-specific GitHub App tokens MUST be minted with only the overridden handler's required permissions and MUST take precedence over shared safe-outputs credentials.
+- **Specified**: Global `safe-outputs.github-app` permission aggregation excludes handlers that declare their own `github-app` override.
+- **Specified**: Handlers with no effective `safe_outputs` GitHub API permission requirement MUST NOT mint a dedicated handler token and MUST fall back to existing token resolution.
+- **Updated**: Safe output permission sections to reference the correct `github-app` field name.
+- **Updated**: Publication metadata to 1.28.0.
+
+**Version 1.27.0** (2026-07-29):
+
+- **Removed**: `contents: read` from the required permissions of all output-only safe-output handlers. The permission was an unconditional baseline with no functional purpose in the `safe_outputs` job for handlers that only call issue, pull-request, discussion, checks, or security-events APIs. Operators who use tightly scoped GitHub Apps no longer need to justify a repository-contents read grant for pure output workloads.
+- **Updated**: Permission tables for `create_issue`, `add_comment`, `close_issue`, `update_issue`, `assign_milestone`, `assign_to_user`, `unassign_from_user`, `assign_to_agent`, `link_sub_issue`, `set_issue_type`, `set_issue_field`, `comment_memory`, `create_discussion`, `update_discussion`, `close_discussion`, `hide_comment`, `add_labels`, `remove_labels`, `replace_label`, `add_reviewer`, `close_pull_request`, `mark_pull_request_as_ready_for_review`, `dismiss_pull_request_review`, `create_pull_request_review_comment`, `submit_pull_request_review`, `reply_to_pull_request_review_comment`, `resolve_pull_request_review_thread`, `update_pull_request` (without `update-branch`), `create_code_scanning_alert`, `autofix_code_scanning_alert`, `create_check_run`, `update_project`, `create_project`, and `create_project_status_update`.
+- **Removed**: `upload_asset` PermissionBuilder — the `safe_outputs` job does not process `upload_asset` items (handled by the dedicated `publish_assets` job with `contents: write`); no permissions are contributed to `safe_outputs` for this handler.
+- **Updated**: Publication metadata to 1.27.0.
+
+**Version 1.26.0** (2026-07-16):
+
+- **Added**: First-class fork-backed pull request semantics for `create_pull_request`, including distinct `target-repo` (upstream) and `head-repo` (automation-owned fork) roles.
+- **Added**: `head-github-app` configuration for both `create_pull_request` and `push_to_pull_request_branch`, allowing a GitHub App to mint an ephemeral credential scoped to the fork/head repository at runtime. When `head-github-app` is configured, it takes precedence over `head-github-token`.
+- **Specified**: Owner-qualified head references, dual-repository allowlist enforcement, least-privilege upstream/head credential roles, and required summary/manifest provenance fields (`upstream_repo`, `head_repo`, `base_sha`, `pushed_head_sha`, `credential_role`).
+- **Specified**: `push_to_pull_request_branch` follow-up pushes remain limited to pull requests whose head repository exactly matches the configured `head-repo`; arbitrary contributor forks remain forbidden.
+- **Updated**: Publication metadata to 1.26.0.
+
+**Version 1.25.1** (2026-07-16):
+
+- **Specified**: When `safe-outputs.github-app.repositories` is `["*"]`, implementations MUST omit the GitHub App installation-token `repositories` parameter rather than substituting `${{ github.event.repository.name }}`.
+- **Clarified**: The wildcard repository behavior applies to activation-job token minting and to subsequent safe-output-job token minting, including `workflow_call` and other reusable-workflow scenarios.
+- **Updated**: Publication metadata to 1.25.1.
+
+**Version 1.25.0** (2026-07-15):
+
+- **Added**: Replay authorization requirements in Section 10.6 for Agentic Maintenance `safe_outputs` replays in repositories using custom organization repository roles.
+- **Specified**: Replay authorization MUST use exact `admin` or `maintain` standard roles and, for custom roles, the inherited standard-role metadata reported by GitHub rather than the custom role name or the collapsed legacy `permission` bucket.
+- **Updated**: Publication metadata to 1.25.0.
 
 **Version 1.24.0** (2026-06-13):
 
@@ -5240,7 +5578,7 @@ This specification revision aligns with directly relevant `CHANGELOG.md` entries
 **Version 1.23.0** (2026-06-10):
 
 - **Added**: `create_check_run` safe output type definition in Section 7.3, including full MCP tool schema, operational semantics, configuration parameters, and permission requirements.
-- **Specified**: Dual-permission profile for `create_check_run`: `contents: read` + `checks: write` when no `target` is configured; adds `pull-requests: read` when `target` is set (required for PR head SHA resolution via `GET /repos/{owner}/{repo}/pulls/{pull_number}`).
+- **Specified**: Dual-permission profile for `create_check_run`: `checks: write` when no `target` is configured; adds `pull-requests: read` when `target` is set (required for PR head SHA resolution via `GET /repos/{owner}/{repo}/pulls/{pull_number}`).
 - **Specified**: SHA resolution order: API-fetched PR head SHA (when `target` configured) → event-payload `pull_request.head.sha` → `GITHUB_SHA` → `context.sha`.
 - **Specified**: Staged-mode behavior: Pulls API call is skipped; preview message includes the resolved PR number when `target` is set.
 - **Updated**: Publication metadata to 1.23.0.
@@ -5257,6 +5595,7 @@ This specification revision aligns with directly relevant `CHANGELOG.md` entries
 - **Added**: `add_comment` status-comment reuse extension semantics in Section 7.1 for `target: "status"` behavior and issue/PR-only restrictions.
 - **Added**: Changelog alignment subsection mapping safe-output/reviewer changelog items to this specification revision.
 - **Updated**: Publication metadata to 1.21.0.
+- **Clarified**: Section 10.5 now distinguishes real threat verdict annotations (`<!-- gh-aw-threat-detected -->`) from threat-engine tooling failures (`<!-- gh-aw-threat-engine-error -->`).
 
 **Version 1.20.0** (2026-05-15):
 
@@ -5375,7 +5714,9 @@ This section maps normative specification requirements (§3–§11) to implement
 | §5.2 Global Parameters | `footer`, `staged`, global max limits | `actions/setup/js/safe_outputs_config.cjs`, `pkg/workflow/compiler_safe_outputs.go` |
 | §6 Universal Feature Interpretation | Max limit semantics (MR1–MR4), staged mode (SM1–SM4), footer attribution (FA1–FA6) | `actions/setup/js/safe_outputs_handlers.cjs`, `actions/setup/js/safe_outputs_mcp_server.cjs` |
 | §7 Safe Output Type Definitions | Handler implementations for each type | `actions/setup/js/safe_outputs_handlers.cjs`, `actions/setup/js/safe_outputs_tools.json` |
+| §7.0.3 Declared Field Payload Construction | Normalized payload construction, undeclared field stripping, `x-strip-on-error` advisory field handling | `actions/setup/js/collect_ndjson_output.cjs`, `actions/setup/js/safe_output_type_validator.cjs`, `pkg/workflow/safe_outputs_validation_config.go` |
 | §7.1 Core Issue Operations | `create_issue`, `add_comment`, `hide_comment`, `close_issue` | `actions/setup/js/add_comment.cjs`, `actions/setup/js/safe_outputs_handlers.cjs` |
+| §7.3 `push_to_pull_request_branch` and `upload_asset` | Trusted patch metadata derivation and upload asset staged-file metadata derivation | `actions/setup/js/generate_git_patch.cjs`, `actions/setup/js/push_to_pull_request_branch.cjs`, `actions/setup/js/upload_assets.cjs` |
 | §8 Protocol Exchange Patterns | stdio container transport, tool invocation, MCP server constraint enforcement | `actions/setup/js/safe_outputs_mcp_server.cjs`, `actions/setup/js/safe_outputs_mcp_server_http.cjs` |
 | §8.3 MCE1 Early Validation | Invocation-time validation wiring through MCP server startup | `actions/setup/js/safe_outputs_mcp_server.cjs` (`startSafeOutputsServer` → `createHandlers()`), `actions/setup/js/safe_outputs_handlers.cjs` (`addCommentHandler`, `createIssueHandler`, `updatePullRequestHandler`) |
 | §8.3 MCE2 Tool Description Disclosure | Tool descriptions/schemas exposed during MCP tool registration | `actions/setup/js/safe_outputs_mcp_server.cjs` (`registerPredefinedTools` call), `actions/setup/js/safe_outputs_tools_loader.cjs` (`registerPredefinedTools`) |

@@ -11,6 +11,14 @@ import (
 
 func TestValidateUniversalLLMConsumerModel(t *testing.T) {
 	compiler := NewCompiler()
+	opencodeEngine, err := NewBehaviorDefinedEngine(&EngineDefinition{
+		ID:          "opencode",
+		DisplayName: "OpenCode",
+		Behaviors: &EngineBehaviorDefinition{
+			SecretStrategy: behaviorSecretStrategyUniversalLLMConsumer,
+		},
+	})
+	require.NoError(t, err)
 
 	t.Run("non universal engine skips validation", func(t *testing.T) {
 		err := compiler.validateUniversalLLMConsumerModel(
@@ -31,24 +39,24 @@ func TestValidateUniversalLLMConsumerModel(t *testing.T) {
 					"id": "opencode",
 				},
 			},
-			NewOpenCodeEngine(),
+			opencodeEngine,
 		)
 		require.Error(t, err, "Missing model should fail for opencode")
-		assert.Contains(t, err.Error(), "engine.model is required for engine 'opencode'")
+		require.ErrorContains(t, err, "engine.model is required for engine 'opencode'")
 	})
 
-	t.Run("crush requires provider/model format", func(t *testing.T) {
+	t.Run("opencode requires provider/model format", func(t *testing.T) {
 		err := compiler.validateUniversalLLMConsumerModel(
 			map[string]any{
 				"engine": map[string]any{
-					"id":    "crush",
+					"id":    "opencode",
 					"model": "gpt-4.1",
 				},
 			},
-			NewCrushEngine(),
+			opencodeEngine,
 		)
-		require.Error(t, err, "Unqualified model should fail for crush")
-		assert.Contains(t, err.Error(), "provider/model format")
+		require.Error(t, err, "Unqualified model should fail for opencode")
+		require.ErrorContains(t, err, "provider/model format")
 	})
 
 	t.Run("unsupported provider fails", func(t *testing.T) {
@@ -59,21 +67,21 @@ func TestValidateUniversalLLMConsumerModel(t *testing.T) {
 					"model": "groq/llama-4",
 				},
 			},
-			NewOpenCodeEngine(),
+			opencodeEngine,
 		)
 		require.Error(t, err, "Unsupported provider should fail")
-		assert.Contains(t, err.Error(), "unsupported provider")
+		require.ErrorContains(t, err, "unsupported provider")
 	})
 
 	t.Run("supported provider passes", func(t *testing.T) {
 		err := compiler.validateUniversalLLMConsumerModel(
 			map[string]any{
 				"engine": map[string]any{
-					"id":    "crush",
+					"id":    "opencode",
 					"model": "anthropic/claude-sonnet-4",
 				},
 			},
-			NewCrushEngine(),
+			opencodeEngine,
 		)
 		assert.NoError(t, err, "Supported provider/model should pass")
 	})
@@ -92,7 +100,7 @@ func TestValidatePiEngineRequirements(t *testing.T) {
 			"github": true,
 		}), NewPiEngine())
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "tools.github.mode: gh-proxy")
+		require.ErrorContains(t, err, "tools.github.mode: gh-proxy")
 	})
 
 	t.Run("pi requires cli-proxy", func(t *testing.T) {
@@ -100,7 +108,7 @@ func TestValidatePiEngineRequirements(t *testing.T) {
 			"github": map[string]any{"mode": "gh-proxy"},
 		}), NewPiEngine())
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "tools.cli-proxy: true")
+		require.ErrorContains(t, err, "tools.cli-proxy: true")
 	})
 
 	t.Run("valid pi tool config passes", func(t *testing.T) {

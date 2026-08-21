@@ -38,9 +38,12 @@ const os = require("os");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_VALIDATION, ERR_PARSE, ERR_SYSTEM, ERR_API, ERR_CONFIG } = require("./error_codes.cjs");
 const { findRepoCheckout } = require("./find_repo_checkout.cjs");
+const { getSetupTimeoutMs } = require("./child_process_timeouts.cjs");
 
 const DEFAULT_BASE_BRANCH = process.env.GH_AW_CUSTOM_BASE_BRANCH || process.env.GITHUB_BASE_REF || process.env.GITHUB_REF_NAME || "main";
 const PATCH_SIDECAR_TOOLS = new Set(["create_pull_request", "push_to_pull_request_branch"]);
+const FETCH_TIMEOUT_MS = getSetupTimeoutMs("applySamplesFetch");
+const GIT_COMMAND_TIMEOUT_MS = getSetupTimeoutMs("applySamplesGit");
 
 /**
  * @typedef {Object} SampleEntry
@@ -64,7 +67,7 @@ function loadSamples() {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`${ERR_PARSE}: apply_samples: failed to parse GH_AW_SAMPLES as JSON: ${getErrorMessage(err)}`);
+    throw new Error(`${ERR_PARSE}: apply_samples: failed to parse GH_AW_SAMPLES as JSON: ${getErrorMessage(err)}`, { cause: err });
   }
   // Tolerate a literal JSON `null` payload (older compiler emitted it for
   // workflows with --use-samples but no `samples:` entries). Treat as empty.
@@ -94,7 +97,10 @@ function loadSamples() {
  */
 function runGit(args, cwd) {
   const { spawnSync } = require("child_process");
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: GIT_COMMAND_TIMEOUT_MS });
+  if (result.error) {
+    throw result.error;
+  }
   if (result.status !== 0) {
     throw new Error(`${ERR_SYSTEM}: git ${args.join(" ")} failed (exit ${result.status}): ${result.stderr || result.stdout}`);
   }
@@ -185,7 +191,7 @@ async function fetchPullRequestHeadRef({ owner, repo, pullNumber }) {
   const token = selectTokenForRepo(owner, repo);
   if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
-    const resp = await fetch(url, { headers });
+    const resp = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!resp.ok) {
       core.warning(`apply_samples: GET ${url} returned HTTP ${resp.status}`);
       return null;
@@ -245,14 +251,28 @@ async function derivePrHeadRef(entry) {
     if (ref) return ref;
   }
 
-  // 3. Explicit pull_request_number on the sample arguments.
-  const argNumber = Number(entry.arguments.pull_request_number);
-  if (Number.isFinite(argNumber) && argNumber > 0) {
-    const ref = await fetchPullRequestHeadRef({ owner, repo, pullNumber: argNumber });
+  // 3. PR number from sample arguments, workflow_dispatch inputs, or config target.
+  const pullNumber =
+    toPositivePullRequestNumber(entry.arguments.pull_request_number) ||
+    toPositivePullRequestNumber(payload?.inputs?.pull_request_number) ||
+    toPositivePullRequestNumber(payload?.client_payload?.pull_request_number) ||
+    readConfiguredTargetPullRequestNumber(entry.tool);
+  if (pullNumber) {
+    const ref = await fetchPullRequestHeadRef({ owner, repo, pullNumber });
     if (ref) return ref;
   }
 
   return null;
+}
+
+/**
+ * Convert unknown value to a positive pull request number, or null.
+ * @param {any} value
+ * @returns {number|null}
+ */
+function toPositivePullRequestNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -286,6 +306,44 @@ function readConfiguredTargetRepo(tool) {
     core.debug(`apply_samples: could not read target-repo from ${configPath}: ${getErrorMessage(err)}`);
   }
   return "";
+}
+
+/**
+ * Read configured `target` for a safe-output tool and coerce it into a PR number.
+ * Supports plain numeric values and `${ENV_VAR}` placeholders.
+ * @param {string} tool
+ * @returns {number|null}
+ */
+function readConfiguredTargetPullRequestNumber(tool) {
+  const configPath = process.env.GH_AW_SAFE_OUTPUTS_CONFIG_PATH;
+  if (!configPath || !configPath.trim()) {
+    return null;
+  }
+
+  const toolKey = typeof tool === "string" ? tool.replace(/-/g, "_") : "";
+
+  try {
+    const raw = fs.readFileSync(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    const config = parsed && typeof parsed === "object" ? Object.fromEntries(Object.entries(parsed).map(([k, v]) => [String(k).replace(/-/g, "_"), v])) : {};
+    const toolConfig = toolKey && config && typeof config === "object" ? config[toolKey] : null;
+    const target = toolConfig && typeof toolConfig === "object" ? toolConfig.target : null;
+
+    if (typeof target === "number") {
+      return toPositivePullRequestNumber(target);
+    }
+    if (typeof target === "string") {
+      const trimmed = target.trim();
+      const envMatch = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(trimmed);
+      if (envMatch) {
+        return toPositivePullRequestNumber(process.env[envMatch[1]]);
+      }
+      return toPositivePullRequestNumber(trimmed);
+    }
+  } catch (err) {
+    core.debug(`apply_samples: could not read target from ${configPath}: ${getErrorMessage(err)}`);
+  }
+  return null;
 }
 
 /**
@@ -368,7 +426,7 @@ async function preStagePatch(entry, index, workspace) {
     branch = await derivePrHeadRef(entry);
     if (!branch) {
       throw new Error(
-        `apply_samples: cannot derive pull-request head branch for sample[${index}] (tool=${entry.tool}). ` +
+        `${ERR_VALIDATION}: apply_samples: cannot derive pull-request head branch for sample[${index}] (tool=${entry.tool}). ` +
           `Trigger the workflow from a pull_request event, or set arguments.pull_request_number on the sample entry, ` +
           `or provide GITHUB_TOKEN so the PR can be fetched.`
       );
@@ -400,7 +458,11 @@ async function preStagePatch(entry, index, workspace) {
 
   // Write patch to a temp file and apply it.
   const tmpPatch = path.join(os.tmpdir(), `gh-aw-sample-${index + 1}.patch`);
-  fs.writeFileSync(tmpPatch, patch.endsWith("\n") ? patch : patch + "\n");
+  try {
+    fs.writeFileSync(tmpPatch, patch.endsWith("\n") ? patch : patch + "\n");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to write file ${tmpPatch}: ${getErrorMessage(err)}`, { cause: err });
+  }
   try {
     runGit(["apply", "--whitespace=nowarn", tmpPatch], repoCwd);
   } catch (err) {
@@ -418,7 +480,7 @@ async function preStagePatch(entry, index, workspace) {
  * with the parsed JSON response (or reject on timeout).
  * @param {import("child_process").ChildProcess} child
  * @param {NodeJS.WritableStream} stdin
- * @param {object} request
+ * @param {any} request
  * @param {AsyncIterableIterator<string>} responseIterator
  * @returns {Promise<any>}
  */
@@ -440,7 +502,7 @@ async function sendJsonRpc(child, stdin, request, responseIterator) {
     try {
       return JSON.parse(line);
     } catch (err) {
-      throw new Error(`${ERR_PARSE}: apply_samples: failed to parse MCP JSON-RPC response for request id=${request.id}: ${getErrorMessage(err)} (line: ${line})`);
+      throw new Error(`${ERR_PARSE}: apply_samples: failed to parse MCP JSON-RPC response for request id=${request.id}: ${getErrorMessage(err)} (line: ${line})`, { cause: err });
     }
   }
 }
@@ -536,7 +598,11 @@ function writeSyntheticStdioLog(logPath, sampleCount) {
     }),
     "",
   ];
-  fs.appendFileSync(logPath, lines.join("\n"));
+  try {
+    fs.appendFileSync(logPath, lines.join("\n"));
+  } catch {
+    /* ignore */
+  }
 }
 
 async function main() {
@@ -563,6 +629,9 @@ async function main() {
   const child = spawn(process.execPath, [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
     env: process.env,
+  });
+  child.on("error", err => {
+    core.error(`apply_samples: failed to launch MCP server: ${getErrorMessage(err)}`);
   });
 
   const stdoutIter = lineIterator(child.stdout);
@@ -648,7 +717,7 @@ async function main() {
 
 if (require.main === module) {
   main().catch(err => {
-    core.setFailed(err && err.stack ? err.stack : String(err));
+    core.setFailed(err && err.stack ? err.stack : getErrorMessage(err));
   });
 }
 

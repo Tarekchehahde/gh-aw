@@ -50,8 +50,13 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Smoke Test: Multiple Pull Request Creation

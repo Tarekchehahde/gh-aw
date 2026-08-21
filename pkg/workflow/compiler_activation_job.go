@@ -49,9 +49,7 @@ func (c *Compiler) buildActivationJob(data *WorkflowData, preActivationJobCreate
 	if err := c.addActivationRepositoryAndOutputSteps(ctx); err != nil {
 		return nil, fmt.Errorf("failed to add activation repository and output steps: %w", err)
 	}
-	if err := c.addActivationSkillInstallSteps(ctx); err != nil {
-		return nil, fmt.Errorf("failed to add skill install steps: %w", err)
-	}
+	c.addActivationSkillInstallSteps(ctx)
 	if err := c.addActivationCommandAndLabelOutputs(ctx); err != nil {
 		return nil, fmt.Errorf("failed to add activation command and label outputs: %w", err)
 	}
@@ -434,10 +432,22 @@ func (c *Compiler) generateCheckoutGitHubFolderForActivation(data *WorkflowData)
 	// during activation and are omitted to keep the shallow checkout minimal.
 	defaultSparseCheckoutDirs := map[string]struct {
 	}{".github": {}, ".agents": {}}
-	registry := GetGlobalEngineRegistry()
+	registry := c.engineRegistry
 	for _, folder := range registry.GetAllAgentManifestFolders() {
 		if !setutil.Contains(defaultSparseCheckoutDirs, folder) {
 			extraPaths = append(extraPaths, folder)
+		}
+	}
+	for _, folder := range localSkillSparseCheckoutTopLevelDirs(data) {
+		if !setutil.Contains(defaultSparseCheckoutDirs, folder) {
+			extraPaths = append(extraPaths, folder)
+		}
+	}
+	if data != nil {
+		for _, folder := range data.AmbientFolders {
+			if !setutil.Contains(defaultSparseCheckoutDirs, folder) {
+				extraPaths = append(extraPaths, folder)
+			}
 		}
 	}
 	compilerActivationJobLog.Printf("Adding %d engine-specific dirs to sparse-checkout: %v", len(extraPaths), extraPaths)
@@ -484,6 +494,62 @@ func (c *Compiler) generateCheckoutGitHubFolderForActivation(data *WorkflowData)
 	// during activation. sparse-checkout-cone-mode: true ensures subdirectories are recursively included.
 	compilerActivationJobLog.Print("Adding .github, .agents, and engine-specific dirs to sparse checkout for activation job")
 	return cm.GenerateGitHubFolderCheckoutStep("", "", activationToken, c.getActionPin, extraPaths...)
+}
+
+func localSkillSparseCheckoutTopLevelDirs(data *WorkflowData) []string {
+	if data == nil {
+		return nil
+	}
+	refs := append([]SkillReference(nil), data.SkillReferences...)
+	if len(refs) == 0 && len(data.Skills) > 0 {
+		refs = make([]SkillReference, 0, len(data.Skills))
+		for _, skill := range data.Skills {
+			skill = strings.TrimSpace(skill)
+			if skill == "" {
+				continue
+			}
+			refs = append(refs, SkillReference{Skill: skill})
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		spec := strings.TrimSpace(ref.Skill)
+		if !parseSkillRefSpec(spec).isLocal {
+			continue
+		}
+		normalized := strings.TrimPrefix(strings.ReplaceAll(spec, "\\", "/"), "./")
+		if normalized == "" {
+			continue
+		}
+		parts := strings.Split(normalized, "/")
+		if len(parts) == 0 {
+			continue
+		}
+		invalid := false
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." {
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+
+		topLevel := parts[0]
+		if _, ok := seen[topLevel]; ok {
+			continue
+		}
+		seen[topLevel] = struct{}{}
+		result = append(result, topLevel)
+	}
+
+	return result
 }
 
 // addSameRepoIfConditionToSteps injects an if: condition into each step that restricts

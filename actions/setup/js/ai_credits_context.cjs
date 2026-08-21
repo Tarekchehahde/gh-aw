@@ -1,4 +1,5 @@
 // @ts-check
+require("./shim.cjs");
 
 const fs = require("fs");
 const path = require("path");
@@ -11,10 +12,16 @@ const AI_CREDITS_RATE_LIMIT_ERROR_FIELDS = new Set(["ai_credits_rate_limit_error
 const AI_CREDITS_RATE_LIMIT_TEXT_FIELDS = new Set(["error", "message", "reason", "details", "detail", "type", "code"]);
 const AI_CREDITS_RATE_LIMIT_PATTERNS = [/ai[\s_-]*credits?.*(?:rate[\s-]*limit|limit exceeded|budget exceeded|exceeded)/i, /(?:rate[\s-]*limit|too many requests).*(?:ai[\s_-]*credits?)/i, /\bai_credits_limit_exceeded\b/i];
 const MAX_AI_CREDITS_EXCEEDED_FIELDS = new Set(["max_ai_credits_exceeded", "maxAiCreditsExceeded"]);
+/** @type {{ aiCredits: string, maxAICredits: string, rateLimitError: boolean, maxAICreditsExceeded: boolean }} */
+const EMPTY_AI_CREDITS_STATE = { aiCredits: "", maxAICredits: "", rateLimitError: false, maxAICreditsExceeded: false };
 const BUDGET_EXCEEDED_EVENT = "budget_exceeded";
 // The literal error type emitted by the AWF API proxy (HTTP 400) when maxAiCredits is active
 // and the requested model is not in the built-in pricing table.
 const UNKNOWN_MODEL_AI_CREDITS_TYPE = "unknown_model_ai_credits";
+// The literal error type emitted by the AWF API proxy (HTTP 403) when the consecutive cache
+// miss counter reaches the apiProxy.maxCacheMisses limit. Engine-agnostic: all engines share
+// the same proxy guardrail.
+const MAX_CACHE_MISSES_EXCEEDED_EVENT_TYPE = "max_cache_misses_exceeded";
 const MAX_AI_CREDITS_EXCEEDED_STDIO_RE = /maximum ai credits exceeded(?:\s*\((\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\))?/i;
 const DEFAULT_AGENT_STDIO_LOG = "/tmp/gh-aw/agent-stdio.log";
 const AGENT_STDIO_LOG_MAX_TAIL = 64 * 1024; // 64 KB — sufficient for any realistic error block
@@ -37,27 +44,11 @@ function parsePositiveNumberString(value) {
 }
 
 /**
- * @param {string} left
- * @param {string} right
- * @returns {boolean}
- */
-function isNumberStringGreaterThanOrEqual(left, right) {
-  if (!left || !right) return false;
-  const leftNumber = Number.parseFloat(left);
-  const rightNumber = Number.parseFloat(right);
-  return Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && leftNumber >= rightNumber;
-}
-
-/**
  * @param {boolean} hasRateLimitSignal
- * @param {string} aiCredits
- * @param {string} maxAICredits
  * @returns {boolean}
  */
-function shouldReportAICreditsRateLimitError(hasRateLimitSignal, aiCredits, maxAICredits) {
-  if (!hasRateLimitSignal) return false;
-  if (!aiCredits || !maxAICredits) return true;
-  return isNumberStringGreaterThanOrEqual(aiCredits, maxAICredits);
+function shouldReportAICreditsRateLimitError(hasRateLimitSignal) {
+  return hasRateLimitSignal;
 }
 
 /**
@@ -66,6 +57,14 @@ function shouldReportAICreditsRateLimitError(hasRateLimitSignal, aiCredits, maxA
  */
 function isTrueLike(value) {
   return value === true || value === "true" || value === 1 || value === "1";
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function sanitizeModelName(value) {
+  return typeof value === "string" ? value.replace(/\r?\n|\r/g, " ").trim() : "";
 }
 
 /**
@@ -93,24 +92,82 @@ function resolveFirewallAuditLogPath(auditJsonlPathOverride) {
 }
 
 /**
- * @param {unknown} entry
- * @returns {string}
+ * @param {string} [auditJsonlPathOverride]
+ * @returns {string[]}
  */
-function parseMaxAICreditsFromAuditEntry(entry) {
-  if (!entry || typeof entry !== "object") return "";
+function resolveUnknownModelAICreditsLogPaths(auditJsonlPathOverride) {
+  if (auditJsonlPathOverride) return [auditJsonlPathOverride];
+  const agentOutputFile = process.env.GH_AW_AGENT_OUTPUT;
+  const roots = [];
+  if (agentOutputFile) {
+    roots.push(path.dirname(agentOutputFile));
+  }
+
+  /** @type {string[]} */
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = candidate => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    candidates.push(candidate);
+  };
+
+  for (const root of roots) {
+    addCandidate(path.join(root, "sandbox", "firewall", "logs", "api-proxy-logs", "event-logs.jsonl"));
+    addCandidate(path.join(root, "sandbox", "firewall", "logs", "api-proxy-logs", "events.jsonl"));
+    addCandidate(path.join(root, "sandbox", "firewall", "audit", "api-proxy-logs", "event-logs.jsonl"));
+    addCandidate(path.join(root, "sandbox", "firewall", "audit", "api-proxy-logs", "events.jsonl"));
+  }
+
+  addCandidate("/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/event-logs.jsonl");
+  addCandidate("/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/events.jsonl");
+  addCandidate("/tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/event-logs.jsonl");
+  addCandidate("/tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/events.jsonl");
+  addCandidate("/tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/event-logs.jsonl");
+  addCandidate("/tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/events.jsonl");
+  addCandidate(resolveFirewallAuditLogPath());
+  return candidates;
+}
+
+/**
+ * Depth-first traversal of a nested object, calling visitor for each [key, value] pair.
+ * Traversal stops early if visitor returns true.
+ *
+ * @param {unknown} entry
+ * @param {(key: string, value: unknown) => boolean | void} visitor - return true to stop early
+ * @returns {boolean} true if visitor stopped traversal early
+ */
+function traverseObjectTree(entry, visitor) {
+  if (!entry || typeof entry !== "object") return false;
   const stack = [entry];
   while (stack.length > 0) {
     const node = stack.pop();
     if (!node || typeof node !== "object") continue;
     for (const [key, value] of Object.entries(node)) {
-      if (MAX_AI_CREDITS_FIELDS.has(key)) {
-        const parsed = parsePositiveNumberString(value);
-        if (parsed) return parsed;
-      }
+      if (visitor(key, value) === true) return true;
       if (value && typeof value === "object") stack.push(value);
     }
   }
-  return "";
+  return false;
+}
+
+/**
+ * @param {unknown} entry
+ * @returns {string}
+ */
+function parseMaxAICreditsFromAuditEntry(entry) {
+  let result = "";
+  traverseObjectTree(entry, (key, value) => {
+    if (MAX_AI_CREDITS_FIELDS.has(key)) {
+      const parsed = parsePositiveNumberString(value);
+      if (parsed) {
+        result = parsed;
+        return true;
+      }
+    }
+    return false;
+  });
+  return result;
 }
 
 /**
@@ -118,25 +175,18 @@ function parseMaxAICreditsFromAuditEntry(entry) {
  * @returns {{ aiCredits: string, rateLimitError: boolean }}
  */
 function parseAICreditsErrorInfoFromAuditEntry(entry) {
-  if (!entry || typeof entry !== "object") return { aiCredits: "", rateLimitError: false };
-  const stack = [entry];
   let aiCredits = "";
   let rateLimitError = false;
-  while (stack.length > 0) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    for (const [key, value] of Object.entries(node)) {
-      if (AI_CREDITS_FIELDS.has(key)) {
-        const parsed = parsePositiveNumberString(value);
-        if (parsed) aiCredits = parsed;
-      }
-      if (AI_CREDITS_RATE_LIMIT_ERROR_FIELDS.has(key) && isTrueLike(value)) rateLimitError = true;
-      if (AI_CREDITS_RATE_LIMIT_TEXT_FIELDS.has(key) && typeof value === "string") {
-        if (AI_CREDITS_RATE_LIMIT_PATTERNS.some(pattern => pattern.test(value))) rateLimitError = true;
-      }
-      if (value && typeof value === "object") stack.push(value);
+  traverseObjectTree(entry, (key, value) => {
+    if (AI_CREDITS_FIELDS.has(key)) {
+      const parsed = parsePositiveNumberString(value);
+      if (parsed) aiCredits = parsed;
     }
-  }
+    if (AI_CREDITS_RATE_LIMIT_ERROR_FIELDS.has(key) && isTrueLike(value)) rateLimitError = true;
+    if (AI_CREDITS_RATE_LIMIT_TEXT_FIELDS.has(key) && typeof value === "string") {
+      if (AI_CREDITS_RATE_LIMIT_PATTERNS.some(pattern => pattern.test(value))) rateLimitError = true;
+    }
+  });
   return { aiCredits, rateLimitError };
 }
 
@@ -156,19 +206,46 @@ function parseAICreditsErrorInfoFromAuditEntry(entry) {
 function iterateAuditEntries(auditJsonlPathOverride, defaultValue, contentGuard, accumulate) {
   try {
     const auditJsonlPath = resolveFirewallAuditLogPath(auditJsonlPathOverride);
-    if (!fs.existsSync(auditJsonlPath)) return defaultValue;
-    const content = fs.readFileSync(auditJsonlPath, "utf8");
-    if (!content.trim()) return defaultValue;
-    if (contentGuard && !contentGuard(content)) return defaultValue;
-    let result = defaultValue;
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed[0] !== "{") continue;
+    return iterateJSONLFiles([auditJsonlPath], defaultValue, contentGuard, accumulate);
+  } catch {
+    return defaultValue;
+  }
+}
+
+/**
+ * Iterates one or more JSONL files, accumulating parsed entries across every existing file.
+ * Missing, unreadable, or malformed files/lines are ignored.
+ *
+ * @template T
+ * @param {string[]} filePaths
+ * @param {T} defaultValue
+ * @param {((content: string) => boolean) | null} contentGuard
+ * @param {(acc: T, entry: unknown) => T | undefined} accumulate
+ * @param {(acc: T) => boolean} [shouldStop]
+ * @returns {T}
+ */
+function iterateJSONLFiles(filePaths, defaultValue, contentGuard, accumulate, shouldStop) {
+  let result = defaultValue;
+  try {
+    for (const filePath of filePaths) {
       try {
-        const nextResult = accumulate(result, JSON.parse(trimmed));
-        if (nextResult !== undefined) result = nextResult;
+        if (!fs.existsSync(filePath)) continue;
+        const content = fs.readFileSync(filePath, "utf8");
+        if (!content.trim()) continue;
+        if (contentGuard && !contentGuard(content)) continue;
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed[0] !== "{") continue;
+          try {
+            const nextResult = accumulate(result, JSON.parse(trimmed));
+            if (nextResult !== undefined) result = nextResult;
+            if (shouldStop && shouldStop(result)) return result;
+          } catch {
+            // ignore malformed lines
+          }
+        }
       } catch {
-        // ignore malformed lines
+        // ignore unreadable files and continue to the next candidate
       }
     }
     return result;
@@ -214,7 +291,6 @@ function parseAICreditsErrorInfoFromAuditLog(auditJsonlPathOverride) {
  * Detects a `max_ai_credits_exceeded` signal from a single firewall audit log entry.
  * Checks for the explicit `max_ai_credits_exceeded` boolean field, its camelCase variant,
  * or a `budget_exceeded` event with `reason: "hard_limit"` and `forced_termination: true`
- * as written by the aw-harness upon hard-limit abort (§11.2.2).
  * Only inspects top-level fields to avoid false positives from nested provider responses.
  *
  * @param {unknown} entry
@@ -256,17 +332,10 @@ function parseMaxAICreditsExceededFromAuditLog(auditJsonlPathOverride) {
  * @returns {boolean}
  */
 function parseUnknownModelAICreditsFromAuditEntry(entry) {
-  if (!entry || typeof entry !== "object") return false;
-  const stack = [entry];
-  while (stack.length > 0) {
-    const node = stack.pop();
-    if (!node || typeof node !== "object") continue;
-    for (const [, value] of Object.entries(node)) {
-      if (value === UNKNOWN_MODEL_AI_CREDITS_TYPE) return true;
-      if (value && typeof value === "object") stack.push(value);
-    }
-  }
-  return false;
+  return traverseObjectTree(entry, (_key, value) => {
+    if (value === UNKNOWN_MODEL_AI_CREDITS_TYPE) return true;
+    return false;
+  });
 }
 
 /**
@@ -279,11 +348,76 @@ function parseUnknownModelAICreditsFromAuditEntry(entry) {
  * @returns {boolean}
  */
 function parseUnknownModelAICreditsFromAuditLog(auditJsonlPathOverride) {
-  return iterateAuditEntries(
-    auditJsonlPathOverride,
+  return iterateJSONLFiles(
+    resolveUnknownModelAICreditsLogPaths(auditJsonlPathOverride),
     false,
     content => content.includes(UNKNOWN_MODEL_AI_CREDITS_TYPE),
-    (acc, entry) => acc || parseUnknownModelAICreditsFromAuditEntry(entry)
+    (acc, entry) => acc || parseUnknownModelAICreditsFromAuditEntry(entry),
+    acc => acc
+  );
+}
+
+/**
+ * Detects `unknown_model_ai_credits` from the firewall event/audit JSONL logs and extracts the model name.
+ * Structured entries emitted by the AWF API proxy carry both the error type and the model name, e.g.:
+ *   { "type": "unknown_model_ai_credits", "model": "claude-opus-5" }
+ *
+ * @param {string} [auditJsonlPathOverride]
+ * @returns {{ detected: boolean, modelName: string }}
+ */
+function parseUnknownModelAICreditsAndModelFromAuditLog(auditJsonlPathOverride) {
+  /** @type {{ detected: boolean, modelName: string }} */
+  const initial = { detected: false, modelName: "" };
+  return iterateJSONLFiles(
+    resolveUnknownModelAICreditsLogPaths(auditJsonlPathOverride),
+    initial,
+    content => content.includes(UNKNOWN_MODEL_AI_CREDITS_TYPE),
+    /**
+     * @param {{ detected: boolean, modelName: string }} acc
+     * @param {unknown} entry
+     * @returns {{ detected: boolean, modelName: string } | undefined}
+     */
+    (acc, entry) => {
+      if (acc.detected && acc.modelName) return acc; // fully resolved, skip remaining entries
+      if (!parseUnknownModelAICreditsFromAuditEntry(entry)) return undefined; // not a matching entry
+      let modelName = acc.modelName;
+      if (!modelName) {
+        traverseObjectTree(entry, (key, value) => {
+          const sanitized = sanitizeModelName(value);
+          if (key === "model" && sanitized) {
+            modelName = sanitized;
+            return true;
+          }
+          return false;
+        });
+      }
+      return { detected: true, modelName };
+    },
+    acc => acc.detected && !!acc.modelName
+  );
+}
+
+/**
+ * Detects a `max_cache_misses_exceeded` event from the AWF API proxy event logs.
+ * The proxy emits this HTTP 403 error when the consecutive cache miss counter reaches
+ * the configured `apiProxy.maxCacheMisses` limit. Detection is engine-agnostic:
+ * all agentic engines share the same AWF API proxy guardrail.
+ * Structured entries emitted by the AWF API proxy look like:
+ *   { "type": "max_cache_misses_exceeded", "consecutive_cache_misses": 6, "max_cache_misses": 5 }
+ *
+ * @param {string} [eventLogPathOverride]
+ * @returns {boolean}
+ */
+function parseMaxCacheMissesExceededFromEventLog(eventLogPathOverride) {
+  return iterateJSONLFiles(
+    resolveUnknownModelAICreditsLogPaths(eventLogPathOverride),
+    false,
+    content => content.includes(MAX_CACHE_MISSES_EXCEEDED_EVENT_TYPE),
+    (acc, entry) => {
+      if (acc) return true; // already detected, short-circuit
+      return traverseObjectTree(entry, (_key, value) => value === MAX_CACHE_MISSES_EXCEEDED_EVENT_TYPE) || undefined;
+    },
+    acc => acc
   );
 }
 
@@ -297,9 +431,7 @@ function parseUnknownModelAICreditsFromAuditLog(auditJsonlPathOverride) {
  * @returns {{ aiCredits: string, maxAICredits: string, rateLimitError: boolean, maxAICreditsExceeded: boolean }}
  */
 function parseAuditLogCombined(auditJsonlPathOverride) {
-  /** @type {{ aiCredits: string, maxAICredits: string, rateLimitError: boolean, maxAICreditsExceeded: boolean }} */
-  const initial = { aiCredits: "", maxAICredits: "", rateLimitError: false, maxAICreditsExceeded: false };
-  return iterateAuditEntries(auditJsonlPathOverride, initial, null, (acc, entry) => {
+  return iterateAuditEntries(auditJsonlPathOverride, EMPTY_AI_CREDITS_STATE, null, (acc, entry) => {
     const errorInfo = parseAICreditsErrorInfoFromAuditEntry(entry);
     const max = parseMaxAICreditsFromAuditEntry(entry);
     const maxAICreditsExceeded = parseMaxAICreditsExceededFromAuditEntry(entry);
@@ -323,10 +455,10 @@ function parseAuditLogCombined(auditJsonlPathOverride) {
  * @param {string} envVarName
  */
 function logAICreditSource(label, auditValue, stdioValue, envValue, envVarName) {
-  if (auditValue) console.log(`[ai-credits] ${label} source=audit_log value=${auditValue}`);
-  else if (stdioValue) console.log(`[ai-credits] ${label} source=agent_stdio value=${stdioValue}`);
-  else if (envValue) console.log(`[ai-credits] ${label} source=env(${envVarName}) value=${envValue}`);
-  else console.log(`[ai-credits] ${label} source=none ${envVarName}=${process.env[envVarName] || "(unset)"}`);
+  if (auditValue) core.info(`[ai-credits] ${label} source=audit_log value=${auditValue}`);
+  else if (stdioValue) core.info(`[ai-credits] ${label} source=agent_stdio value=${stdioValue}`);
+  else if (envValue) core.info(`[ai-credits] ${label} source=env(${envVarName}) value=${envValue}`);
+  else core.info(`[ai-credits] ${label} source=none ${envVarName}=${process.env[envVarName] || "(unset)"}`);
 }
 
 /**
@@ -355,13 +487,13 @@ function resolveAICreditsFailureState({ logProvenance = true } = {}) {
           : envRateLimitSignal
             ? "env_ignored_no_ai_credits"
             : "none";
-    console.log(`[ai-credits] rateLimitSignal source=${rawRateLimitSignalSource}`);
+    core.info(`[ai-credits] rateLimitSignal source=${rawRateLimitSignalSource}`);
   }
 
   const aiCredits = auditAICredits || stdioSignals.aiCredits || envAICredits || "";
   const maxAICredits = auditMaxAICredits || stdioSignals.maxAICredits || envMaxAICredits || "";
   const rawAICreditsRateLimitError = auditRateLimitError || stdioSignals.rateLimitError || envRateLimitSignalHasEvidence;
-  const aiCreditsRateLimitError = shouldReportAICreditsRateLimitError(rawAICreditsRateLimitError, aiCredits, maxAICredits);
+  const aiCreditsRateLimitError = shouldReportAICreditsRateLimitError(rawAICreditsRateLimitError);
   return { aiCredits, maxAICredits, aiCreditsRateLimitError, maxAICreditsExceeded: auditMaxAICreditsExceeded || stdioSignals.maxAICreditsExceeded };
 }
 
@@ -369,7 +501,6 @@ function resolveAICreditsFailureState({ logProvenance = true } = {}) {
  * @returns {{ aiCredits: string, maxAICredits: string, rateLimitError: boolean, maxAICreditsExceeded: boolean }}
  */
 function parseAICreditsExceededFromAgentStdio() {
-  const initial = { aiCredits: "", maxAICredits: "", rateLimitError: false, maxAICreditsExceeded: false };
   try {
     const agentOutputFile = process.env.GH_AW_AGENT_OUTPUT;
     // Derive the stdio log path from GH_AW_AGENT_OUTPUT when set, but always
@@ -377,11 +508,11 @@ function parseAICreditsExceededFromAgentStdio() {
     // silently break detection.
     const derivedPath = agentOutputFile ? path.join(path.dirname(agentOutputFile), "agent-stdio.log") : null;
     const stdioLogPath = derivedPath && fs.existsSync(derivedPath) ? derivedPath : DEFAULT_AGENT_STDIO_LOG;
-    if (!fs.existsSync(stdioLogPath)) return initial;
+    if (!fs.existsSync(stdioLogPath)) return EMPTY_AI_CREDITS_STATE;
     // Read only the tail to avoid OOM on large logs; the error token always
     // appears near the end of the file.
     const stat = fs.statSync(stdioLogPath);
-    if (stat.size === 0) return initial;
+    if (stat.size === 0) return EMPTY_AI_CREDITS_STATE;
     const readSize = Math.min(stat.size, AGENT_STDIO_LOG_MAX_TAIL);
     const buf = Buffer.alloc(readSize);
     const fd = fs.openSync(stdioLogPath, "r");
@@ -396,7 +527,7 @@ function parseAICreditsExceededFromAgentStdio() {
     const RE_G = new RegExp(MAX_AI_CREDITS_EXCEEDED_STDIO_RE.source, "gi");
     const allMatches = [...content.matchAll(RE_G)];
     const match = allMatches.at(-1);
-    if (!match) return initial;
+    if (!match) return EMPTY_AI_CREDITS_STATE;
     const aiCredits = parsePositiveNumberString(match[1] || "");
     const maxAICredits = parsePositiveNumberString(match[2] || "");
     return {
@@ -406,7 +537,7 @@ function parseAICreditsExceededFromAgentStdio() {
       maxAICreditsExceeded: true,
     };
   } catch {
-    return initial;
+    return EMPTY_AI_CREDITS_STATE;
   }
 }
 
@@ -416,5 +547,8 @@ module.exports = {
   parseAICreditsErrorInfoFromAuditLog,
   parseMaxAICreditsExceededFromAuditLog,
   parseUnknownModelAICreditsFromAuditLog,
+  parseUnknownModelAICreditsAndModelFromAuditLog,
+  parseMaxCacheMissesExceededFromEventLog,
   resolveAICreditsFailureState,
+  MAX_CACHE_MISSES_EXCEEDED_EVENT_TYPE,
 };

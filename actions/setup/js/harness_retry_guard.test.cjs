@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { detectNonRetryableHarnessGuard, buildSoftTimeoutGuard } = require("./harness_retry_guard.cjs");
+const { detectNonRetryableHarnessGuard, buildSoftTimeoutGuard, isMaxRunsExceededError, isAuthenticationFailedError } = require("./harness_retry_guard.cjs");
 
 describe("harness_retry_guard.cjs", () => {
   it("detects AI credits exceeded markers", () => {
@@ -102,6 +102,24 @@ describe("harness_retry_guard.cjs", () => {
     expect(result.goalAlreadyActive).toBe(true);
   });
 
+  it("detects raw ai_credits_limit_exceeded API error type", () => {
+    const result = detectNonRetryableHarnessGuard("ai_credits_limit_exceeded");
+    expect(result.aiCreditsExceeded).toBe(true);
+    expect(result.awfAPIProxyBlockingRequests).toBe(false);
+  });
+
+  it("detects ai_credits_limit_exceeded embedded in JSON stream-json result", () => {
+    const result = detectNonRetryableHarnessGuard(
+      '{"type":"result","subtype":"error_api_error","is_error":true,"result":"Error 403: {\\"type\\":\\"ai_credits_limit_exceeded\\",\\"message\\":\\"You have exceeded your AI credits budget.\\"}"}'
+    );
+    expect(result.aiCreditsExceeded).toBe(true);
+  });
+
+  it("detects ai_credits_limit_exceeded in Anthropic error JSON", () => {
+    const result = detectNonRetryableHarnessGuard('{"type":"error","error":{"type":"ai_credits_limit_exceeded","message":"AI credits budget exceeded"}}');
+    expect(result.aiCreditsExceeded).toBe(true);
+  });
+
   it("detects max_runs_exceeded by JSON error type", () => {
     const result = detectNonRetryableHarnessGuard('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20).","invocation_count":20,"max_runs":20}}');
     expect(result.maxRunsExceeded).toBe(true);
@@ -116,6 +134,47 @@ describe("harness_retry_guard.cjs", () => {
   it("does not falsely detect max_runs_exceeded for unrelated output", () => {
     const result = detectNonRetryableHarnessGuard("transient network timeout");
     expect(result.maxRunsExceeded).toBe(false);
+  });
+
+  it("isMaxRunsExceededError matches max_runs_exceeded JSON signatures", () => {
+    expect(isMaxRunsExceededError('{"error":{"type":"max_runs_exceeded"}}')).toBe(true);
+  });
+
+  it("isMaxRunsExceededError matches human-readable invocation-cap signatures", () => {
+    expect(isMaxRunsExceededError("CAPIError: 429 Maximum LLM invocations exceeded (25/25)")).toBe(true);
+  });
+
+  it("isMaxRunsExceededError ignores unrelated output", () => {
+    expect(isMaxRunsExceededError("transient network timeout")).toBe(false);
+  });
+
+  it("isAuthenticationFailedError returns true for Anthropic-direct auth failure with request ID", () => {
+    expect(isAuthenticationFailedError("Authentication failed (Request ID: C818:3ED713:19D401B:1C446B7:69D653CA)")).toBe(true);
+  });
+
+  it("isAuthenticationFailedError returns true for bare Authentication failed", () => {
+    expect(isAuthenticationFailedError("Authentication failed")).toBe(true);
+  });
+
+  it('isAuthenticationFailedError returns true for Claude Code stream-JSON "error":"authentication_failed" field', () => {
+    const jsonLine = JSON.stringify({ type: "result", error: "authentication_failed" });
+    expect(isAuthenticationFailedError(jsonLine)).toBe(true);
+  });
+
+  it('isAuthenticationFailedError returns true for Claude Code "not logged in" message (case-insensitive)', () => {
+    expect(isAuthenticationFailedError("Not logged in · Please run /login")).toBe(true);
+    expect(isAuthenticationFailedError("NOT LOGGED IN")).toBe(true);
+  });
+
+  it("isAuthenticationFailedError returns false for unrelated output", () => {
+    expect(isAuthenticationFailedError("No authentication information found")).toBe(false);
+    expect(isAuthenticationFailedError("rate_limit_error")).toBe(false);
+    expect(isAuthenticationFailedError("")).toBe(false);
+  });
+
+  it("isAuthenticationFailedError returns false for non-string input", () => {
+    expect(isAuthenticationFailedError(null)).toBe(false);
+    expect(isAuthenticationFailedError(undefined)).toBe(false);
   });
 });
 

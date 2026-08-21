@@ -1,5 +1,6 @@
 ---
 private: true
+redirect: "githubnext/agentics/workflows/ai-moderator.md@main"
 emoji: "🤖"
 timeout-minutes: 5
 on:
@@ -33,8 +34,10 @@ network:
     - github
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
-  cli-proxy: true
+  bash: false
+  cli-proxy: false
   cache-memory:
     key: spam-tracking-${{ github.repository_owner }}
     retention-days: 1
@@ -62,7 +65,70 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
+pre-agent-steps:
+  - name: Pre-fetch moderation context
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      BODY_MAX_CHARS: "6000"
+      DIFF_MAX_LINES: "200"
+    run: |
+      set -euo pipefail
+      mkdir -p /tmp/gh-aw/agent
+      RAW_ISSUE=/tmp/gh-aw/agent/.raw-issue.json
+      RAW_COMMENT=/tmp/gh-aw/agent/.raw-comment.json
+      echo '{}' > "$RAW_ISSUE"
+      echo '{}' > "$RAW_COMMENT"
+      ITEM_NUMBER="${ISSUE_NUMBER:-${PR_NUMBER:-}}"
+      if [ -n "$ITEM_NUMBER" ]; then
+        gh api "repos/$EXPR_GITHUB_REPOSITORY/issues/$ITEM_NUMBER" > "$RAW_ISSUE" || echo '{}' > "$RAW_ISSUE"
+      fi
+      if [ -n "${COMMENT_ID:-}" ]; then
+        gh api "repos/$EXPR_GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" > "$RAW_COMMENT" || echo '{}' > "$RAW_COMMENT"
+      fi
+      if [ -n "${PR_NUMBER:-}" ]; then
+        { gh pr diff "$PR_NUMBER" --repo "$EXPR_GITHUB_REPOSITORY" || true; } \
+          | head -n "$DIFF_MAX_LINES" > /tmp/gh-aw/agent/pr-diff.patch
+      fi
+      jq -n \
+        --argjson max "$BODY_MAX_CHARS" \
+        --slurpfile issue "$RAW_ISSUE" \
+        --slurpfile comment "$RAW_COMMENT" \
+        'def clip: if type == "string" then .[0:$max] else "" end;
+         {
+           event: env.GITHUB_EVENT_NAME,
+           actor: env.GITHUB_ACTOR,
+           item: (($issue[0] // {}) | if .number then {
+             number,
+             kind: (if .pull_request then "pull_request" else "issue" end),
+             title: (.title | clip),
+             body: (.body | clip),
+             author: .user.login,
+             author_association,
+             created_at,
+             labels: [(.labels // [])[].name]
+           } else null end),
+           comment: (($comment[0] // {}) | if .id then {
+             id,
+             body: (.body | clip),
+             author: .user.login,
+             author_association,
+             created_at
+           } else null end)
+         }' > /tmp/gh-aw/agent/moderation-context.json
+      rm -f "$RAW_ISSUE" "$RAW_COMMENT"
+      echo "Pre-fetched moderation context ($(wc -c < /tmp/gh-aw/agent/moderation-context.json) bytes)"
+evals:
+  - id: action-taken
+    question: Did the agent apply at least one label (spam, ai-generated, link-spam, or ai-inspected) or call noop?
+  - id: rationale-provided
+    question: Does the agent output include a rationale explaining why the label(s) were applied or why noop was called?
+  - id: no-unsupported-action
+    question: Does the agent output show that only allowed safe-output actions (add-labels, hide-comment, noop) were used?
 ---
 
 # AI Moderator
@@ -71,9 +137,12 @@ You are an AI-powered moderation system that automatically detects spam, link sp
 
 ## Context
 
-1. Use the GitHub MCP server tools to fetch the original context (see github context), unsanitized content directly from GitHub API
-2. Do NOT use the pre-sanitized text from the activation job - fetch fresh content to analyze the original user input
-3. **For Pull Requests**: Use `pull_request_read` with method `get_diff` to fetch the PR diff and analyze the changes for spam patterns
+The content to moderate has already been fetched for you — **do not call GitHub APIs, `gh`, `issue_read`, or `pull_request_read` to fetch it again**:
+
+- `/tmp/gh-aw/agent/moderation-context.json` — `event`, `actor`, `item` (number, kind, title, body, author, labels) and `comment` (id, body, author) when the event is a comment. Bodies are the original unsanitized user input, truncated to 6000 characters.
+- `/tmp/gh-aw/agent/pr-diff.patch` — the pull request diff, capped at the first 200 lines. Present only for pull request events.
+
+Read these files (plus the spam log below) in a **single turn**, then analyze and emit your safe output. Keep the run to as few turns as possible: one read, one analysis, one safe output.
 
 ## Detection Tasks
 
@@ -156,8 +225,7 @@ Based on your analysis:
    - If the comment appears legitimate and on-topic, add the `ai-inspected` label to the parent issue
 
 3. **For Pull Requests** (when pull request number is present):
-   - Fetch the PR diff using `pull_request_read` with method `get_diff`
-   - Analyze the diff for spam patterns:
+   - Analyze the capped diff at `/tmp/gh-aw/agent/pr-diff.patch` for spam patterns:
      - Large amounts of promotional content or links in code comments
      - Suspicious file additions (e.g., cryptocurrency miners, malware)
      - Mass link injection across multiple files
@@ -172,7 +240,7 @@ Use the cache memory at `/tmp/gh-aw/cache-memory/` to track spam activity across
 
 ### Reading the Spam Log
 
-At the start of your analysis, try to read the spam log file at `/tmp/gh-aw/cache-memory/spam-log.json`. **This file is optional.** A missing file is completely normal — it will be absent on the first run, after the 24-hour cache expires, or after a cache miss. A missing file is **not** a missing-data error. If the file does not exist, start immediately with an empty array and continue your analysis. **Never call `missing_data` for a missing spam log** — doing so will cause the workflow to fail unnecessarily. The file contains an array of spam events:
+At the start of your analysis, read the spam log file at `/tmp/gh-aw/cache-memory/spam-log.json` in the **same turn** as the pre-fetched context files. **This file is optional.** A missing file is completely normal — it will be absent on the first run, after the 24-hour cache expires, or after a cache miss. A missing file is **not** a missing-data error. If the file does not exist, start immediately with an empty array and continue your analysis. **Never call `missing_data` for a missing spam log** — doing so will cause the workflow to fail unnecessarily. The file contains an array of spam events:
 
 ```json
 [
@@ -216,9 +284,3 @@ If no spam was detected, you may still update the log to remove stale entries, b
 - Provide clear reasoning for each detection in your analysis
 - Only take action if you have high confidence in the detection
 - **You MUST always emit at least one safe output.** After completing your analysis, if no spam was detected and no labels were applied, call the `noop` safe output to confirm that the content was reviewed and no action was required. Never exit without calling a safe output.
-
-## Report Formatting
-
-- Use h3 (###) or lower for all headers in your analysis output to maintain proper document hierarchy.
-- Wrap long sections in `<details><summary>Section Name</summary>` tags to improve readability and reduce scrolling.
-- Structure: Brief summary (always visible) → Key findings (always visible) → Detailed analysis (in `<details>`) → Actions taken (always visible)

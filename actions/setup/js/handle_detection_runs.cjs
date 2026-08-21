@@ -3,7 +3,7 @@
 
 const fs = require("fs");
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { ERR_API } = require("./error_codes.cjs");
+const { ERR_API, ERR_SYSTEM } = require("./error_codes.cjs");
 const { sanitizeContent } = require("./sanitize_content.cjs");
 const { generateFooterWithExpiration } = require("./ephemerals.cjs");
 const { renderTemplateFromFile, getPromptPath } = require("./messages_core.cjs");
@@ -37,7 +37,7 @@ async function ensureDetectionRunsIssue() {
       };
     }
   } catch (error) {
-    throw new Error(`${ERR_API}: Failed to search for existing detection runs issue: ${getErrorMessage(error)}`);
+    throw new Error(`${ERR_API}: Failed to search for existing detection runs issue: ${getErrorMessage(error)}`, { cause: error });
   }
 
   // Create detection runs issue if it doesn't exist
@@ -45,7 +45,12 @@ async function ensureDetectionRunsIssue() {
 
   // Load template from file
   const templatePath = getPromptPath("detection_runs_issue.md");
-  const parentBodyContent = fs.readFileSync(templatePath, "utf8");
+  let parentBodyContent;
+  try {
+    parentBodyContent = fs.readFileSync(templatePath, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${templatePath}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   const parentBody = generateFooterWithExpiration({
     footerText: parentBodyContent,

@@ -14,15 +14,15 @@ func TestGenerateCopilotInstallerSteps(t *testing.T) {
 		name             string
 		version          string
 		stepName         string
-		expectedVersion  string
 		shouldContain    []string
 		shouldNotContain []string
+		// checkRunLine, when set, verifies the exact "run:" line present in the step.
+		checkRunLine string
 	}{
 		{
-			name:            "version without v prefix",
-			version:         "0.0.369",
-			stepName:        "Install GitHub Copilot CLI",
-			expectedVersion: "0.0.369",
+			name:     "version without v prefix",
+			version:  "0.0.369",
+			stepName: "Install GitHub Copilot CLI",
 			shouldContain: []string{
 				"bash \"${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh\" 0.0.369",
 				"name: Install GitHub Copilot CLI",
@@ -33,10 +33,9 @@ func TestGenerateCopilotInstallerSteps(t *testing.T) {
 			},
 		},
 		{
-			name:            "version with v prefix",
-			version:         "v0.0.370",
-			stepName:        "Install GitHub Copilot CLI",
-			expectedVersion: "v0.0.370",
+			name:     "version with v prefix",
+			version:  "v0.0.370",
+			stepName: "Install GitHub Copilot CLI",
 			shouldContain: []string{
 				"bash \"${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh\" v0.0.370",
 				"GH_HOST: github.com", // Must pin GH_HOST to prevent GHES workflow-level overrides
@@ -46,10 +45,9 @@ func TestGenerateCopilotInstallerSteps(t *testing.T) {
 			},
 		},
 		{
-			name:            "custom version",
-			version:         "1.2.3",
-			stepName:        "Custom Install Step",
-			expectedVersion: "1.2.3",
+			name:     "custom version",
+			version:  "1.2.3",
+			stepName: "Custom Install Step",
 			shouldContain: []string{
 				"bash \"${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh\" 1.2.3",
 				"name: Custom Install Step",
@@ -60,23 +58,28 @@ func TestGenerateCopilotInstallerSteps(t *testing.T) {
 			},
 		},
 		{
-			name:            "empty version uses default",
-			version:         "",
-			stepName:        "Install GitHub Copilot CLI",
-			expectedVersion: string(constants.DefaultCopilotVersion), // Should use DefaultCopilotVersion
+			// When no engine.version is set the step must NOT embed a hardcoded version arg.
+			// Instead the script resolves the version at runtime via compat.json (priority 2)
+			// or falls back to its baked-in DEFAULT_COPILOT_VERSION (priority 3).
+			name:     "empty version defers to script (no explicit version arg)",
+			version:  "",
+			stepName: "Install GitHub Copilot CLI",
 			shouldContain: []string{
-				"bash \"${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh\" " + string(constants.DefaultCopilotVersion),
-				"GH_HOST: github.com", // Must pin GH_HOST to prevent GHES workflow-level overrides
+				"install_copilot_cli.sh",
+				"GH_HOST: github.com",
 			},
 			shouldNotContain: []string{
+				// Must NOT hardcode the default version — that would bypass compat resolution.
+				"install_copilot_cli.sh\" " + string(constants.DefaultCopilotVersion),
 				"gh.io/copilot-install | sudo bash",
 			},
+			checkRunLine: `run: bash "${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh"`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			steps := GenerateCopilotInstallerSteps(tt.version, tt.stepName)
+			steps := GenerateCopilotInstallerSteps(tt.version, tt.stepName, false, "")
 
 			if len(steps) != 1 {
 				t.Errorf("Expected 1 step, got %d", len(steps))
@@ -99,17 +102,73 @@ func TestGenerateCopilotInstallerSteps(t *testing.T) {
 				}
 			}
 
-			// Verify the version is correctly passed to the install script
-			expectedVersionLine := "bash \"${RUNNER_TEMP}/gh-aw/actions/install_copilot_cli.sh\" " + tt.expectedVersion
-			if !strings.Contains(stepContent, expectedVersionLine) {
-				t.Errorf("Expected version to be set to '%s', but step content was:\n%s", tt.expectedVersion, stepContent)
+			if tt.checkRunLine != "" && !strings.Contains(stepContent, tt.checkRunLine) {
+				t.Errorf("Expected step to contain run line %q, but step content was:\n%s", tt.checkRunLine, stepContent)
 			}
 		})
 	}
 }
 
-func TestCopilotInstallerCustomVersion(t *testing.T) {
-	// Test that pinned version from engine config is ignored in favor of default pinned version
+func TestGenerateCopilotInstallerSteps_EmptyVersionWithCompiledVersion(t *testing.T) {
+	// When engine.version is not set but a compiledVersion is available, the step must
+	// include GH_AW_COMPILED_VERSION in its env so the script can resolve compat.json.
+	compiledVersion := "v0.72.5"
+	steps := GenerateCopilotInstallerSteps("", "Install GitHub Copilot CLI", false, compiledVersion)
+
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+	stepContent := strings.Join(steps[0], "\n")
+
+	if !strings.Contains(stepContent, "GH_AW_COMPILED_VERSION: "+compiledVersion) {
+		t.Errorf("Expected step to contain GH_AW_COMPILED_VERSION env var, got:\n%s", stepContent)
+	}
+	if strings.Contains(stepContent, "install_copilot_cli.sh\" ") {
+		t.Errorf("Step must not embed an explicit version arg when version is empty, got:\n%s", stepContent)
+	}
+}
+
+func TestGenerateCopilotInstallerSteps_EmptyVersionNoCompiledVersion(t *testing.T) {
+	// When both version and compiledVersion are empty, GH_AW_COMPILED_VERSION must be
+	// omitted so the script falls back to its baked-in DEFAULT_COPILOT_VERSION.
+	steps := GenerateCopilotInstallerSteps("", "Install GitHub Copilot CLI", false, "")
+
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+	stepContent := strings.Join(steps[0], "\n")
+
+	if strings.Contains(stepContent, "GH_AW_COMPILED_VERSION") {
+		t.Errorf("Step must not contain GH_AW_COMPILED_VERSION when compiledVersion is empty, got:\n%s", stepContent)
+	}
+	if strings.Contains(stepContent, "install_copilot_cli.sh\" ") {
+		t.Errorf("Step must not embed an explicit version arg when version is empty, got:\n%s", stepContent)
+	}
+}
+
+func TestGenerateCopilotInstallerSteps_DoesNotRequireSystemRipgrep(t *testing.T) {
+	steps := GenerateCopilotInstallerSteps("", "Install GitHub Copilot CLI", false, "v0.99.0")
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+
+	stepContent := strings.Join(steps[0], "\n")
+	unexpected := []string{
+		"install_ripgrep.sh",
+		"Install ripgrep",
+		"apt-get install -y ripgrep",
+		"ripgrep not found; installing with apt-get",
+	}
+	for _, pattern := range unexpected {
+		if strings.Contains(stepContent, pattern) {
+			t.Errorf("Copilot install step must not require system ripgrep, found %q in:\n%s", pattern, stepContent)
+		}
+	}
+}
+
+func TestCopilotEngineWithVersion(t *testing.T) {
+	// engine.version must be honored: when an explicit version is set it should be
+	// passed to the installer and compat.json resolution must be skipped.
 	engine := NewCopilotEngine()
 
 	customVersion := "1.0.0"
@@ -119,14 +178,12 @@ func TestCopilotInstallerCustomVersion(t *testing.T) {
 			Version: customVersion,
 		},
 	}
-	if workflowData.EngineConfig.Version != customVersion {
-		t.Fatalf("Expected initial engine config version %q, got: %q", customVersion, workflowData.EngineConfig.Version)
-	}
 
 	steps := engine.GetInstallationSteps(workflowData)
 
-	if workflowData.EngineConfig.Version != string(constants.DefaultCopilotVersion) {
-		t.Fatalf("Expected engine config version to be normalized to default Copilot version %q, got: %q", constants.DefaultCopilotVersion, workflowData.EngineConfig.Version)
+	// EngineConfig.Version must remain as the user-specified value.
+	if workflowData.EngineConfig.Version != customVersion {
+		t.Fatalf("Expected engine config version to remain %q, got: %q", customVersion, workflowData.EngineConfig.Version)
 	}
 
 	// Find the install step
@@ -143,18 +200,68 @@ func TestCopilotInstallerCustomVersion(t *testing.T) {
 		t.Fatal("Could not find install step with install_copilot_cli.sh")
 	}
 
-	// Should contain default pinned version
-	if !strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
-		t.Errorf("Expected default Copilot version in install step, got:\n%s", installStep)
+	// Should pass the user-specified version to the installer (compat.json skipped).
+	if !strings.Contains(installStep, `install_copilot_cli.sh" `+customVersion) {
+		t.Errorf("Expected user-specified version %q in install step, got:\n%s", customVersion, installStep)
 	}
-	if strings.Contains(installStep, `install_copilot_cli.sh" `+customVersion) {
-		t.Errorf("Expected pinned version to be ignored, got:\n%s", installStep)
+	if strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
+		t.Errorf("Expected user-specified version, not default version, in install step:\n%s", installStep)
 	}
 
 	// Must pin GH_HOST: github.com to prevent workflow-level GHES overrides from
-	// leaking into the Copilot CLI install step. Without this pin, a workflow with
-	// env.GH_HOST set to a GHES host would cause the install/auth path to target
-	// the wrong host.
+	// leaking into the Copilot CLI install step.
+	if !strings.Contains(installStep, "GH_HOST: github.com") {
+		t.Errorf("Install step should pin GH_HOST: github.com to prevent GHES workflow-level overrides, got:\n%s", installStep)
+	}
+}
+
+func TestCopilotEngineWithoutVersion(t *testing.T) {
+	// When engine.version is not set:
+	// - EngineConfig.Version must remain unset (no normalization mutation) so that
+	//   threat-detection/evals config clones do not receive an explicit version arg.
+	// - The install step must NOT embed a hardcoded version arg — the script resolves the
+	//   version at runtime via compat.json (priority 2) or its baked-in default (priority 3).
+	// - GH_AW_COMPILED_VERSION must be injected when CompiledVersion is set on WorkflowData.
+	engine := NewCopilotEngine()
+
+	workflowData := &WorkflowData{
+		Name:            "test-workflow",
+		EngineConfig:    &EngineConfig{},
+		CompiledVersion: "v0.99.0",
+	}
+
+	steps := engine.GetInstallationSteps(workflowData)
+
+	// EngineConfig.Version must remain empty — no normalization mutation.
+	if workflowData.EngineConfig.Version != "" {
+		t.Fatalf("Expected engine config version to remain empty (no mutation), got: %q", workflowData.EngineConfig.Version)
+	}
+
+	// Find the install step
+	var installStep string
+	for _, step := range steps {
+		stepContent := strings.Join(step, "\n")
+		if strings.Contains(stepContent, "install_copilot_cli.sh") {
+			installStep = stepContent
+			break
+		}
+	}
+
+	if installStep == "" {
+		t.Fatal("Could not find install step with install_copilot_cli.sh")
+	}
+
+	// Must NOT hardcode a version arg — that would bypass compat.json resolution.
+	if strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
+		t.Errorf("Install step must not embed an explicit version arg when engine.version is unset; got:\n%s", installStep)
+	}
+
+	// Must inject GH_AW_COMPILED_VERSION so the script can do compat.json resolution.
+	if !strings.Contains(installStep, "GH_AW_COMPILED_VERSION: v0.99.0") {
+		t.Errorf("Install step must inject GH_AW_COMPILED_VERSION when CompiledVersion is set; got:\n%s", installStep)
+	}
+
+	// Must still pin GH_HOST to github.com.
 	if !strings.Contains(installStep, "GH_HOST: github.com") {
 		t.Errorf("Install step should pin GH_HOST: github.com to prevent GHES workflow-level overrides, got:\n%s", installStep)
 	}
@@ -180,7 +287,7 @@ func TestGenerateCopilotInstallerSteps_ExpressionVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			steps := GenerateCopilotInstallerSteps(tt.version, "Install GitHub Copilot CLI")
+			steps := GenerateCopilotInstallerSteps(tt.version, "Install GitHub Copilot CLI", false, "")
 
 			if len(steps) != 1 {
 				t.Errorf("Expected 1 step, got %d", len(steps))
@@ -212,8 +319,45 @@ func TestGenerateCopilotInstallerSteps_ExpressionVersion(t *testing.T) {
 	}
 }
 
-func TestCopilotInstallerExpressionVersion_ViaEngineConfig(t *testing.T) {
-	// Test that expression version from engine config is ignored in favor of default pinned version
+func TestGenerateCopilotInstallerSteps_Rootless(t *testing.T) {
+	steps := GenerateCopilotInstallerSteps("1.2.3", "Install Copilot CLI", true, "")
+
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+
+	stepContent := strings.Join(steps[0], "\n")
+
+	if !strings.Contains(stepContent, "--rootless") {
+		t.Errorf("Expected step to contain --rootless flag, got:\n%s", stepContent)
+	}
+
+	if !strings.Contains(stepContent, "install_copilot_cli.sh") {
+		t.Errorf("Expected step to use install_copilot_cli.sh, got:\n%s", stepContent)
+	}
+}
+
+func TestGenerateCopilotInstallerSteps_RootlessWithExpression(t *testing.T) {
+	steps := GenerateCopilotInstallerSteps("${{ inputs.version }}", "Install Copilot CLI", true, "")
+
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+
+	stepContent := strings.Join(steps[0], "\n")
+
+	if !strings.Contains(stepContent, "--rootless") {
+		t.Errorf("Expected step to contain --rootless flag, got:\n%s", stepContent)
+	}
+
+	if !strings.Contains(stepContent, `"${ENGINE_VERSION}"`) {
+		t.Errorf("Expected step to use ENGINE_VERSION env var, got:\n%s", stepContent)
+	}
+}
+
+func TestCopilotEngineWithExpressionVersion(t *testing.T) {
+	// expression engine.version must be honored: the value must flow through env-var
+	// injection (not embedded directly in the shell command) and compat.json must be skipped.
 	engine := NewCopilotEngine()
 
 	expressionVersion := "${{ inputs.engine-version }}"
@@ -226,8 +370,9 @@ func TestCopilotInstallerExpressionVersion_ViaEngineConfig(t *testing.T) {
 
 	steps := engine.GetInstallationSteps(workflowData)
 
-	if workflowData.EngineConfig.Version != string(constants.DefaultCopilotVersion) {
-		t.Fatalf("Expected engine config version to be normalized to default Copilot version %q, got: %q", constants.DefaultCopilotVersion, workflowData.EngineConfig.Version)
+	// EngineConfig.Version must remain as the expression value.
+	if workflowData.EngineConfig.Version != expressionVersion {
+		t.Fatalf("Expected engine config version to remain %q, got: %q", expressionVersion, workflowData.EngineConfig.Version)
 	}
 
 	// Find the install step
@@ -244,18 +389,58 @@ func TestCopilotInstallerExpressionVersion_ViaEngineConfig(t *testing.T) {
 		t.Fatal("Could not find install step with install_copilot_cli.sh")
 	}
 
-	// Should not use expression wiring
-	if strings.Contains(installStep, "ENGINE_VERSION: ${{ inputs.engine-version }}") {
-		t.Errorf("Expected expression version to be ignored, got:\n%s", installStep)
+	// Should use env var injection (not embed expression directly in shell command).
+	if !strings.Contains(installStep, "ENGINE_VERSION: "+expressionVersion) {
+		t.Errorf("Expected ENGINE_VERSION env var with expression, got:\n%s", installStep)
 	}
-
-	// Should install default pinned version
-	if !strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
-		t.Errorf("Expected default Copilot version in install step, got:\n%s", installStep)
+	if !strings.Contains(installStep, `"${ENGINE_VERSION}"`) {
+		t.Errorf(`Expected step to reference "$ENGINE_VERSION" in run command, got:\n%s`, installStep)
+	}
+	if strings.Contains(installStep, "install_copilot_cli.sh "+expressionVersion) {
+		t.Errorf("Expression version should NOT be embedded directly in shell command, got:\n%s", installStep)
 	}
 }
 
-func TestCopilotInstallerByokFeatureStillUsesDefaultPinnedVersion(t *testing.T) {
+func TestCopilotEngineWithExpressionVersionAndCompiledVersion(t *testing.T) {
+	// When engine.version is an expression AND CompiledVersion is set, both ENGINE_VERSION
+	// and GH_AW_COMPILED_VERSION must appear in the install step so the script can fall back
+	// to compat.json resolution when the expression evaluates to an empty string at runtime.
+	engine := NewCopilotEngine()
+
+	expressionVersion := "${{ inputs.engine-version }}"
+	workflowData := &WorkflowData{
+		Name: "test-workflow",
+		EngineConfig: &EngineConfig{
+			Version: expressionVersion,
+		},
+		CompiledVersion: "v0.99.0",
+	}
+
+	steps := engine.GetInstallationSteps(workflowData)
+
+	var installStep string
+	for _, step := range steps {
+		stepContent := strings.Join(step, "\n")
+		if strings.Contains(stepContent, "install_copilot_cli.sh") {
+			installStep = stepContent
+			break
+		}
+	}
+
+	if installStep == "" {
+		t.Fatal("Could not find install step with install_copilot_cli.sh")
+	}
+
+	if !strings.Contains(installStep, "ENGINE_VERSION: "+expressionVersion) {
+		t.Errorf("Expected ENGINE_VERSION env var with expression, got:\n%s", installStep)
+	}
+	if !strings.Contains(installStep, "GH_AW_COMPILED_VERSION: v0.99.0") {
+		t.Errorf("Expected GH_AW_COMPILED_VERSION env var when CompiledVersion is set, got:\n%s", installStep)
+	}
+}
+
+func TestCopilotEngineWithVersionAndByokFeature(t *testing.T) {
+	// engine.version must be honored even when the BYOK feature flag is enabled.
 	engine := NewCopilotEngine()
 	workflowData := &WorkflowData{
 		Name: "test-workflow",
@@ -282,10 +467,10 @@ func TestCopilotInstallerByokFeatureStillUsesDefaultPinnedVersion(t *testing.T) 
 		t.Fatal("Could not find install step with install_copilot_cli.sh")
 	}
 
-	if !strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
-		t.Errorf("Expected default pinned Copilot CLI install, got:\n%s", installStep)
+	if !strings.Contains(installStep, `install_copilot_cli.sh" 1.0.0`) {
+		t.Errorf("Expected user-specified version in install step, got:\n%s", installStep)
 	}
-	if strings.Contains(installStep, `install_copilot_cli.sh" 1.0.0`) {
-		t.Errorf("Expected pinned version to be ignored, got:\n%s", installStep)
+	if strings.Contains(installStep, `install_copilot_cli.sh" `+string(constants.DefaultCopilotVersion)) {
+		t.Errorf("Expected user-specified version, not default version, in install step:\n%s", installStep)
 	}
 }

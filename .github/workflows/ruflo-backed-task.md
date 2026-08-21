@@ -14,9 +14,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 engine: claude
 
@@ -28,6 +25,7 @@ network:
 
 imports:
   - shared/mcp/ruflo.md
+  - shared/reporting.md
 
 tools:
   startup-timeout: 300

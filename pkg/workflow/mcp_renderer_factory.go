@@ -90,7 +90,7 @@ type renderStandardJSONMCPConfigOptions struct {
 }
 
 // renderDefaultJSONMCPConfig is a convenience wrapper for renderStandardJSONMCPConfig used by
-// simple JSON engines (Claude, Gemini, Crush, OpenCode) that share the standard
+// simple JSON engines (Claude, Gemini) that share the standard
 // renderCustomMCPConfigWrapperWithContext callback and differ only in their config path.
 func renderDefaultJSONMCPConfig(
 	sb *strings.Builder,
@@ -156,6 +156,7 @@ func buildMCPRendererFactory(workflowData *WorkflowData, format string, includeC
 			IsLast:                 isLast,
 			ActionMode:             GetActionModeFromWorkflowData(workflowData),
 			WriteSinkGuardPolicies: deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
+			ContainerPinMappings:   workflowData.getContainerPinMappings(),
 		})
 	}
 }
@@ -190,6 +191,9 @@ func buildStandardJSONMCPRenderers(
 		},
 		RenderMCPScripts: func(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, isLast bool) {
 			createRenderer(isLast).RenderMCPScriptsMCP(yaml, mcpScripts, workflowData)
+		},
+		RenderEnclave: func(yaml *strings.Builder, workflowData *WorkflowData, isLast bool) {
+			writeEnclaveMCPJSON(yaml, workflowData, isLast)
 		},
 		RenderCustomMCPConfig: renderCustom,
 	}

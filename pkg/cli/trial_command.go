@@ -16,17 +16,17 @@ func NewTrialCommand(validateEngine func(string) error) *cobra.Command {
 
 This command creates a temporary private repository in your GitHub account, installs the specified
 workflows from their source repositories, and runs them in "trial mode" to capture safe outputs without
-making actual changes to the "simulated" host repository.
+making actual changes to the simulated host repository.
 
 Repository modes:
-- Default mode (no flags): Creates a temporary trial repository and simulates execution as if running against the current repository (github.repository context points to current repo)
+- Default mode (no flags): Creates a temporary trial repository and simulates execution as if running against the current repository (github.repository context points to the current repository)
 - --logical-repo REPO: Simulates execution against a specified repository (github.repository context points to REPO while actually running in a temporary trial repository)
 - --host-repo REPO: Uses the specified repository as the host for trial execution instead of creating a temporary one
 - --clone-repo REPO: Clones the specified repository's contents into the trial repository before execution (useful for testing against actual repository state)
 
-All workflows must support workflow_dispatch trigger to be used in trial mode.
-The host repository will be created as private and kept by default unless --delete-host-repo-after is specified.
-Trial results are saved both locally (in trials/ directory) and in the host repository for future reference.`,
+All workflows must support the workflow_dispatch trigger to be used in trial mode.
+The host repository will be created as a private repository and retained by default unless --delete-host-repo-after is specified.
+Trial results are saved both locally (in the trials/ directory) and in the host repository for future reference.`,
 		Example: `  ` + string(constants.CLIExtensionPrefix) + ` trial githubnext/agentics/weekly-research                         # Run a single workflow in a temporary trial repository
   ` + string(constants.CLIExtensionPrefix) + ` trial githubnext/agentics/daily-plan githubnext/agentics/weekly-research # Compare multiple workflows
   ` + string(constants.CLIExtensionPrefix) + ` trial githubnext/agentics/daily-plan myorg/myrepo/custom-workflow # Run workflows from different repositories
@@ -55,7 +55,7 @@ Trial results are saved both locally (in trials/ directory) and in the host repo
 			cloneRepoSpec, _ := cmd.Flags().GetString("clone-repo")
 			hostRepoSpec, _ := cmd.Flags().GetString("host-repo")
 			deleteHostRepo, _ := cmd.Flags().GetBool("delete-host-repo-after")
-			forceDeleteHostRepo, _ := cmd.Flags().GetBool("force-delete-host-repo-before")
+			forceDeleteHostRepo := resolveDeprecatedBoolFlag(cmd, "delete-host-repo-before", "force-delete-host-repo-before")
 			yes, _ := cmd.Flags().GetBool("yes")
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -66,9 +66,7 @@ Trial results are saved both locally (in trials/ directory) and in the host repo
 			engineOverride, _ := cmd.Flags().GetString("engine")
 			appendText, _ := cmd.Flags().GetString("append")
 			verbose, _ := cmd.Root().PersistentFlags().GetBool("verbose")
-			disableSecurityScanner, _ := cmd.Flags().GetBool("no-security-scanner")
-			disableSecurityScannerLegacy, _ := cmd.Flags().GetBool("disable-security-scanner")
-			disableSecurityScanner = disableSecurityScanner || disableSecurityScannerLegacy
+			disableSecurityScanner := resolveDeprecatedBoolFlag(cmd, "no-security-scanner", "disable-security-scanner")
 
 			if err := validateEngine(engineOverride); err != nil {
 				trialLog.Printf("Engine validation failed: engine=%s, err=%v", engineOverride, err)
@@ -111,20 +109,20 @@ Trial results are saved both locally (in trials/ directory) and in the host repo
 	cmd.Flags().String("clone-repo", "", "Clone the contents of the specified repository into the host repository before execution (useful for testing against actual repository state)")
 
 	cmd.Flags().String("host-repo", "", "Custom host repository slug (defaults to '<username>/gh-aw-trial'). Use '.' for current repository")
-	cmd.Flags().Bool("delete-host-repo-after", false, "Delete the host repository after completion (kept by default)")
-	cmd.Flags().Bool("force-delete-host-repo-before", false, "Force delete the host repository before creation if it already exists")
-	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompts")
+	cmd.Flags().Bool("delete-host-repo-after", false, "Delete the host repository after completion (retained by default)")
+	cmd.Flags().Bool("delete-host-repo-before", false, "Delete the host repository before creation if it already exists")
+	cmd.Flags().Bool("force-delete-host-repo-before", false, "Delete the host repository before creation if it already exists")
+	_ = cmd.Flags().MarkDeprecated("force-delete-host-repo-before", "use --delete-host-repo-before instead")
+	cmd.Flags().BoolP("yes", "y", false, "Auto-accept trial confirmations (required in CI)")
 	cmd.Flags().Bool("dry-run", false, "Preview trial execution without creating repos or running workflows")
-	cmd.Flags().Int("timeout", 30, "Execution timeout in minutes (set to 0 to disable timeout)")
+	cmd.Flags().Int("timeout", 30, "Execution timeout in minutes (0 = no timeout)")
 	cmd.Flags().String("trigger-context", "", "Trigger context URL (e.g., GitHub issue URL) for issue-triggered workflows")
 	cmd.Flags().Int("repeat", 0, "Number of additional times to run after the initial execution (e.g., --repeat 3 runs 4 times total)")
 	cmd.Flags().Bool("auto-merge-prs", false, "Auto-merge any pull requests created during trial execution")
 	addEngineFlag(cmd)
 	addJSONFlag(cmd)
-	cmd.Flags().String("append", "", "Append extra content to the end of agentic workflow on installation")
-	cmd.Flags().Bool("no-security-scanner", false, "Skip security scanning of workflow markdown content")
-	cmd.Flags().Bool("disable-security-scanner", false, "Skip security scanning of workflow markdown content")
-	_ = cmd.Flags().MarkDeprecated("disable-security-scanner", "use --no-security-scanner instead")
+	cmd.Flags().String("append", "", "Append extra content to the end of the agentic workflow on installation")
+	addSecurityScannerFlag(cmd)
 	cmd.MarkFlagsMutuallyExclusive("logical-repo", "clone-repo")
 
 	return cmd

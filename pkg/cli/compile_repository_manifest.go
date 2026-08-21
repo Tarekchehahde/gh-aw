@@ -58,14 +58,14 @@ func validateRepositoryManifestForCompilation(config CompileConfig, stats *Compi
 		Valid:    parseErr == nil,
 	}
 	for _, warning := range warnings {
-		result.Warnings = append(result.Warnings, CompileValidationError{
+		result.Warnings = append(result.Warnings, ValidationIssue{
 			Type:    "manifest_warning",
 			Message: warning,
 		})
 	}
 
 	if parseErr != nil {
-		result.Errors = append(result.Errors, CompileValidationError{
+		result.Errors = append(result.Errors, ValidationIssue{
 			Type:    "manifest_error",
 			Message: parseErr.Error(),
 		})
@@ -81,7 +81,7 @@ func validateRepositoryManifestForCompilation(config CompileConfig, stats *Compi
 		*validationResults = append(*validationResults, result)
 		if !config.JSONOutput {
 			for _, warning := range warnings {
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(warning))
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(warning))
 			}
 		}
 	}
@@ -113,13 +113,14 @@ func validateLocalRepositoryPackageContents(manifestPath string) error {
 		}
 
 		includeInstallablePaths, _, _ := splitManifestIncludePaths(manifest.Includes)
-		includeInstallablePaths = append(includeInstallablePaths, manifest.Files...)
+		includeInstallablePaths = append(includeInstallablePaths, manifestIncludesFromPaths(manifest.Files)...)
 		installationSources := normalizePackageInstallablePaths(includeInstallablePaths, "")
 		if len(installationSources) == 0 {
-			installationSources, err = scanLocalRepositoryPackageInstallablePaths(filepath.Dir(manifestPath))
+			scanned, err := scanLocalRepositoryPackageInstallablePaths(filepath.Dir(manifestPath))
 			if err != nil {
 				return err
 			}
+			installationSources = packageInstallablesFromSourcePaths(scanned)
 		}
 
 		return validateManifestInstallableWorkflowPrivacy(manifestPath, installationSources, func(sourcePath string) ([]byte, error) {

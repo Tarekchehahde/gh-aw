@@ -7,21 +7,15 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
 // Analyzer is the os-getenv-in-library analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "osgetenvlibrary",
-	Doc:      "reports calls to os.Getenv or os.LookupEnv in non-main, non-test packages",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/osgetenvlibrary",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("osgetenvlibrary", "reports calls to os.Getenv or os.LookupEnv in non-main, non-test packages", run)
 
 func run(pass *analysis.Pass) (any, error) {
 	pkgPath := pass.Pkg.Path()
@@ -29,23 +23,22 @@ func run(pass *analysis.Pass) (any, error) {
 		return nil, nil
 	}
 
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "osgetenvlibrary")
 
 	nodeFilter := []ast.Node{
 		(*ast.CallExpr)(nil),
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return
 		}
 
-		if strings.HasSuffix(pkgPath, ".test") || filecheck.IsTestFile(pass.Fset.PositionFor(call.Pos(), false).Filename) {
+		if strings.HasSuffix(pkgPath, ".test") || filecheck.ShouldSkipFilename(pass.Fset.PositionFor(call.Pos(), false).Filename, generatedFiles) {
 			return
 		}
 
@@ -54,7 +47,7 @@ func run(pass *analysis.Pass) (any, error) {
 			return
 		}
 		position := pass.Fset.PositionFor(call.Pos(), false)
-		if nolint.HasDirective(position, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "osgetenvlibrary") {
 			return
 		}
 		switch fn.Name() {
@@ -64,6 +57,4 @@ func run(pass *analysis.Pass) (any, error) {
 			pass.ReportRangef(call, "os.LookupEnv couples the library to the process environment; pass configuration explicitly instead")
 		}
 	})
-
-	return nil, nil
 }

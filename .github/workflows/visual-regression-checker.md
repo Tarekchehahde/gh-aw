@@ -18,6 +18,7 @@ permissions:
 engine: copilot
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   playwright:
@@ -27,6 +28,7 @@ tools:
     - "npx *"
     - "node *"
     - "curl http://localhost:*"
+    - "curl http://host.docker.internal:*"
 network:
   allowed:
     - defaults
@@ -39,12 +41,12 @@ safe-outputs:
 timeout-minutes: 15
 steps:
   - name: Checkout repository
-    uses: actions/checkout@v7.0.0
+    uses: actions/checkout@v7.0.1
     with:
       persist-credentials: false
 
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: '24'
       cache: 'npm'
@@ -59,16 +61,19 @@ steps:
     run: npm run build
 
   - name: Start docs server
+    working-directory: ./docs
     run: |
-      nohup make dev-docs > /tmp/gh-aw/agent/preview.log 2>&1 &
+      nohup npm run dev -- --host 0.0.0.0 --port 4321 > /tmp/gh-aw/agent/preview.log 2>&1 &
       PID=$!
       echo "$PID" > /tmp/gh-aw/agent/server.pid
       echo "Server PID: $PID"
 
   - name: Wait for server readiness
+    # runner-guard:ignore RGS-012 -- loopback-only port/readiness checks for the docs server started in this job; no external network or secrets are involved.
     run: |
       MAX_WAIT=90
       WAITED=0
+      # runner-guard:ignore RGS-012 -- loopback-only port probe for the docs server started in this job; no external network or secret data is involved.
       until (echo > /dev/tcp/127.0.0.1/4321) > /dev/null 2>&1; do
         if [ -f /tmp/gh-aw/agent/server.pid ] && ! kill -0 "$(cat /tmp/gh-aw/agent/server.pid)" 2>/dev/null; then
           echo "Docs server process exited before opening port 4321" >&2
@@ -85,6 +90,7 @@ steps:
         sleep 3
       done
       WAITED=0
+      # runner-guard:ignore RGS-012 -- localhost readiness request to the docs server started above; response is discarded and no secrets are sent.
       until curl -sf http://localhost:4321/gh-aw/ > /dev/null 2>&1; do
         WAITED=$((WAITED + 3))
         if [ $WAITED -ge $MAX_WAIT ]; then
@@ -97,16 +103,19 @@ steps:
       done
       echo "Dev server is ready"
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Visual Regression Checker
 
-You are a visual quality agent. The workflow started the docs server and verified readiness. It is running at `http://localhost:4321/gh-aw/`. For this pull request, use playwright-cli commands in bash to capture screenshots of key pages and report any visual differences.
+You are a visual quality agent. The workflow started the docs server and verified readiness. It is running on the host at `http://host.docker.internal:4321/gh-aw/`. For this pull request, use playwright-cli commands in bash to capture screenshots of key pages and report any visual differences.
 
 ## Steps
 
 1. **Capture screenshots** — Use `playwright-cli` to resize the viewport and take full-page screenshots of the key pages:
-   - **Mobile**: `playwright-cli browser_resize --width 375 --height 812 && playwright-cli browser_navigate --url "http://localhost:4321/gh-aw/" && playwright-cli browser_take_screenshot --filename /tmp/gh-aw/agent/screenshot-mobile.png --full-page true`
+   - **Mobile**: `playwright-cli browser_resize --width 375 --height 812 && playwright-cli browser_navigate --url "http://host.docker.internal:4321/gh-aw/" && playwright-cli browser_take_screenshot --filename /tmp/gh-aw/agent/screenshot-mobile.png --full-page true`
    - **Tablet**: resize to 768 × 1024, navigate, screenshot
    - **Desktop**: resize to 1440 × 900, navigate, screenshot
 2. **Accessibility snapshot** — For each page, run `playwright-cli browser_snapshot` and note any violations.

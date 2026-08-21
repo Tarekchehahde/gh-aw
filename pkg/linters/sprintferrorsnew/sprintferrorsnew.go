@@ -6,40 +6,33 @@ import (
 	"go/ast"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
 // Analyzer is the sprintferrorsnew analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "sprintferrorsnew",
-	Doc:      "reports errors.New(fmt.Sprintf(...)) calls that should use fmt.Errorf instead",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/sprintferrorsnew",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("sprintferrorsnew", "reports errors.New(fmt.Sprintf(...)) calls that should use fmt.Errorf instead", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "sprintferrorsnew")
 
 	nodeFilter := []ast.Node{
 		(*ast.CallExpr)(nil),
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return
 		}
 
-		if filecheck.IsTestFile(pass.Fset.Position(call.Pos()).Filename) {
+		if filecheck.ShouldSkipFilename(pass.Fset.Position(call.Pos()).Filename, generatedFiles) {
 			return
 		}
 
@@ -69,11 +62,9 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 
 		position := pass.Fset.PositionFor(call.Pos(), false)
-		if nolint.HasDirective(position, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "sprintferrorsnew") {
 			return
 		}
 		pass.Reportf(call.Pos(), "use fmt.Errorf instead of errors.New(fmt.Sprintf(...))")
 	})
-
-	return nil, nil
 }

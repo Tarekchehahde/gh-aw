@@ -55,6 +55,29 @@ sandbox:
 > [!WARNING]
 > Disabling the agent sandbox removes a security trust boundary. The `dangerously-disable-sandbox-agent` value is a permanent, reviewable record of why this workflow runs without the agent firewall. Write a reason that will be meaningful to future reviewers.
 
+### Runtime Profiles
+
+`sandbox.agent.runtime` is the single selector for the sandbox security and topology profile. Each value resolves to one supported combination of container runtime, AWF privileges, and host access:
+
+| Runtime | Effective behavior |
+| --- | --- |
+| `docker` (default) | Default Docker runtime, rootless AWF, network isolation |
+| `docker-sudo-iptables` | Docker with privileged AWF, legacy `iptables` networking, and host/service access |
+| `gvisor` | gVisor with strict network isolation |
+| `docker-sbx` | KVM microVM; the compiler handles the required privileged setup |
+| `cloud-hypervisor` | Preview KVM runtime with its required privileged launcher |
+
+Omitting `runtime` is equivalent to `runtime: docker`, which keeps the secure default.
+
+```yaml wrap
+sandbox:
+  agent:
+    runtime: docker-sudo-iptables
+    allow-host-ports: [9000]
+```
+
+The compiler derives every privilege the selected runtime needs, including the `sudo` used by the gVisor and Docker sbx installation steps. Unsupported combinations — such as `allow-host-ports` outside `docker-sudo-iptables`, or `runtime-install` outside `gvisor` and `docker-sbx` — fail at compile time. See [Agent Runtimes](/gh-aw/reference/agent-runtimes/) for runner prerequisites.
+
 ### MCP Gateway (Experimental)
 
 Route MCP server calls through a unified HTTP gateway:
@@ -118,6 +141,33 @@ All host binaries are available without explicit mounts: system utilities, `gh`,
 > [!WARNING]
 > Docker socket is hidden for security. Agents cannot spawn containers.
 
+#### Host Service Ports (`services:`)
+
+The AWF sandbox reaches GitHub Actions `services:` containers through `--allow-host-service-ports`, which resolves each service's actual (possibly dynamically assigned) host port at runtime. This mechanism, and the explicit `allow-host-ports` escape hatch below, both require `sandbox.agent.runtime: docker-sudo-iptables`: the default (strict) runtime profile does not provide a route to host services, even when host-access flags are combined.
+
+```yaml wrap
+sandbox:
+  agent:
+    runtime: docker-sudo-iptables
+
+services:
+  postgres:
+    image: postgres:18
+    ports:
+      - 5432:5432
+```
+
+For host daemons that are not declared in `services:`, add an explicit allowlist (also `docker-sudo-iptables` only):
+
+```yaml wrap
+sandbox:
+  agent:
+    runtime: docker-sudo-iptables
+    allow-host-ports: [9000]
+```
+
+Use `allow-host-ports` only for ports that cannot be represented by `services:`. The compiler rejects values outside the TCP port range `1` through `65535`, and rejects ports AWF always blocks as dangerous (e.g. `22`, `3306`, `5432`, `6379`, `9200`) — reach those through `services:` instead.
+
 #### Environment Variables
 
 AWF passes all environment variables via `--env-all`. The host `PATH` is captured as `AWF_HOST_PATH` and restored inside the container, preserving setup action tool paths.
@@ -144,6 +194,67 @@ jobs:
 
 Use `go build` or `python3` - both are available.
 ```
+
+#### Memory Limit (`sandbox.agent.memory`)
+
+By default, AWF uses its own built-in memory limit for the agent container. Set `sandbox.agent.memory` to override this limit on large-memory runners:
+
+```yaml wrap
+sandbox:
+  agent:
+    memory: 8g
+```
+
+Valid values are a positive integer followed by a unit: `b`, `k`, `m`, or `g` (case-insensitive). Examples: `512m`, `4g`, `8g`, `1024m`.
+
+When omitted, AWF's own default memory limit applies. Specifying an invalid format (e.g., `48gb` or `48`) is rejected at compile time.
+
+> [!NOTE]
+> Exit code 137 means the process received `SIGKILL`. A memory limit can be one cause, but verify with logs before changing `memory`. If you increase `memory`, leave headroom for the runner OS and other processes.
+
+#### Model fallback (`sandbox.agent.model-fallback`)
+
+AWF's API proxy resolves unrecognized model selections against its built-in model catalog and may rewrite them. Set `model-fallback: false` to pass the configured model through to the provider verbatim:
+
+```yaml wrap
+sandbox:
+  agent:
+    model-fallback: false
+```
+
+This is required for providers whose model identifiers are not in the built-in catalog (BYOK Azure OpenAI deployment names, self-hosted routers), where rewriting causes HTTP 404 `model_not_found`. When an [`OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` custom endpoint](/gh-aw/reference/engines/#custom-api-endpoints-via-environment-variables) is configured in `engine.env`, model fallback is disabled automatically; set this field explicitly to override that default.
+
+#### Token steering (`sandbox.agent.token-steering`)
+
+AWF enables API proxy token steering by default. To keep the explicitly configured provider and model, disable it for a workflow:
+
+```yaml wrap
+sandbox:
+  agent:
+    token-steering: false
+```
+
+#### Copilot BYOK request customization (`sandbox.agent.targets.copilot`)
+
+When routing Copilot through a BYOK-compatible upstream behind the AWF proxy, you can attach custom headers, extra request body fields, and an explicit session identifier on upstream requests:
+
+```yaml wrap
+sandbox:
+  agent:
+    targets:
+      copilot:
+        extraHeaders:
+          x-openrouter-title: my-workflow
+          http-referer: https://github.com/${{ github.repository }}
+        extraBodyFields:
+          custom-field: custom-value
+        sessionId: ${{ github.run_id }}
+```
+
+Use this for OpenAI-compatible proxies and gateways that expect additional request metadata. `sessionId` is opt-in only; gh-aw does not derive it automatically.
+
+> [!NOTE]
+> Set `sessionId` only when your upstream expects a session identifier. Some strict OpenAI-compatible providers reject unknown `session_id` fields, so automatic injection would be unsafe.
 
 #### Go cache paths in AWF (`GOMODCACHE` / `GOCACHE`)
 

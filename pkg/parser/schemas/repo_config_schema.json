@@ -19,8 +19,33 @@
         "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@[A-Za-z0-9._/+:-]+$"
       }
     },
+    "container_pins": {
+      "description": "Mapping of container image references to SHA-256 digest-pinned replacement image objects. Enables enterprises running in a private cloud to redirect container images to internal mirrors. Keys are source image references (e.g. 'ghcr.io/owner/image:tag') and values are objects with separate 'image' and 'digest' fields.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "description": "Replacement container image target with the ref name and digest stored separately for independent validation.",
+        "required": ["image", "digest"],
+        "additionalProperties": false,
+        "properties": {
+          "image": {
+            "type": "string",
+            "description": "Replacement container image reference without digest component (e.g. 'registry.acme.com/image:tag').",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*$"
+          },
+          "digest": {
+            "type": "string",
+            "description": "SHA-256 digest of the replacement image (e.g. 'sha256:<64 lowercase hex characters>').",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      },
+      "propertyNames": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*$"
+      }
+    },
     "ghes": {
-      "description": "Enable GitHub Enterprise Server (GHES) compatibility mode. Artifact actions continue to use latest non-v3 pins because upload-artifact/download-artifact v3 are deprecated.",
+      "description": "Enable GitHub Enterprise Server (GHES) compatibility mode. Artifact actions use upload-artifact@v3.2.2 and download-artifact@v3.1.0.",
       "type": "boolean"
     },
     "help_command": {
@@ -35,8 +60,27 @@
       "examples": ["+00:00", "-08:00", "+05:30"]
     },
     "auto_upgrade": {
-      "description": "When true, the compiler generates agentic-auto-upgrade.yml that runs on a fuzzy weekly schedule and inlines the 'upgrade' operation to check for and report available workflow upgrades via a GitHub issue. Defaults to false (opt-in).",
-      "type": "boolean"
+      "description": "Controls agentic-auto-upgrade.yml generation. Set to true to enable with the default fuzzy weekly schedule, false to disable, or an object to configure a custom schedule. Defaults to false (opt-in).",
+      "oneOf": [
+        {
+          "type": "boolean",
+          "description": "Set to true to enable agentic-auto-upgrade.yml with the default fuzzy weekly schedule, or false to disable."
+        },
+        {
+          "type": "object",
+          "description": "Enable auto-upgrade with a custom schedule. Providing an object implies enabled.",
+          "additionalProperties": false,
+          "properties": {
+            "cron": {
+              "description": "Custom cron expression for the agentic-auto-upgrade workflow schedule. When set, overrides the default fuzzy weekly schedule. Must be a valid 5-field POSIX cron expression (e.g. '0 9 * * 1' for Monday at 09:00 UTC).",
+              "type": "string",
+              "minLength": 9,
+              "pattern": "^[0-9*/,\\-]+ [0-9*/,\\-]+ [0-9*/,\\-]+ [0-9*/,\\-]+ [0-9*/,\\-]+$",
+              "examples": ["0 9 * * 1", "30 5 * * 1-5", "0 0 * * 0"]
+            }
+          }
+        }
+      ]
     },
     "maintenance": {
       "description": "Configuration for the agentic-maintenance workflow. Set to false to disable maintenance entirely, or provide an object to configure it.",

@@ -317,6 +317,40 @@ func TestGolden_MessageFormatting(t *testing.T) {
 	}
 }
 
+// nonTTYProgressBar returns a ProgressBar that always reports non-TTY mode,
+// so golden tests run unconditionally regardless of the developer's terminal.
+func nonTTYProgressBar(total int64) *ProgressBar {
+	bar := NewProgressBar(total)
+	bar.ttyCheck = func() bool { return false }
+	return bar
+}
+
+// TestGolden_ProgressBarNonTTY tests the deterministic non-TTY outputs of ProgressBar.Update.
+// These cases are pure and side-effect-free, making them ideal for golden coverage.
+// ttyCheck is overridden to always return false so the tests run unconditionally,
+// even when a developer executes them in an interactive terminal.
+func TestGolden_ProgressBarNonTTY(t *testing.T) {
+	t.Run("determinate_0pct", func(t *testing.T) {
+		bar := nonTTYProgressBar(1024)
+		golden.RequireEqual(t, []byte(bar.Update(0)))
+	})
+
+	t.Run("determinate_50pct", func(t *testing.T) {
+		bar := nonTTYProgressBar(1024 * 1024 * 1024) // 1 GB total
+		golden.RequireEqual(t, []byte(bar.Update(512*1024*1024)))
+	})
+
+	t.Run("determinate_100pct", func(t *testing.T) {
+		bar := nonTTYProgressBar(1024)
+		golden.RequireEqual(t, []byte(bar.Update(1024)))
+	})
+
+	t.Run("determinate_zero_total", func(t *testing.T) {
+		bar := nonTTYProgressBar(0)
+		golden.RequireEqual(t, []byte(bar.Update(0)))
+	})
+}
+
 // TestGolden_InfoSection tests info section rendering
 func TestGolden_InfoSection(t *testing.T) {
 	tests := []struct {

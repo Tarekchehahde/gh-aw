@@ -27,9 +27,10 @@ network:
 imports:
   - ../skills/documentation/SKILL.md
   - ../agents/technical-doc-writer.agent.md
+  - shared/ai-coding-dictionary.md
   - shared/mcp/serena-go.md
-
   - shared/otlp.md
+  - shared/reporting.md
 safe-outputs:
   create-pull-request:
     expires: 2d
@@ -86,9 +87,11 @@ steps:
       echo "$SCOPE" > /tmp/gh-aw/agent/scan-scope.txt
 
 
-sandbox:
-  agent:
-    sudo: false
+evals:
+  - id: glossary_reviewed
+    question: Did the agent review the glossary and identify gaps or stale entries relative to recent codebase changes?
+  - id: pr_created_or_noop
+    question: Was a pull request created with glossary updates, or was noop used when the glossary required no changes?
 ---
 
 # Glossary Maintainer
@@ -102,6 +105,7 @@ Keep the glossary up-to-date by:
 2. Performing incremental updates daily (last 24 hours)
 3. Performing comprehensive full scan on Mondays (last 7 days)
 4. Adding new terms and updating definitions based on repository changes
+5. Aligning AI-coding terminology with the shared AI Coding Dictionary reference
 
 ## Available Tools
 
@@ -182,6 +186,7 @@ The current glossary was already read in Step 1 along with the scope files.
 - Terms that need updated definitions
 - Outdated terminology
 - Inconsistent definitions
+- Generic AI terms that should be normalized using the shared AI Coding Dictionary reference
 
 ### 5. Follow Documentation Guidelines
 

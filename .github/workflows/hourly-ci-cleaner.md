@@ -9,6 +9,8 @@ permissions:
   actions: read
   issues: read
   pull-requests: read
+env:
+  GOTOOLCHAIN: auto
 tracker-id: hourly-ci-cleaner
 # Token Budget Guardrails:
 # - Prompt optimization: Added efficiency guidelines and early termination
@@ -34,14 +36,6 @@ tools:
 sandbox:
   agent:
     id: awf
-    sudo: false
-    mounts:
-      - "/usr/bin/make:/usr/bin/make:ro"
-      - "/usr/bin/go:/usr/bin/go:ro"
-      - "/usr/local/bin/node:/usr/local/bin/node:ro"
-      - "/usr/local/bin/npm:/usr/local/bin/npm:ro"
-      - "/usr/local/lib/node_modules:/usr/local/lib/node_modules:ro"
-      - "/opt/hostedtoolcache/go:/opt/hostedtoolcache/go:ro"
 if: needs.check_ci_status.outputs.ci_needs_fix == 'true'
 jobs:
   check_ci_status:
@@ -55,7 +49,7 @@ jobs:
       ci_run_id: ${{ steps.ci_check.outputs.ci_run_id }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Check last CI workflow run status on main branch
@@ -95,12 +89,12 @@ steps:
       sudo apt-get update
       sudo apt-get install -y make
   - name: Setup Go
-    uses: actions/setup-go@v6.5.0
+    uses: actions/setup-go@v7.0.0
     with:
       go-version-file: go.mod
       cache: true
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: "24"
       cache: npm
@@ -122,6 +116,12 @@ imports:
 
 
   - shared/otlp.md
+  - shared/reporting.md
+evals:
+  - id: ci_state_checked
+    question: Did the agent check whether CI was failing on the main branch?
+  - id: fixes_applied_or_skipped
+    question: Were format, lint, and test fixes applied and a PR created, or was the run correctly skipped when CI was already passing?
 ---
 
 # CI Cleaner

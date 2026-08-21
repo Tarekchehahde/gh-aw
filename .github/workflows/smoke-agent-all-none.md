@@ -19,12 +19,14 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    runtime: cloud-hypervisor
+    id: awf
 name: "Smoke Agent: all/none"
 engine: claude
 strict: true
 tools:
+  cli-proxy: false
+  bash: false
   github:
     mode: local
     allowed-repos: "all"
@@ -46,6 +48,7 @@ safe-outputs:
 timeout-minutes: 10
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 features:
   gh-aw-detection: false
 ---

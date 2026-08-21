@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,8 +28,11 @@ import (
 // they stay in sync with GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG.
 func generateSafeOutputsConfig(data *WorkflowData) (string, error) {
 	if data.SafeOutputs == nil {
-		safeOutputsConfigLog.Print("No safe outputs configuration found, returning empty config")
-		return "", nil
+		if data.CommentMemoryConfig == nil {
+			safeOutputsConfigLog.Print("No safe outputs configuration found, returning empty config")
+			return "", nil
+		}
+		data.SafeOutputs = &SafeOutputsConfig{}
 	}
 	safeOutputsConfigLog.Print("Generating safe outputs configuration for workflow")
 
@@ -62,8 +64,19 @@ func generateSafeOutputsConfig(data *WorkflowData) (string, error) {
 					handlerCfg["protected_dot_folder_excludes"] = dotFolderExcludes
 				}
 			}
+			if data.SafeOutputs != nil && data.SafeOutputs.DataEnabled && isDataSchemaEnabledType(handlerName) {
+				handlerCfg["data_enabled"] = true
+				if data.SafeOutputs.NormalizedDataSchema != nil {
+					handlerCfg["data_schema"] = data.SafeOutputs.NormalizedDataSchema
+				} else if strings.TrimSpace(data.SafeOutputs.DataSchemaExpression) != "" {
+					handlerCfg["data_schema"] = data.SafeOutputs.DataSchemaExpression
+				}
+			}
 			safeOutputsConfig[handlerName] = handlerCfg
 		}
+	}
+	if handlerConfig := buildCommentMemoryHandlerConfig(data.CommentMemoryConfig, data.SafeOutputs.Footer); handlerConfig != nil {
+		safeOutputsConfig[commentMemoryHandlerKey] = handlerConfig
 	}
 
 	// Safe-jobs configuration: custom output types that run as separate GitHub Actions jobs.
@@ -183,13 +196,23 @@ func generateSafeOutputsConfig(data *WorkflowData) (string, error) {
 	if data.RepoMemoryConfig != nil && len(data.RepoMemoryConfig.Memories) > 0 {
 		var memories []map[string]any
 		for _, memory := range data.RepoMemoryConfig.Memories {
-			memories = append(memories, map[string]any{
+			memoryConfig := map[string]any{
 				"id":             memory.ID,
 				"dir":            constants.TmpRepoMemoryDir + memory.ID,
 				"max_file_size":  memory.MaxFileSize,
 				"max_patch_size": memory.MaxPatchSize,
 				"max_file_count": memory.MaxFileCount,
-			})
+			}
+			if memory.FormatJSON {
+				memoryConfig["format_json"] = true
+			}
+			if memory.Validation != nil {
+				memoryConfig["validation"] = map[string]any{
+					"script":  memory.Validation.Script,
+					"timeout": memoryValidationTimeoutSeconds(memory.Validation),
+				}
+			}
+			memories = append(memories, memoryConfig)
 		}
 		safeOutputsConfig["push_repo_memory"] = map[string]any{
 			"memories": memories,
@@ -200,7 +223,14 @@ func generateSafeOutputsConfig(data *WorkflowData) (string, error) {
 	if len(safeOutputsConfig) == 0 {
 		return "", nil
 	}
-	configJSON, err := json.Marshal(safeOutputsConfig)
+	// The agent job never depends on the custom jobs listed in safe-outputs.needs (those
+	// dependencies are only wired onto the later safe_outputs handler job by
+	// buildSafeOutputsJobNeeds). Any templated expression referencing needs.<job> for one of
+	// those jobs would therefore be unresolvable inside the agent job and trip an actionlint
+	// "undefined property" error. Neutralize such expressions here; the handler job's own copy
+	// of the config (GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG) is unaffected and keeps the real value.
+	sanitizeAgentSafeOutputsConfig(safeOutputsConfig, data.SafeOutputs.Needs)
+	configJSON, err := marshalSafeOutputsConfig(safeOutputsConfig)
 	if err != nil {
 		return "", fmt.Errorf("marshaling safe-outputs config: %w", err)
 	}

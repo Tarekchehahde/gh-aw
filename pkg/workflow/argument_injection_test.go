@@ -7,6 +7,8 @@ package workflow
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -370,6 +372,26 @@ func TestValidatePipPackageName(t *testing.T) {
 			expectError: true,
 			errContains: "PyPI names must start and end with a letter or digit, with hyphens, underscores, or dots allowed inside (e.g. \"requests\" or \"my-package\")",
 		},
+		{
+			name:        "shell separator is rejected",
+			pkg:         "pkg;whoami",
+			expectError: true,
+		},
+		{
+			name:        "command substitution is rejected",
+			pkg:         "pkg$(whoami)",
+			expectError: true,
+		},
+		{
+			name:        "newline option injection is rejected",
+			pkg:         "pkg\n--index-url",
+			expectError: true,
+		},
+		{
+			name:        "empty name is rejected",
+			pkg:         "",
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -392,6 +414,129 @@ func TestValidatePipPackageName(t *testing.T) {
 					t.Errorf("unexpected error for package %q: %v", tt.pkg, err)
 				}
 			}
+
 		})
+	}
+}
+
+func TestValidatePipCommandPackageArg(t *testing.T) {
+	tests := []struct {
+		name        string
+		pkg         string
+		expectError bool
+	}{
+		{name: "valid package", pkg: "requests"},
+		{name: "rejects hyphen prefix", pkg: "--index-url", expectError: true},
+		{name: "rejects control characters", pkg: "pkg\nname", expectError: true},
+		{name: "rejects whitespace", pkg: "pkg name", expectError: true},
+		{name: "rejects shell separators", pkg: "pkg;whoami", expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePipCommandPackageArg(tt.pkg)
+			if tt.expectError && err == nil {
+				t.Fatalf("expected error for package %q", tt.pkg)
+			}
+			if !tt.expectError && err != nil {
+				t.Fatalf("unexpected error for package %q: %v", tt.pkg, err)
+			}
+		})
+	}
+}
+
+func TestValidatePythonPackagesWithPip_SkipsInvalidPackageBeforeExec(t *testing.T) {
+	compiler := NewCompiler()
+	tempDir := t.TempDir()
+	argsFile := filepath.Join(tempDir, "pip-args.txt")
+	fakePip := filepath.Join(tempDir, "pip")
+
+	script := `#!/bin/sh
+printf "%s\n" "$@" >> "$GH_AW_TEST_PIP_ARGS_FILE"
+`
+	if err := os.WriteFile(fakePip, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake pip executable: %v", err)
+	}
+	t.Setenv("GH_AW_TEST_PIP_ARGS_FILE", argsFile)
+
+	compiler.validatePythonPackagesWithPip([]string{"--index-url"}, "pip", fakePip)
+
+	if _, err := os.Stat(argsFile); err == nil {
+		t.Fatalf("expected invalid package to be rejected before exec; args file %q was created", argsFile)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("failed to stat recorded pip arguments file: %v", err)
+	}
+}
+
+func TestValidatePythonPackagesWithPip_ExecutesValidatedPackage(t *testing.T) {
+	compiler := NewCompiler()
+	tempDir := t.TempDir()
+	argsFile := filepath.Join(tempDir, "pip-args.txt")
+	fakePip := filepath.Join(tempDir, "pip")
+
+	script := `#!/bin/sh
+printf "%s\n" "$@" >> "$GH_AW_TEST_PIP_ARGS_FILE"
+`
+	if err := os.WriteFile(fakePip, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake pip executable: %v", err)
+	}
+	t.Setenv("GH_AW_TEST_PIP_ARGS_FILE", argsFile)
+
+	compiler.validatePythonPackagesWithPip([]string{"requests"}, "pip", fakePip)
+
+	if _, err := os.Stat(argsFile); err != nil {
+		if os.IsNotExist(err) {
+			t.Fatalf("expected pip to be invoked for valid package; args file %q was not created", argsFile)
+		}
+		t.Fatalf("failed to stat recorded pip arguments file: %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded pip arguments: %v", err)
+	}
+	args := string(argsData)
+
+	// validatePythonPackagesWithPip executes: pip index versions <package> --pre
+	gotArgs := strings.Split(strings.TrimSpace(args), "\n")
+	wantArgs := []string{"index", "versions", "requests", "--pre"}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("expected one pip invocation with %d args, got %d args: %q", len(wantArgs), len(gotArgs), args)
+	}
+	for i, want := range wantArgs {
+		if gotArgs[i] != want {
+			t.Fatalf("unexpected pip args at position %d: got %q, want %q (full args: %q)", i, gotArgs[i], want, args)
+		}
+	}
+}
+
+// TestValidateUvPackages_RejectsInvalidPackageName verifies that uv package names
+// which do not conform to the PyPI naming rules are rejected before being passed
+// as arguments to the uv CLI. This validation happens before uv/pip is resolved
+// or invoked, so the test is deterministic regardless of whether uv is installed
+// on the host running the test.
+func TestValidateUvPackages_RejectsInvalidPackageName(t *testing.T) {
+	compiler := NewCompiler()
+	err := compiler.validateUvPackages(&WorkflowData{
+		CustomSteps: "uvx pkg;whoami",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid uv package name but got none")
+	}
+	if !strings.Contains(err.Error(), "invalid pip package name") {
+		t.Errorf("expected error to mention invalid package name, got: %v", err)
+	}
+}
+
+// TestValidateUvPackages_AcceptsVersionedUvxSpec verifies that versioned uvx
+// package specs (e.g. "ruff@0.1.0") are not rejected by the PEP 508 name
+// validation, since extractUvFromCommands explicitly supports this syntax.
+func TestValidateUvPackages_AcceptsVersionedUvxSpec(t *testing.T) {
+	compiler := NewCompiler()
+	err := compiler.validateUvPackages(&WorkflowData{
+		CustomSteps: "uvx ruff@0.1.0",
+	})
+	if err != nil && strings.Contains(err.Error(), "invalid pip package name") {
+		t.Errorf("expected versioned uvx spec to be accepted as a valid package name, got: %v", err)
 	}
 }

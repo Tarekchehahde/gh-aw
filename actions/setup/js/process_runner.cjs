@@ -15,6 +15,24 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const os = require("os");
+
+/**
+ * Convert a Node.js child-process termination signal (e.g. "SIGSYS") into the
+ * conventional shell-style exit code (128 + signal number), matching the value
+ * the OS would report if the process had exited with that status directly.
+ * Node only reports a non-null `signal` when the process was killed by a signal
+ * (in which case `code` is null), so the caller must synthesize an exit code to
+ * preserve the fatal-signal information for downstream classification (see
+ * harness_crash_signals.cjs). Returns null when the signal name is unrecognized.
+ * @param {NodeJS.Signals | null} signal
+ * @returns {number | null}
+ */
+function exitCodeForSignal(signal) {
+  if (!signal) return null;
+  const signalNumber = os.constants.signals[signal];
+  return typeof signalNumber === "number" ? 128 + signalNumber : null;
+}
 
 /**
  * Format elapsed milliseconds as a human-readable string (e.g. "3m 12s").
@@ -61,7 +79,8 @@ function sleep(ms) {
  *     inactivityTimeoutMs: number,
  *     pollIntervalMs?: number,
  *     termGraceMs?: number
- *   }
+ *   },
+ *   stallWarningIntervalMs?: number
  * }} options
  *   - command   - The executable to run
  *   - args      - Arguments to pass to the command
@@ -69,20 +88,26 @@ function sleep(ms) {
  *   - log       - Caller-supplied logging function (harness-specific prefix)
  *   - logArgs   - Safe arg list used only for logging; defaults to `args`.
  *                 Pass a redacted copy to avoid leaking sensitive values.
- * @returns {Promise<{exitCode: number, output: string, hasOutput: boolean, durationMs: number}>}
+ *   - stallWarningIntervalMs - Interval of child-process silence after which the
+ *                 driver logs a stall warning. Defaults to the value resolved from
+ *                 GH_AW_HARNESS_STALL_WARNING_MS; 0 disables the warnings. An explicit
+ *                 caller value is used as-is (not clamped to the environment range) so
+ *                 tests can use short intervals.
+ * @returns {Promise<{exitCode: number, output: string, hasOutput: boolean, durationMs: number, watchdogFired: boolean}>}
  */
-function runProcess({ command, args, attempt, log, logArgs, env, postResultWatchdog }) {
+function runProcess({ command, args, attempt, log, logArgs, env, postResultWatchdog, stallWarningIntervalMs }) {
   return new Promise(resolve => {
     const startTime = Date.now();
     // Guard against the promise being settled more than once.  On some systems Node
     // emits 'close' after 'error' (or vice-versa); only the first terminal event should
     // log and resolve so callers receive a deterministic result.
     let settled = false;
-    /** @param {{exitCode: number, output: string, hasOutput: boolean, durationMs: number}} result */
+    /** @param {{exitCode: number, output: string, hasOutput: boolean, durationMs: number, watchdogFired: boolean}} result */
     function settle(result) {
       if (settled) return;
       settled = true;
       if (postResultWatchdogTimer) clearInterval(postResultWatchdogTimer);
+      if (stallWatchdogTimer) clearInterval(stallWatchdogTimer);
       resolve(result);
     }
 
@@ -111,6 +136,22 @@ function runProcess({ command, args, attempt, log, logArgs, env, postResultWatch
     const watchdogInactivityTimeoutMs = Number.isFinite(rawInactivityTimeout) && rawInactivityTimeout > 0 ? Math.max(50, rawInactivityTimeout) : 0;
     /** @type {NodeJS.Timeout | null} */
     let postResultWatchdogTimer = null;
+    /** @type {NodeJS.Timeout | null} */
+    let stallWatchdogTimer = null;
+    const stallIntervalMs = Number.isFinite(Number(stallWarningIntervalMs)) ? Math.max(0, Number(stallWarningIntervalMs)) : resolveStallWarningIntervalMs(env ?? process.env);
+    let stallWarnings = 0;
+    let stalledSinceMs = 0;
+
+    // Record child-process output activity. When the driver previously reported a
+    // stall, log an explicit recovery line so the step log distinguishes "was hung,
+    // then resumed" from "still silent".
+    function recordActivity() {
+      lastActivityAt = Date.now();
+      if (stalledSinceMs > 0) {
+        log(`attempt ${attempt + 1}: stall watchdog: output resumed after ${formatDuration(Date.now() - stalledSinceMs)} of silence`);
+        stalledSinceMs = 0;
+      }
+    }
 
     child.stdout.on(
       "data",
@@ -118,7 +159,7 @@ function runProcess({ command, args, attempt, log, logArgs, env, postResultWatch
         hasOutput = true;
         stdoutBytes += data.length;
         collectedOutput += data.toString();
-        lastActivityAt = Date.now();
+        recordActivity();
         process.stdout.write(data);
       }
     );
@@ -129,10 +170,30 @@ function runProcess({ command, args, attempt, log, logArgs, env, postResultWatch
         hasOutput = true;
         stderrBytes += data.length;
         collectedOutput += data.toString();
-        lastActivityAt = Date.now();
+        recordActivity();
         process.stderr.write(data);
       }
     );
+
+    // Driver-level stall watchdog: a hung agent CLI leaves the "Execute ... CLI" step
+    // in_progress with no log output at all until GitHub Actions cancels the step at
+    // timeout-minutes, which is indistinguishable from a slow-but-healthy run without
+    // cross-referencing job/step metadata. Emitting a periodic, greppable warning makes
+    // the hang self-diagnosable from the step log alone.
+    if (stallIntervalMs > 0) {
+      stallWatchdogTimer = setInterval(() => {
+        if (settled) return;
+        const idleMs = Date.now() - lastActivityAt;
+        if (idleMs < stallIntervalMs) return;
+        if (stalledSinceMs === 0) stalledSinceMs = lastActivityAt;
+        stallWarnings++;
+        log(
+          `attempt ${attempt + 1}: stall watchdog: no output from '${command}' for ${formatDuration(idleMs)}` +
+            ` (elapsed=${formatDuration(Date.now() - startTime)} pid=${child.pid ?? "unknown"} warnings=${stallWarnings})` +
+            ` - the step may be hung${formatStepTimeoutBudget(startTime, env ?? process.env)}`
+        );
+      }, stallIntervalMs);
+    }
 
     if (postResultWatchdog && watchdogInactivityTimeoutMs > 0) {
       postResultWatchdogTimer = setInterval(() => {
@@ -165,15 +226,28 @@ function runProcess({ command, args, attempt, log, logArgs, env, postResultWatch
     }
 
     child.on("exit", (code, signal) => {
-      log(`attempt ${attempt + 1}: process exit event` + ` exitCode=${code ?? 1}` + (signal ? ` signal=${signal}` : ""));
+      log(`attempt ${attempt + 1}: process exit event` + ` exitCode=${code ?? exitCodeForSignal(signal) ?? 1}` + (signal ? ` signal=${signal}` : ""));
     });
 
     // Resolve on 'close', not 'exit', to ensure stdio streams are fully drained.
     child.on("close", (code, signal) => {
       const durationMs = Date.now() - startTime;
-      const exitCode = code ?? 1;
-      log(`attempt ${attempt + 1}: process closed` + ` exitCode=${exitCode}` + (signal ? ` signal=${signal}` : "") + ` duration=${formatDuration(durationMs)}` + ` stdout=${stdoutBytes}B stderr=${stderrBytes}B hasOutput=${hasOutput}`);
-      settle({ exitCode, output: collectedOutput, hasOutput, durationMs });
+      // When the process is killed by a signal, Node reports code=null and a signal
+      // name instead. Synthesize the conventional 128+signal exit code so fatal-signal
+      // crashes (e.g. SIGSYS) are visible to exit-code-based retry classification even
+      // when the shell/runtime never reports a raw numeric exit status.
+      const exitCode = code ?? exitCodeForSignal(signal) ?? 1;
+      const watchdogFired = sentSigtermAt > 0;
+      log(
+        `attempt ${attempt + 1}: process closed` +
+          ` exitCode=${exitCode}` +
+          (signal ? ` signal=${signal}` : "") +
+          ` duration=${formatDuration(durationMs)}` +
+          ` stdout=${stdoutBytes}B stderr=${stderrBytes}B hasOutput=${hasOutput}` +
+          (watchdogFired ? ` watchdogFired=true` : "") +
+          (stallWarnings > 0 ? ` stallWarnings=${stallWarnings}` : "")
+      );
+      settle({ exitCode, output: collectedOutput, hasOutput, durationMs, watchdogFired });
     });
 
     child.on("error", err => {
@@ -188,9 +262,82 @@ function runProcess({ command, args, attempt, log, logArgs, env, postResultWatch
         output: collectedOutput,
         hasOutput,
         durationMs,
+        watchdogFired: false,
       });
     });
   });
+}
+
+// Driver-level stall watchdog: how long the spawned agent CLI may stay completely
+// silent before the driver logs a warning marking the step as potentially hung.
+const DEFAULT_STALL_WARNING_INTERVAL_MS = 5 * 60 * 1000;
+const MIN_STALL_WARNING_INTERVAL_MS = 1000;
+const MAX_STALL_WARNING_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Resolve the stall-warning interval from the environment.
+ * Falls back to DEFAULT_STALL_WARNING_INTERVAL_MS when unset or non-numeric, and
+ * returns 0 (warnings disabled) when explicitly set to a value <= 0.
+ * Otherwise clamps to [MIN_STALL_WARNING_INTERVAL_MS, MAX_STALL_WARNING_INTERVAL_MS].
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+function resolveStallWarningIntervalMs(env = process.env) {
+  const raw = env.GH_AW_HARNESS_STALL_WARNING_MS;
+  if (raw === undefined || String(raw).trim() === "") {
+    return DEFAULT_STALL_WARNING_INTERVAL_MS;
+  }
+  const configured = Number(raw);
+  if (!Number.isFinite(configured)) {
+    return DEFAULT_STALL_WARNING_INTERVAL_MS;
+  }
+  if (configured <= 0) {
+    return 0;
+  }
+  return Math.min(MAX_STALL_WARNING_INTERVAL_MS, Math.max(MIN_STALL_WARNING_INTERVAL_MS, configured));
+}
+
+/**
+ * Build the trailing "; the step timeout ... will cancel this step in ..." fragment of
+ * the stall warning, based on the step timeout advertised via GH_AW_TIMEOUT_MINUTES.
+ * Returns an empty string when the timeout is unknown or invalid.
+ * @param {number} startTime - Timestamp (ms) when the child process was spawned
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+function formatStepTimeoutBudget(startTime, env = process.env) {
+  const timeoutMinutes = Number(env.GH_AW_TIMEOUT_MINUTES);
+  if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) {
+    return "";
+  }
+  const remainingMs = startTime + Math.floor(timeoutMinutes * 60 * 1000) - Date.now();
+  if (remainingMs <= 0) {
+    return `; the ${timeoutMinutes}-minute step timeout has been reached and GitHub Actions will cancel this step`;
+  }
+  return `; GitHub Actions will cancel this step in about ${formatDuration(remainingMs)} (timeout-minutes=${timeoutMinutes})`;
+}
+
+// Post-result watchdog: shared constants and timeout resolver used by all harnesses.
+// These are kept here so both copilot_harness and codex_harness stay in sync.
+const MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS = 50;
+const DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+/** Maximum allowed value for GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS to prevent the watchdog from being
+ *  effectively disabled by an excessively large override (e.g. a stray zero). */
+const MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Resolve the post-result watchdog inactivity timeout from the environment.
+ * Falls back to DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS when unset or invalid.
+ * Clamps to [MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS, MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS].
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+function resolvePostResultWatchdogIdleTimeoutMs(env = process.env) {
+  const configuredTimeoutMs = Number(env.GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS);
+  if (!Number.isFinite(configuredTimeoutMs) || configuredTimeoutMs <= 0) {
+    return DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS;
+  }
+  return Math.min(MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS, Math.max(MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS, configuredTimeoutMs));
 }
 
 /**
@@ -242,5 +389,20 @@ function buildCopilotSDKEnv(env) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { runProcess, formatDuration, sleep, isCopilotSDKEnabled, buildCopilotSDKEnv };
+  module.exports = {
+    runProcess,
+    formatDuration,
+    sleep,
+    isCopilotSDKEnabled,
+    buildCopilotSDKEnv,
+    MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS,
+    DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS,
+    MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS,
+    resolvePostResultWatchdogIdleTimeoutMs,
+    DEFAULT_STALL_WARNING_INTERVAL_MS,
+    MIN_STALL_WARNING_INTERVAL_MS,
+    MAX_STALL_WARNING_INTERVAL_MS,
+    resolveStallWarningIntervalMs,
+    formatStepTimeoutBudget,
+  };
 }

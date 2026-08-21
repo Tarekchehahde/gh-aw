@@ -31,7 +31,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { ReadBuffer } = require("./read_buffer.cjs");
-const { validateRequiredFields, validateStringInputLengths, validateStringMinLengths } = require("./mcp_scripts_validation.cjs");
+const { validateRequiredFields, validateStringInputLengths, buildStringLengthValidationError, validateStringMinLengths, validateArgumentsAgainstSchema, formatSchemaValidationError } = require("./mcp_scripts_validation.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { generateEnhancedErrorMessage } = require("./mcp_enhanced_errors.cjs");
 const { createDependencyInstallGate } = require("./mcp_dependencies_manager.cjs");
@@ -66,7 +66,7 @@ const UNKNOWN_PARAMETER_LIST_PREVIEW_MAX = 10;
  * @property {Function} writeMessage - Write message to stdout
  * @property {Function} replyResult - Send a result response
  * @property {Function} replyError - Send an error response
- * @property {ReadBuffer} readBuffer - Message buffer
+ * @property {any} readBuffer - Message buffer
  * @property {string} [logDir] - Optional log directory
  * @property {string} [logFilePath] - Optional log file path
  * @property {boolean} logFileInitialized - Whether log file has been initialized
@@ -784,13 +784,20 @@ async function handleRequest(server, request, defaultHandler) {
         };
       }
 
-      // SM-IS-01: Validate per-string input length limits (10 KB max per string parameter).
-      const oversizedFields = validateStringInputLengths(args, tool.inputSchema);
-      if (oversizedFields.length) {
-        const details = oversizedFields.map(v => `'${v.field}' (${v.byteLength} bytes)`).join(", ");
+      const schemaValidationError = validateArgumentsAgainstSchema(args, tool.inputSchema);
+      if (schemaValidationError) {
         throw {
           code: -32602,
-          message: `Input string parameter(s) exceed the 10 KB limit for tool '${name}': ${details}`,
+          message: formatSchemaValidationError(name, args, schemaValidationError),
+        };
+      }
+
+      // SM-IS-01: Validate per-string input length limits (default 10 KB, or explicit schema maxLength when set).
+      const oversizedFields = validateStringInputLengths(args, tool.inputSchema);
+      if (oversizedFields.length) {
+        throw {
+          code: -32602,
+          message: buildStringLengthValidationError(name, oversizedFields),
         };
       }
 
@@ -954,11 +961,16 @@ async function handleMessage(server, req, defaultHandler) {
         return;
       }
 
-      // SM-IS-01: Validate per-string input length limits (10 KB max per string parameter).
+      const schemaValidationError = validateArgumentsAgainstSchema(args, tool.inputSchema);
+      if (schemaValidationError) {
+        server.replyError(id, -32602, formatSchemaValidationError(name, args, schemaValidationError));
+        return;
+      }
+
+      // SM-IS-01: Validate per-string input length limits (default 10 KB, or explicit schema maxLength when set).
       const oversized = validateStringInputLengths(args, tool.inputSchema);
       if (oversized.length) {
-        const details = oversized.map(v => `'${v.field}' (${v.byteLength} bytes)`).join(", ");
-        server.replyError(id, -32602, `Input string parameter(s) exceed the 10 KB limit for tool '${name}': ${details}`);
+        server.replyError(id, -32602, buildStringLengthValidationError(name, oversized));
         return;
       }
 
@@ -1031,9 +1043,15 @@ function start(server, options = {}) {
     throw new Error(`${ERR_VALIDATION}: No tools registered`);
   }
 
-  const onData = async chunk => {
+  let processingChain = Promise.resolve();
+  const onData = chunk => {
     server.readBuffer.append(chunk);
-    await processReadBuffer(server, defaultHandler);
+    processingChain = processingChain
+      .then(() => processReadBuffer(server, defaultHandler))
+      .catch(error => {
+        server.debug(`processReadBuffer error: ${getErrorMessage(error)}`);
+      });
+    return processingChain;
   };
 
   process.stdin.on("data", onData);

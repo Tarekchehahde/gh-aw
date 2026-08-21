@@ -18,7 +18,8 @@ engine:
   id: claude
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   github:
@@ -51,6 +52,11 @@ imports:
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: repos_compiled
+    question: Did the agent find popular repositories using gh-aw lock files and attempt to compile or upgrade them?
+  - id: compatibility_report_created
+    question: Was a report created identifying compatibility gaps or was the cache updated with results?
 ---
 
 # Daily AW Cross-Repo Compilation Agent
@@ -75,7 +81,7 @@ Every run must:
 ## Run Context
 
 - Cache root: `/tmp/gh-aw/cache-memory/aw-compat`
-- Work root: `/tmp/gh-aw/agent/aw-compat-work`
+- Work root: `/tmp/gh-aw/aw-compat-work`
 - Use filesystem-safe timestamps only: `YYYY-MM-DD-HH-MM-SS-sss` (no colons).
 
 ## Phase 0: Prepare Workspace and Build Latest gh-aw
@@ -86,7 +92,7 @@ set -euo pipefail
 RUN_TS="$(date -u +%Y-%m-%d-%H-%M-%S)-$(date -u +%3N)"
 CACHE_ROOT="/tmp/gh-aw/cache-memory/aw-compat"
 RUN_DIR="$CACHE_ROOT/runs/$RUN_TS"
-WORK_ROOT="/tmp/gh-aw/agent/aw-compat-work/$RUN_TS"
+WORK_ROOT="/tmp/gh-aw/aw-compat-work/$RUN_TS"
 
 mkdir -p "$RUN_DIR" "$WORK_ROOT" "$CACHE_ROOT/index"
 

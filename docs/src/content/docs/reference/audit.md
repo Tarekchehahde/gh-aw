@@ -18,23 +18,12 @@ Audit one or more workflow runs. When a single run is provided, a detailed Markd
 
 | Argument | Description |
 |----------|-------------|
-| `<run-id-or-url>` | A numeric run ID, GitHub Actions run URL, job URL, or job URL with step anchor |
-| `[<run-id-or-url>...]` | Additional run IDs or URLs to compare against the first (diff mode) |
+| `<run-id-or-url>` | A numeric run ID, run URL, job URL, or job URL with step anchor |
+| `[<run-id-or-url>...]` | Additional runs to compare against the first (diff mode) |
 
-**Accepted input formats (per argument):**
+Each argument accepts a numeric run ID, a standard or short run URL, a job URL, or a job URL with a step anchor. GitHub Enterprise URLs follow the same patterns.
 
-- Numeric run ID: `1234567890`
-- Run URL: `https://github.com/owner/repo/actions/runs/1234567890`
-- Job URL: `https://github.com/owner/repo/actions/runs/1234567890/job/9876543210`
-- Job URL with step: `https://github.com/owner/repo/actions/runs/1234567890/job/9876543210#step:7:1`
-- Short run URL: `https://github.com/owner/repo/runs/1234567890`
-- GitHub Enterprise URLs using the same formats above
-
-When a job URL is provided without a step anchor (single-run mode), the command extracts the output of the first failing step. When a step anchor is included, it extracts that specific step.
-
-In diff mode, job URLs and step-anchored URLs are accepted for any argument — the job/step specificity is silently normalized to the parent run ID, so it is always a run-level diff.
-
-Self-comparisons and duplicate run IDs are rejected when using diff mode.
+In single-run mode, a job URL without a step anchor extracts the first failing step's output; a step-anchored URL extracts that specific step. In diff mode, any job or step-specific URL is normalized to its parent run ID, so comparisons always happen at run scope. Self-comparisons and duplicate run IDs are rejected.
 
 **Flags:**
 
@@ -47,6 +36,8 @@ Self-comparisons and duplicate run IDs are rejected when using diff mode.
 | `--stdin` | off | Read run IDs or URLs from stdin (one per line) instead of positional arguments |
 | `--verbose` | off | Print detailed progress information |
 | `--format <fmt>` | `pretty` | Diff output format: `pretty` or `markdown` (multi-run only) |
+
+Top-level fields in `--json` output are stable; nested sub-fields may be extended but are not removed without deprecation. Add `--parse` to populate `behavior_fingerprint` and `agentic_assessments`.
 
 **Single-run examples:**
 
@@ -82,27 +73,18 @@ gh aw audit 12345 12346 --repo owner/repo      # Specify repository
 
 **Single-run report sections** (rendered in Markdown or JSON): Overview, Comparison, Task/Domain, Behavior Fingerprint, Agentic Assessments, Metrics, Key Findings, Recommendations, Observability Insights, Performance Metrics, Engine Config, Prompt Analysis, Session Analysis, Safe Output Summary, MCP Server Health, Jobs, Downloaded Files, Missing Tools, Missing Data, Noops, MCP Failures, Firewall Analysis, Policy Analysis, Redacted Domains, Errors, Warnings, Tool Usage, MCP Tool Usage, Created Items.
 
-The Metrics section includes an `ambient_context` object when available. Ambient context captures the first LLM inference footprint for the run:
+The Observability Insights section includes `skill_activations` when skill-invocation evidence is found. Each entry reports the skill name, `status` (`invoked`), the detection `source` (`agent_output` or `log_parse`), and provenance fields in JSON output. This makes it possible to distinguish skills that were merely restored or installed from skills that were actually invoked during the run.
+
+The Metrics section includes an `ambient_context` object when available. Ambient context captures the first LLM inference footprint for the run. It is absent when token-usage data is unavailable for the run — for example, when neither `token-usage.jsonl` nor the fallback `agent_usage.json` can be found in the downloaded artifacts, which is common for older runs and runs without firewall/usage artifacts:
 - `ambient_context.input_tokens` — input tokens for the first invocation
 - `ambient_context.cached_tokens` — cache-read tokens reused by the first invocation
 - `ambient_context.effective_tokens` — legacy ET field (`input_tokens + cached_tokens`) retained for compatibility
 
-**Diff output** includes:
-- New and removed network domains
-- Domain status changes (allowed ↔ denied)
-- Volume changes (request count changes above a 100% threshold)
-- Anomaly flags (new denied domains, previously-denied domains now allowed)
-- MCP tool invocation changes (new/removed tools, call count and error count diffs)
-- Run metrics comparison (token usage, duration, turns)
-- Token usage and spend breakdown: input tokens, output tokens, cache read/write tokens, AIC, legacy effective tokens (ET), total API requests, and cache efficiency per run
-- Tokens per turn: legacy ET divided by turn count for each run, with the change between runs
-- AIC reporting: AI Credits are shown alongside token metrics for spend tracking
-- Tool call breakdown: per-tool call counts (new, removed, and changed tools) with max input/output sizes
-- Bash command breakdown: aggregated call counts and max input/output sizes for each distinct bash command invoked
+**Diff output** includes network changes (new, removed, and allow/deny flips), anomaly flags, MCP tool invocation changes, run-level metric deltas, token and AIC breakdowns, tokens per turn, per-tool call counts with max input/output sizes, and aggregated bash command usage.
 
-**Diff output behavior with multiple comparisons:**
-- `--json` outputs a single object for one comparison, or an array for multiple
-- `--format pretty` and `--format markdown` separate multiple diffs with dividers
+With multiple comparisons, `--json` emits a single object for one comparison or an array for many, while `--format pretty` and `--format markdown` separate each diff with dividers.
+
+When artifacts are present, audit processing also persists extracted skill-activation data into `run_summary.json`, which downstream automation can consume alongside the rendered report.
 
 ## `gh aw logs --format <fmt>`
 
@@ -123,9 +105,11 @@ This feature is built into the `gh aw logs` command via the `--format` flag.
 | `--stdin` | off | Read run IDs or URLs from stdin (one per line) instead of run-discovery; content filters still apply |
 | `--verbose` | off | Print detailed progress |
 
+Top-level fields in `--json` output are stable; nested sub-fields may be extended but are not removed without deprecation.
+
 The report output includes an executive summary, domain inventory, metrics trends, MCP server health, and per-run breakdown. It detects cross-run anomalies such as domain access spikes, elevated MCP error rates, and connection rate changes.
 
-For each run in detailed logs JSON output, an `ambient_context` object is included when token usage data is available. It reflects only the first LLM invocation in the run (`input_tokens`, `cached_tokens`, and legacy `effective_tokens`).
+For each run in detailed logs JSON output, an `ambient_context` object is included when token usage data is available. It reflects only the first LLM invocation in the run (`input_tokens`, `cached_tokens`, and legacy `effective_tokens`). It is absent when the downloaded artifacts do not contain usable `token-usage.jsonl` or fallback `agent_usage.json` data for that run.
 
 **`--stdin` mode:** Pass `--stdin` to supply an explicit list of run IDs or URLs instead of letting the command discover runs from the GitHub API. Date, count, and workflow-name filters are ignored; `--engine`, `--firewall`, `--safe-output`, and other content filters still apply. Blank lines and `#`-prefixed lines are ignored. Bare numeric IDs require `--repo owner/repo`.
 
@@ -157,7 +141,7 @@ gh aw logs --format markdown --repo owner/repo --count 10
 
 ## Consuming Audit Reports in Workflows
 
-When running locally, all three audit commands accept `--json` to write structured output to stdout. Pipe through `jq` to extract the fields a model needs.
+All three audit commands support `--json` for structured stdout, which you can pipe through `jq` to extract only the fields a model needs.
 
 | Command | Use case |
 | --------- | ---------- |
@@ -165,7 +149,7 @@ When running locally, all three audit commands accept `--json` to write structur
 | `gh aw logs [workflow] --last 10 --json` | Trend analysis — `per_run_breakdown`, `domain_inventory` |
 | `gh aw audit <id1> <id2> --json` | Before/after — `run_metrics_diff`, `firewall_diff` |
 
-Inside GitHub Actions workflows, agents access these commands through the `agentic-workflows` MCP tool rather than calling the CLI directly.
+Inside GitHub Actions workflows, agents should use the `agentic-workflows` MCP tool instead of invoking the CLI directly.
 
 ### Posting findings as a PR comment
 
@@ -291,4 +275,4 @@ permissions:
 4. Update `/tmp/gh-aw/cache-memory/audit-trends.json` with rolling averages (cost, tokens, error count, deny rate), keeping only the last 30 days.
 ```
 
-Top-level fields (`key_findings`, `recommendations`, `metrics`, `firewall_analysis`, `mcp_tool_usage`) are stable; nested sub-fields may be extended but are not removed without deprecation. Add `--parse` to populate `behavior_fingerprint` and `agentic_assessments`. Cross-run JSON can be large — extract only the slices your model needs.
+Cross-run JSON can be large — extract only the slices your model needs.

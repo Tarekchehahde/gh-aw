@@ -6,6 +6,7 @@ on:
   roles: [admin, maintainer, write]
   slash_command:
     name: q
+    events: [issues, issue_comment, pull_request_comment, discussion, discussion_comment]
   reaction: rocket
   status-comment: true
 permissions:
@@ -15,14 +16,15 @@ permissions:
   pull-requests: read
   discussions: read
 
-sandbox:
-  agent:
-    sudo: false
+features:
+  gh-aw-detection: true
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 imports:
+  - uses: shared/q-safe-outputs.md
   - shared/otlp.md
 tools:
   cli-proxy: true
@@ -41,14 +43,6 @@ safe-outputs:
     allowed: [spam]
   add-comment:
     max: 1
-  create-pull-request:
-    expires: 2d
-    title-prefix: "[q] "
-    labels: [automation, workflow-optimization]
-    reviewers: copilot
-    draft: false
-    if-no-changes: "ignore"
-    protected-files: fallback-to-issue
   messages:
     footer: "> 🎩 *Equipped by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
     run-started: "🔧 Pay attention, 007! [{workflow_name}]({run_url}) is preparing your gadgets for this {event_type}..."

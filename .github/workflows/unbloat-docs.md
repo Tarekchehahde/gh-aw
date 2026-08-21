@@ -4,8 +4,9 @@ emoji: "📝"
 name: Documentation Unbloat
 description: Reviews and simplifies documentation by reducing verbosity while maintaining clarity and completeness
 on:
-  # Daily (scattered execution time)
-  schedule: daily
+  # Daily (explicitly staggered to avoid the 22:29 UTC batch)
+  schedule:
+    - cron: "18 0 * * *"
   
   # Command trigger for /unbloat in PR comments
   slash_command:
@@ -33,9 +34,9 @@ runtimes:
 
 # AI engine configuration
 max-turns: 90  # Reduce from avg 115 turns
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 # Shared instructions
 imports:
   - uses: shared/daily-pr-base.md
@@ -47,6 +48,7 @@ imports:
 
 # Network access for documentation best practices research
   - shared/otlp.md
+  - shared/reporting.md
 network:
   allowed:
     - defaults
@@ -56,7 +58,6 @@ network:
 sandbox:
   agent:
     id: awf
-    sudo: false
 
 # Tools configuration
 tools:
@@ -67,26 +68,7 @@ tools:
     toolsets: [default]
   edit:
   bash:
-    - "find docs/src/content/docs *"
-    - "find /tmp/gh-aw/cache-memory *"
-    - "wc -l *"
-    - "wc"
-    - "grep -n *"
-    - "grep -rL *"
-    - "grep *"
-    - "xargs *"
-    - "date *"
-    - "date"
-    - "awk *"
-    - "git"
-    - "cat *"
-    - "head *"
-    - "tail *"
-    - "cd *"
-    - "echo *"
-    - "mkdir *"
-    - "cp *"
-    - "mv *"
+    - "*"
 
 # Safe outputs configuration
 safe-outputs:
@@ -118,7 +100,7 @@ pre-agent-steps:
 
       # Write a heartbeat timestamp so the cache always has fresh content to save,
       # even on noop runs where the agent writes nothing to the cache directory.
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/gh-aw/cache-memory/last-run.txt
+      date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/gh-aw/cache-memory/last-run.txt
 
       # Check 1: verify docs directory structure exists
       DIR_COUNT=$(find docs/src/content/docs -maxdepth 1 -type d 2>/dev/null | wc -l)
@@ -130,8 +112,8 @@ pre-agent-steps:
 
       # Check 2: count editable markdown files
       TOTAL=$(find docs/src/content/docs -path '*/blog*' -prune \
-        -o -name '*.md' -type f ! -name 'frontmatter-full.md' -print \
-        | xargs grep -rL 'disable-agentic-editing: true' 2>/dev/null \
+        -o -name '*.md' -type f ! -name 'frontmatter-full.md' -print0 \
+        | xargs -0 grep -rL 'disable-agentic-editing: true' 2>/dev/null \
         | wc -l)
       if [ "$TOTAL" -eq 0 ]; then
         echo '{"pass":false,"reason":"Pre-flight failed: no editable markdown files found in docs/src/content/docs (all files may be protected or excluded)."}' \
@@ -155,7 +137,7 @@ pre-agent-steps:
       LATEST_ENTRY=$(awk 'NF>0{print $1}' "$CACHE_FILE" 2>/dev/null | sort | tail -1)
       if [ -n "$LATEST_ENTRY" ] && [ "$LATEST_ENTRY" \< "$STALE_CUTOFF" ]; then
         echo "Cache expiration: most recent entry $LATEST_ENTRY predates $STALE_CUTOFF — resetting cleaned-files.txt"
-        > "$CACHE_FILE"
+        : > "$CACHE_FILE"
       fi
 
       CLEANED=$(awk -v cutoff="$RECENT_CUTOFF" \
@@ -170,8 +152,8 @@ pre-agent-steps:
 
       # All checks passed — write candidate file list and preflight result
       find docs/src/content/docs -path '*/blog*' -prune \
-        -o -name '*.md' -type f ! -name 'frontmatter-full.md' -print \
-        | xargs grep -rL 'disable-agentic-editing: true' 2>/dev/null \
+        -o -name '*.md' -type f ! -name 'frontmatter-full.md' -print0 \
+        | xargs -0 grep -rL 'disable-agentic-editing: true' 2>/dev/null \
         > /tmp/gh-aw/agent/candidate-files.txt
       printf '{"pass":true,"reason":"All pre-flight checks passed. %d uncleaned candidates available.","uncleaned":%d,"total":%d}\n' \
         "$UNCLEANED" "$UNCLEANED" "$TOTAL" \
@@ -183,12 +165,12 @@ pre-agent-steps:
 # Build steps for documentation
 steps:
   - name: Checkout repository
-    uses: actions/checkout@v7.0.0
+    uses: actions/checkout@v7.0.1
     with:
       persist-credentials: false
 
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: '24'
       cache: 'npm'
@@ -202,10 +184,12 @@ steps:
     working-directory: ./docs
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    run: |
-      npm run generate-agent-factory
-      npm run generate-model-tables
-      npx astro build
+    run: npm run build
+evals:
+  - id: docs_analyzed
+    question: Did the agent analyze documentation files for verbosity and unnecessary content?
+  - id: pr_created_or_noop
+    question: Was a pull request created with simplified documentation, or was noop used when no documentation required simplification?
 ---
 
 # Documentation Unbloat Workflow
@@ -434,6 +418,7 @@ Use it when you need X by following steps 1-5. [Learn more](url)
 4. **Maintain tone**: Keep the neutral, technical tone
 5. **Test locally**: If possible, verify links and formatting are still correct
 6. **Document changes**: Clearly explain what you improved in the PR
+7. **Follow the `reporting` skill for any comment**: use `###` (h3) or lower headers, and wrap long diffs or file lists in `<details><summary><b>...</b></summary>...</details>`
 
 ## Success Criteria
 

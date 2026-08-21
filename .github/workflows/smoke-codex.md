@@ -33,6 +33,7 @@ imports:
   - shared/trufflehog.md
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/smoke-test-brevity.md
 network:
   allowed:
     - defaults
@@ -81,6 +82,7 @@ safe-outputs:
       run-failure: "🌑 The shadows whisper... [{workflow_name}]({run_url}) {status}. The oracle requires further meditation..."
     actions:
       add-smoked-label:
+        # zizmor: ignore[github_action_from_unverified_creator_used]
         uses: actions-ecosystem/action-add-labels@v1.1.3
         description: Add the 'smoked' label to the current pull request
         env:
@@ -91,15 +93,12 @@ checkout:
     current: true
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    id: awf
 ---
 
 # Smoke Test: Codex Engine Validation
-
-**CRITICAL EFFICIENCY REQUIREMENTS:**
-- Keep ALL outputs extremely short and concise. Use single-line responses.
-- NO verbose explanations or unnecessary context.
-- Minimize file reading - only read what is absolutely necessary for the task.
-- Use targeted, specific queries - avoid broad searches or large data retrievals.
 
 ## Test Requirements
 

@@ -39,22 +39,25 @@ global.context = mockContext;
  * @param {number} lookupPRNumber - PR number returned by the thread lookup query
  * @param {string} [lookupRepo] - Repository nameWithOwner returned by the lookup query (default: "test-owner/test-repo")
  */
-function mockGraphqlForThread(lookupPRNumber, lookupRepo = "test-owner/test-repo") {
+function mockGraphqlForThread(lookupPRNumber, lookupRepo = "test-owner/test-repo", lookupThreadId = "PRRT_kwDOABCD123456") {
   mockGraphql.mockImplementation(query => {
     if (query.includes("resolveReviewThread")) {
       // Mutation
       return Promise.resolve({
         resolveReviewThread: {
           thread: {
-            id: "PRRT_kwDOABCD123456",
+            id: lookupThreadId,
             isResolved: true,
           },
         },
       });
     }
-    // Lookup query
+    // Lookup query — isResolved: false means the thread is still open and needs resolving
     return Promise.resolve({
       node: {
+        __typename: "PullRequestReviewThread",
+        id: lookupThreadId,
+        isResolved: false,
         pullRequest: {
           number: lookupPRNumber,
           repository: { nameWithOwner: lookupRepo },
@@ -125,12 +128,12 @@ describe("resolve_pr_review_thread", () => {
     expect(result.error).toContain("triggering PR #42");
   });
 
-  it("should reject when thread is not found", async () => {
+  it("should succeed as a no-op when thread is not found (stale or already resolved)", async () => {
     mockGraphql.mockImplementation(query => {
       if (query.includes("resolveReviewThread")) {
         return Promise.resolve({});
       }
-      // Lookup returns null node
+      // Lookup returns null node — stale thread ID
       return Promise.resolve({ node: null });
     });
 
@@ -144,8 +147,375 @@ describe("resolve_pr_review_thread", () => {
 
     const result = await freshHandler(message, {});
 
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.is_resolved).toBe(true);
+    // Should not have called the resolve mutation
+    expect(mockGraphql).toHaveBeenCalledTimes(1);
+  });
+
+  it("should succeed as a no-op when the lookup throws a stale-node GraphQL error", async () => {
+    mockGraphql.mockImplementation(() => {
+      const error = new Error("Request failed");
+      error.errors = [{ type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'PRRT_kwDOPc1QR87fJc0o'" }];
+      return Promise.reject(error);
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_kwDOPc1QR87fJc0o" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.is_resolved).toBe(true);
+    expect(mockCore.error).not.toHaveBeenCalled();
+  });
+
+  it("should succeed as a no-op when the lookup throws a plain Not Found error", async () => {
+    mockGraphql.mockImplementation(() => Promise.reject(new Error("Not Found")));
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_stale" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(mockCore.error).not.toHaveBeenCalled();
+  });
+
+  it("should succeed as a no-op when the resolve mutation reports a stale node", async () => {
+    mockGraphql.mockImplementation(query => {
+      if (query.includes("resolveReviewThread")) {
+        const error = new Error("Could not resolve to a node with the global id of 'PRRT_kwDOABCD123456'");
+        return Promise.reject(error);
+      }
+      return Promise.resolve({
+        node: {
+          __typename: "PullRequestReviewThread",
+          id: "PRRT_kwDOABCD123456",
+          isResolved: false,
+          pullRequest: { number: 42, repository: { nameWithOwner: "test-owner/test-repo" } },
+        },
+      });
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_kwDOABCD123456" }, {});
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.is_resolved).toBe(true);
+    expect(mockCore.error).not.toHaveBeenCalled();
+  });
+
+  it("should still fail for unrelated lookup errors", async () => {
+    mockGraphql.mockImplementation(() => Promise.reject(new Error("Internal server error")));
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_kwDOABCD123456" }, {});
+
     expect(result.success).toBe(false);
-    expect(result.error).toContain("not found");
+    expect(result.error).toContain("Internal server error");
+  });
+
+  it("should still fail for unrelated 'not found' errors such as a missing repository", async () => {
+    mockGraphql.mockImplementation(() => Promise.reject(new Error("Repository not found")));
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_kwDOABCD123456" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Repository not found");
+  });
+
+  it("should still fail for structured NOT_FOUND errors unrelated to stale thread nodes", async () => {
+    mockGraphql.mockImplementation(() => {
+      const error = new Error("Repository not found");
+      error.errors = [{ type: "NOT_FOUND", message: "Repository not found", path: ["repository"] }];
+      return Promise.reject(error);
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({ type: "resolve_pull_request_review_thread", thread_id: "PRRT_kwDOABCD123456" }, {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Repository not found");
+  });
+
+  it("should resolve a review comment node ID by finding its parent thread", async () => {
+    mockGraphql.mockImplementation(query => {
+      if (query.includes("resolveReviewThread")) {
+        return Promise.resolve({
+          resolveReviewThread: {
+            thread: {
+              id: "PRRT_kwDOThread123",
+              isResolved: true,
+            },
+          },
+        });
+      }
+      if (query.includes("reviewThreads")) {
+        return Promise.resolve({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "PRRT_kwDOThread123",
+                    isResolved: false,
+                    comments: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [{ id: "PRRC_kwDOComment123" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+      }
+      return Promise.resolve({
+        node: {
+          __typename: "PullRequestReviewComment",
+          pullRequest: {
+            number: 42,
+            repository: {
+              name: "test-repo",
+              nameWithOwner: "test-owner/test-repo",
+              owner: { login: "test-owner" },
+            },
+          },
+        },
+      });
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({
+      type: "resolve_pull_request_review_thread",
+      thread_id: "PRRC_kwDOComment123",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.thread_id).toBe("PRRT_kwDOThread123");
+    expect(result.is_resolved).toBe(true);
+    expect(mockGraphql).toHaveBeenCalledTimes(3);
+    expect(mockGraphql).toHaveBeenCalledWith(expect.stringContaining("resolveReviewThread"), expect.objectContaining({ threadId: "PRRT_kwDOThread123" }));
+  });
+
+  it("should return comment_without_thread when the PRRC_ ID is not found in any review thread", async () => {
+    mockGraphql.mockImplementation(query => {
+      if (query.includes("reviewThreads")) {
+        return Promise.resolve({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "PRRT_kwDOThread999",
+                    isResolved: false,
+                    comments: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [{ id: "PRRC_kwDOOtherComment" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+      }
+      return Promise.resolve({
+        node: {
+          __typename: "PullRequestReviewComment",
+          pullRequest: {
+            number: 42,
+            repository: {
+              name: "test-repo",
+              nameWithOwner: "test-owner/test-repo",
+              owner: { login: "test-owner" },
+            },
+          },
+        },
+      });
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({
+      type: "resolve_pull_request_review_thread",
+      thread_id: "PRRC_kwDOComment123",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("PRRC_kwDOComment123");
+  });
+
+  it("should resolve a review comment found on a later comments page within a thread", async () => {
+    mockGraphql.mockImplementation(query => {
+      if (query.includes("resolveReviewThread")) {
+        return Promise.resolve({
+          resolveReviewThread: {
+            thread: {
+              id: "PRRT_kwDOThread123",
+              isResolved: true,
+            },
+          },
+        });
+      }
+      if (query.includes("threadId") && query.includes("comments(first: 100, after:")) {
+        // Second comments page for the thread — contains the matching comment
+        return Promise.resolve({
+          node: {
+            comments: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ id: "PRRC_kwDOComment123" }],
+            },
+          },
+        });
+      }
+      if (query.includes("reviewThreads")) {
+        return Promise.resolve({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "PRRT_kwDOThread123",
+                    isResolved: false,
+                    comments: {
+                      pageInfo: { hasNextPage: true, endCursor: "cursor-page2" },
+                      nodes: [{ id: "PRRC_kwDOOtherComment" }],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+      }
+      return Promise.resolve({
+        node: {
+          __typename: "PullRequestReviewComment",
+          pullRequest: {
+            number: 42,
+            repository: {
+              name: "test-repo",
+              nameWithOwner: "test-owner/test-repo",
+              owner: { login: "test-owner" },
+            },
+          },
+        },
+      });
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({
+      type: "resolve_pull_request_review_thread",
+      thread_id: "PRRC_kwDOComment123",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.thread_id).toBe("PRRT_kwDOThread123");
+    expect(result.is_resolved).toBe(true);
+    expect(mockGraphql).toHaveBeenCalledWith(expect.stringContaining("resolveReviewThread"), expect.objectContaining({ threadId: "PRRT_kwDOThread123" }));
+  });
+
+  it("should still reject non-thread and non-comment node IDs", async () => {
+    mockGraphql.mockResolvedValue({
+      node: {
+        __typename: "Issue",
+      },
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({
+      type: "resolve_pull_request_review_thread",
+      thread_id: "I_kwDOIssue123",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("PullRequestReviewThread");
+    expect(result.error).toContain("Issue");
+  });
+
+  it("should still reject already resolved threads from a different PR", async () => {
+    mockGraphql.mockResolvedValue({
+      node: {
+        __typename: "PullRequestReviewThread",
+        isResolved: true,
+        pullRequest: {
+          number: 99,
+          repository: { nameWithOwner: "test-owner/test-repo" },
+        },
+      },
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const result = await freshHandler({
+      type: "resolve_pull_request_review_thread",
+      thread_id: "PRRT_kwDOResolvedOtherPR",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("PR #99");
+    expect(result.error).toContain("triggering PR #42");
+  });
+
+  it("should succeed as a no-op when thread is already resolved", async () => {
+    mockGraphql.mockImplementation(query => {
+      if (query.includes("resolveReviewThread")) {
+        return Promise.resolve({});
+      }
+      // Lookup returns thread with isResolved: true
+      return Promise.resolve({
+        node: {
+          __typename: "PullRequestReviewThread",
+          isResolved: true,
+          pullRequest: {
+            number: 42,
+            repository: { nameWithOwner: "test-owner/test-repo" },
+          },
+        },
+      });
+    });
+
+    const { main } = require("./resolve_pr_review_thread.cjs");
+    const freshHandler = await main({ max: 10 });
+
+    const message = {
+      type: "resolve_pull_request_review_thread",
+      thread_id: "PRRT_kwDOAlreadyResolved",
+    };
+
+    const result = await freshHandler(message, {});
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.is_resolved).toBe(true);
+    // Should not have called the resolve mutation
+    expect(mockGraphql).toHaveBeenCalledTimes(1);
   });
 
   it("should succeed when not in a pull request context but explicit thread_id is provided", async () => {
@@ -174,7 +544,7 @@ describe("resolve_pr_review_thread", () => {
     // Simulate a schedule-triggered workflow (no pull_request in payload)
     global.context.payload = {};
 
-    mockGraphqlForThread(77);
+    mockGraphqlForThread(77, "test-owner/test-repo", "PRRT_kwDOSchedule77");
 
     const { main } = require("./resolve_pr_review_thread.cjs");
     const freshHandler = await main({ max: 10 });
@@ -204,7 +574,7 @@ describe("resolve_pr_review_thread", () => {
         return Promise.resolve({ resolveReviewThread: { thread: { id: "PRRT_x", isResolved: true } } });
       }
       return Promise.resolve({
-        node: { pullRequest: { number: 10, repository: null } },
+        node: { __typename: "PullRequestReviewThread", pullRequest: { number: 10, repository: null } },
       });
     });
 
@@ -222,11 +592,13 @@ describe("resolve_pr_review_thread", () => {
     expect(result.error).toContain("Unable to determine repository");
   });
 
-  it("should fail in legacy mode when schedule-triggered and thread belongs to a different repo", async () => {
+  it("should skip (not fail fatally) in legacy mode when schedule-triggered and thread belongs to a different repo", async () => {
     // Simulate a schedule-triggered workflow (no pull_request in payload)
     global.context.payload = {};
 
-    // Thread belongs to a different repo, not the default context repo
+    // Thread belongs to a different repo, not the default context repo. In legacy mode this is
+    // treated as a stale/mistaken thread_id (e.g. a hallucinated GraphQL node ID) rather than a
+    // genuine cross-repo access attempt, so it should be skipped instead of failing the whole job.
     mockGraphqlForThread(10, "other-owner/other-repo");
 
     const { main } = require("./resolve_pr_review_thread.cjs");
@@ -240,6 +612,7 @@ describe("resolve_pr_review_thread", () => {
     const result = await freshHandler(message, {});
 
     expect(result.success).toBe(false);
+    expect(result.skipped).toBe(true);
     expect(result.error).toContain("other-owner/other-repo");
   });
 
@@ -310,7 +683,7 @@ describe("resolve_pr_review_thread", () => {
   });
 
   it("should handle API errors gracefully", async () => {
-    mockGraphql.mockRejectedValue(new Error("Could not resolve. Thread not found."));
+    mockGraphql.mockRejectedValue(new Error("Internal server error while loading thread"));
 
     const message = {
       type: "resolve_pull_request_review_thread",
@@ -320,7 +693,7 @@ describe("resolve_pr_review_thread", () => {
     const result = await handler(message, {});
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain("Could not resolve");
+    expect(result.error).toContain("Internal server error");
   });
 
   it("should soft-skip when resolve mutation returns integration access error", async () => {
@@ -329,7 +702,7 @@ describe("resolve_pr_review_thread", () => {
         return Promise.reject(new Error("Request failed due to following response errors:\n - Resource not accessible by integration"));
       }
       return Promise.resolve({
-        node: { pullRequest: { number: 42, repository: { nameWithOwner: "test-owner/test-repo" } } },
+        node: { __typename: "PullRequestReviewThread", pullRequest: { number: 42, repository: { nameWithOwner: "test-owner/test-repo" } } },
       });
     });
 
@@ -363,7 +736,7 @@ describe("resolve_pr_review_thread", () => {
       }
       // Lookup succeeds - thread is on triggering PR in the default repo
       return Promise.resolve({
-        node: { pullRequest: { number: 42, repository: { nameWithOwner: "test-owner/test-repo" } } },
+        node: { __typename: "PullRequestReviewThread", pullRequest: { number: 42, repository: { nameWithOwner: "test-owner/test-repo" } } },
       });
     });
 
@@ -436,7 +809,7 @@ describe("resolve_pr_review_thread - cross-repo support", () => {
   });
 
   it("should allow resolving a thread in target-repo when configured", async () => {
-    mockGraphqlForThread(10, "other-owner/other-repo");
+    mockGraphqlForThread(10, "other-owner/other-repo", "PRRT_kwDOCrossRepo");
 
     const { main } = require("./resolve_pr_review_thread.cjs");
     const freshHandler = await main({
@@ -637,7 +1010,7 @@ describe("resolve_pr_review_thread - cross-repo support", () => {
         return Promise.resolve({ resolveReviewThread: { thread: { id: "PRRT_x", isResolved: true } } });
       }
       return Promise.resolve({
-        node: { pullRequest: { number: 10, repository: null } },
+        node: { __typename: "PullRequestReviewThread", pullRequest: { number: 10, repository: null } },
       });
     });
 

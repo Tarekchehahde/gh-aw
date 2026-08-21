@@ -3,6 +3,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -70,7 +71,23 @@ func isThreatDetectionExplicitlyDisabledInConfigs(configs []string) bool {
 }
 
 func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData) []string {
-	if !engineEnvHasKey(data, constants.CopilotProviderBaseURL) || data == nil || data.NetworkPermissions == nil {
+	if data == nil || data.NetworkPermissions == nil {
+		return []string{}
+	}
+
+	// Evaluate the effective merged detection environment (main + detection-specific
+	// overrides) so that a custom base URL configured only in
+	// safe-outputs.threat-detection.engine.env also triggers domain propagation.
+	var detectionSpecificEnv map[string]string
+	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.EngineConfig != nil {
+		detectionSpecificEnv = data.SafeOutputs.ThreatDetection.EngineConfig.Env
+	}
+	effectiveEnv := mergeThreatDetectionEngineEnv(data, detectionSpecificEnv)
+
+	hasCustomTarget := effectiveEnv["OPENAI_BASE_URL"] != "" ||
+		effectiveEnv["ANTHROPIC_BASE_URL"] != "" ||
+		effectiveEnv[constants.CopilotProviderBaseURL] != ""
+	if !hasCustomTarget {
 		return []string{}
 	}
 
@@ -94,11 +111,93 @@ func getThreatDetectionAdditionalAllowedDomains(data *WorkflowData) []string {
 	return additional
 }
 
-func canReuseThreatDetectionEngineConfigForExternalDetector(data *WorkflowData, engineID string) bool {
-	return data.SafeOutputs != nil &&
+// mergeThreatDetectionEngineEnv composes detection engine env vars from the main
+// engine env and detection-specific overrides.
+//
+// Detection values take precedence when keys overlap. When detectionEnv is empty,
+// it still returns a copy of the main env map to avoid aliasing/mutation of the
+// parent WorkflowData.EngineConfig.Env by downstream detection-specific updates.
+func mergeThreatDetectionEngineEnv(data *WorkflowData, detectionEnv map[string]string) map[string]string {
+	if data == nil || data.EngineConfig == nil || len(data.EngineConfig.Env) == 0 {
+		return detectionEnv
+	}
+	if len(detectionEnv) == 0 {
+		// Return a copy (not the original map) so subsequent detection-specific
+		// env merges cannot mutate the main engine's env map by aliasing.
+		return maps.Clone(data.EngineConfig.Env)
+	}
+
+	merged := make(map[string]string, len(data.EngineConfig.Env)+len(detectionEnv))
+	maps.Copy(merged, data.EngineConfig.Env)
+	maps.Copy(merged, detectionEnv)
+	return merged
+}
+
+// buildExternalDetectorWorkflowData creates the base WorkflowData for an external
+// detector step. It calls buildThreatDetectionWorkflowData and then applies the
+// detection engine config, env, and APITarget inheritance that is shared by both
+// the install step and the execution step. Callers add step-specific overrides
+// (such as network permissions or mounts) on top of the returned value.
+func buildExternalDetectorWorkflowData(data *WorkflowData, engineID string) *WorkflowData {
+	d := buildThreatDetectionWorkflowData(data, engineID)
+	d.Tools = map[string]any{
+		"bash": []any{"*"},
+	}
+	d.EngineConfig = resolveExternalDetectorEngineConfig(data, engineID)
+	d.EngineConfig.Env = mergeThreatDetectionEngineEnv(data, d.EngineConfig.Env)
+	if d.EngineConfig.APITarget == "" && data.EngineConfig != nil {
+		d.EngineConfig.APITarget = data.EngineConfig.APITarget
+	}
+	if data.SafeOutputs != nil && data.SafeOutputs.ThreatDetection != nil && data.SafeOutputs.ThreatDetection.MaxAICredits != 0 {
+		d.EngineConfig.MaxAICredits = data.SafeOutputs.ThreatDetection.MaxAICredits
+	}
+	return d
+}
+
+// resolveExternalDetectorEngineConfig determines the EngineConfig used to install and
+// execute the engine on the external detector path. Precedence:
+//  1. An explicit safe-outputs.threat-detection.engine override — cloned with its ID
+//     normalized to the resolved detection engine ID (handles cases like the pi->copilot
+//     detection normalization where the override's declared ID differs from the engine
+//     actually used).
+//  2. No override configured and the resolved detection engine matches the main
+//     engine — inherit Version/Config/Args/HarnessScript/Driver from the main engine
+//     config. This mirrors the inline detection path (buildDetectionEngineExecutionStep)
+//     and ensures behavior-defined engines (e.g. a pinned npm package version declared
+//     via a shared engine definition's default Version) install the same version in the
+//     detection job as in the main agent job, instead of silently falling back to the
+//     package's "latest" version.
+//  3. Otherwise, a minimal config containing only the resolved engine ID.
+func resolveExternalDetectorEngineConfig(data *WorkflowData, engineID string) *EngineConfig {
+	hasThreatDetectionEngineOverride := data.SafeOutputs != nil &&
 		data.SafeOutputs.ThreatDetection != nil &&
-		data.SafeOutputs.ThreatDetection.EngineConfig != nil &&
-		(data.SafeOutputs.ThreatDetection.EngineConfig.ID == "" || data.SafeOutputs.ThreatDetection.EngineConfig.ID == engineID)
+		data.SafeOutputs.ThreatDetection.EngineConfig != nil
+	if hasThreatDetectionEngineOverride {
+		return cloneThreatDetectionEngineConfig(engineID, data.SafeOutputs.ThreatDetection.EngineConfig)
+	}
+	if data.EngineConfig != nil && (data.EngineConfig.ID == "" || data.EngineConfig.ID == engineID) {
+		return &EngineConfig{
+			ID:            engineID,
+			Version:       data.EngineConfig.Version,
+			Config:        data.EngineConfig.Config,
+			Args:          data.EngineConfig.Args,
+			HarnessScript: data.EngineConfig.HarnessScript,
+			Driver:        data.EngineConfig.Driver,
+		}
+	}
+	return &EngineConfig{ID: engineID}
+}
+
+// cloneThreatDetectionEngineConfig returns a shallow copy of source with engine ID
+// normalized to the provided detection engineID. If source is nil, it returns a
+// minimal config containing only the ID.
+func cloneThreatDetectionEngineConfig(engineID string, source *EngineConfig) *EngineConfig {
+	if source == nil {
+		return &EngineConfig{ID: engineID}
+	}
+	cloned := *source
+	cloned.ID = engineID
+	return &cloned
 }
 
 // engineCoreSecretVarNames returns the secret-backed env var names for the given engine ID
@@ -112,8 +211,8 @@ func engineCoreSecretVarNames(engineID string) []string {
 		return []string{"ANTHROPIC_API_KEY"}
 	case "codex":
 		return []string{"OPENAI_API_KEY", "CODEX_API_KEY"}
-	case "gemini", "antigravity":
-		return []string{"GEMINI_API_KEY", "ANTIGRAVITY_API_KEY"}
+	case "gemini":
+		return []string{"GEMINI_API_KEY"}
 	default:
 		return []string{}
 	}

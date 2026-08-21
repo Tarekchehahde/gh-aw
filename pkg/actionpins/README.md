@@ -26,6 +26,20 @@ Resolution supports two modes:
 | `ResolutionFailure` | struct | Captures an unresolved action-ref pinning event (repo, ref, error type) |
 | `PinContext` | struct | Runtime context for resolution (resolver, strict mode, warning dedupe map, action-pin mappings) |
 
+#### `PinContext` fields
+
+| Field | Type | Description |
+|---|---|---|
+| `Ctx` | `context.Context` | Context propagated into dynamic SHA resolution calls; defaults to `context.Background()` when nil |
+| `Resolver` | `SHAResolver` | Dynamic `repo@version` → SHA resolver (optional) |
+| `StrictMode` | `bool` | Enables strict handling for unresolved refs |
+| `EnforcePinned` | `bool` | Requires unresolved refs to fail unless `AllowActionRefs` is enabled |
+| `AllowActionRefs` | `bool` | Downgrades unresolved pinning failures to warnings |
+| `Warnings` | `map[string]bool` | Shared warning dedupe map keyed by `repo@version` |
+| `RecordResolutionFailure` | `func(ResolutionFailure)` | Optional callback for unresolved pinning events |
+| `SkipHardcodedFallback` | `bool` | Skips version→SHA hardcoded fallback after dynamic resolver failure while preserving SHA→version labeling |
+| `Mappings` | `map[string]string` | Optional `owner/repo@ref` remapping before pin resolution |
+
 ### Functions
 
 | Function | Signature | Description |
@@ -39,6 +53,7 @@ Resolution supports two modes:
 | `ExtractVersion` | `func(uses string) string` | Extracts the version from a `uses` reference |
 | `ResolveActionPin` | `func(actionRepo, version string, ctx *PinContext) (string, error)` | Resolves a pinned reference with optional dynamic SHA lookup and fallback behavior |
 | `ResolveLatestActionPin` | `func(repo string, ctx *PinContext) string` | Resolves a pinned reference for the latest known version, preferring cache/dynamic resolution when available |
+| `ApplyContainerPinMapping` | `func(image string, ctx *PinContext) string` | Applies `PinContext.Mappings` remapping rules to a container image reference before lookup |
 
 ## Usage Examples
 
@@ -121,6 +136,22 @@ if ok {
 Embedded pin loading and index creation use `sync.Once`, and read access to loaded pin slices/maps is safe after initialization.
 
 `PinContext.Warnings` is mutated in place for warning deduplication; callers should not share one `PinContext` across goroutines without external synchronization.
+
+<!-- BEGIN SOURCE-VERIFIED EXPORT COVERAGE -->
+## Source-verified export coverage
+
+This appendix is generated from the current non-test Go source files in this package and records any exported top-level symbols that are not already described above.
+
+| Category | Count |
+|----------|------:|
+| Types | 8 |
+| Constants | 2 |
+| Variables | 0 |
+| Functions and methods | 9 |
+| Additional symbols documented in this appendix | 0 |
+
+The sections above already mention every exported top-level symbol in the current source tree.
+<!-- END SOURCE-VERIFIED EXPORT COVERAGE -->
 
 ---
 

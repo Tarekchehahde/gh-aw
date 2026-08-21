@@ -14,6 +14,7 @@ import (
 // TestFlattenAgentOutputsArtifact tests that agent_outputs artifact is properly flattened
 // to ensure session logs with token usage data are accessible for parsing
 func TestFlattenAgentOutputsArtifact(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 
 	// Create agent_outputs directory structure as downloaded by gh run download
@@ -53,16 +54,18 @@ func TestFlattenAgentOutputsArtifact(t *testing.T) {
 
 // TestFlattenAgentOutputsArtifactMissing tests behavior when agent_outputs is not present
 func TestFlattenAgentOutputsArtifactMissing(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 
 	// Don't create agent_outputs directory
 	// Call flatten - should succeed without error
 	err := flattenAgentOutputsArtifact(tempDir, false)
-	assert.NoError(t, err, "flattenAgentOutputsArtifact should succeed even when agent_outputs is missing")
+	require.NoError(t, err, "flattenAgentOutputsArtifact should succeed even when agent_outputs is missing")
 }
 
 // TestFlattenAgentOutputsArtifactPreservesStructure tests that nested directory structure is preserved
 func TestFlattenAgentOutputsArtifactPreservesStructure(t *testing.T) {
+	t.Parallel()
 	tempDir := t.TempDir()
 
 	// Create complex nested structure in agent_outputs

@@ -34,6 +34,25 @@ observability:
 
 Once configured, gh-aw exports built-in workflow spans such as setup and conclusion events to the configured OTLP backend.
 
+### Google Workload Identity Federation
+
+For Google Cloud Telemetry, configure Google Workload Identity Federation instead of a static authorization header. gh-aw mints and exchanges a GitHub OIDC token in every span-emitting job, and automatically grants those jobs `id-token: write`. The workload identity principal needs permission to write telemetry and, when `service-account` is set, permission to impersonate that service account.
+
+Set `audience` to the workload identity provider resource name (`projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER`). gh-aw derives the GitHub OIDC audience (`https://iam.googleapis.com/...`) and the Google STS audience (`//iam.googleapis.com/...`) from it, so either fully-qualified form is also accepted.
+
+```yaml wrap
+observability:
+  otlp:
+    endpoint:
+      - url: https://telemetry.googleapis.com
+        headers:
+          x-goog-user-project: ${{ vars.GCP_PROJECT_ID }}
+    workload-identity:
+      provider: google
+      audience: ${{ vars.GCP_WIF_PROVIDER }}
+      service-account: ${{ vars.GCP_SA_EMAIL }}
+```
+
 ## Read telemetry through MCP
 
 Configure [`mcp-servers`](/gh-aw/reference/frontmatter-full/) when the agent needs to inspect telemetry that already exists in the backend. A typical Sentry read setup looks like this:
@@ -105,7 +124,8 @@ You usually do not need to configure or memorize these built-in attributes. They
 When observability is enabled, trace data is also mirrored to local JSONL files and uploaded in the `agent` artifact:
 
 - `otel.jsonl` for spans emitted by gh-aw JavaScript helpers
-- `copilot-otel.jsonl` for spans emitted by Copilot CLI
+
+Copilot CLI inherits the standard OpenTelemetry environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`) and exports its own spans directly to the configured OTLP backend. Query them there, filtered by the `github.run_id` resource attribute (see [ADR-34450](https://github.com/github/gh-aw/blob/main/docs/adr/34450-inject-otel-resource-attributes-for-child-otel-sdk-correlation.md)).
 
 See [Artifacts](/gh-aw/reference/artifacts/) for artifact download details.
 
@@ -209,7 +229,7 @@ await otlp.logSpan('my-scanner', {
 
 Attribute values are sanitized automatically before the payload is exported or mirrored. Matching secret-like keys are redacted, and very long string values are truncated. The same sanitization is applied to both OTLP export and the local JSONL mirror.
 
-For debugging, every span emitted by `logSpan` is appended as a sanitized JSON line to `/tmp/gh-aw/otel.jsonl`, even when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set. When OTLP is configured, Copilot CLI spans are written to `/tmp/gh-aw/copilot-otel.jsonl` and forwarded to configured endpoints at the end of the run. Both files are included in the `agent` artifact when OTLP is enabled.
+For debugging, every span emitted by `logSpan` is appended as a sanitized JSON line to `/tmp/gh-aw/otel.jsonl`, even when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set. This file is included in the `agent` artifact when OTLP is enabled. Copilot CLI spans are not mirrored to a local file; they are exported directly to the configured OTLP backend and should be queried there.
 
 ```bash
 # Download agent artifacts for a run
@@ -217,9 +237,6 @@ gh aw logs <run-id> --artifacts agent
 
 # Inspect spans emitted by your tool
 cat otel.jsonl | jq 'select(.resourceSpans[].scopeSpans[].spans[].name | startswith("my-tool"))'
-
-# Inspect Copilot CLI spans
-cat copilot-otel.jsonl | jq '.resourceSpans'
 ```
 
 <details>

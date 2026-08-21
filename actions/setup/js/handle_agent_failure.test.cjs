@@ -2,8 +2,10 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createRequire } from "module";
+import { syncRuntimePromptTemplates } from "./test_prompt_templates.js";
 
 const require = createRequire(import.meta.url);
+const { runtimePromptsDir } = syncRuntimePromptTemplates(import.meta.url);
 
 describe("handle_agent_failure", () => {
   let main;
@@ -11,11 +13,17 @@ describe("handle_agent_failure", () => {
   let buildPushRepoMemoryFailureContext;
   let buildReportIncompleteContext;
   let buildFailureIssueTitle;
+  let buildModelPricingFrontmatterSnippet;
+  let fetchModelPricingFromModelsDev;
+  let buildMissingModelPricingContext;
   let buildSecretVerificationContext;
+  let buildDockerSbxSecretsContext;
   let buildAssignmentErrorsContext;
+  let buildAssignCopilotFailureContext;
   let getActionFailureIssueExpiresHours;
   const ENGINE_RATE_LIMIT_TEMPLATE = "> [!WARNING]\n> **Engine Rate Limited (HTTP 429)**\n> OTLP telemetry\n> {engine_label}\n";
   const ENGINE_MAX_RUNS_EXCEEDED_TEMPLATE = "> [!WARNING]\n> **Engine Max Runs Exceeded**\n> max-runs guardrail\n> {engine_label}\n";
+  const ENGINE_MAX_CACHE_MISSES_EXCEEDED_TEMPLATE = "> [!WARNING]\n> **Engine Cache Miss Limit Exceeded**\n> cache misses guardrail\n> {engine_label}\n";
 
   beforeEach(() => {
     // Provide minimal GitHub Actions globals expected by require-time code
@@ -38,8 +46,13 @@ describe("handle_agent_failure", () => {
       buildPushRepoMemoryFailureContext,
       buildReportIncompleteContext,
       buildFailureIssueTitle,
+      buildModelPricingFrontmatterSnippet,
+      fetchModelPricingFromModelsDev,
+      buildMissingModelPricingContext,
       buildSecretVerificationContext,
+      buildDockerSbxSecretsContext,
       buildAssignmentErrorsContext,
+      buildAssignCopilotFailureContext,
       getActionFailureIssueExpiresHours,
     } = require("./handle_agent_failure.cjs"));
   });
@@ -63,10 +76,18 @@ describe("handle_agent_failure", () => {
       expect(getActionFailureIssueExpiresHours()).toBe(48);
     });
 
-    it("returns default for invalid values", () => {
+    it("returns 0 (disabled) when the compiler explicitly opts out of expiration", () => {
       process.env.GH_AW_ACTION_FAILURE_ISSUE_EXPIRES_HOURS = "0";
-      expect(getActionFailureIssueExpiresHours()).toBe(168);
+      expect(getActionFailureIssueExpiresHours()).toBe(0);
+    });
+
+    it("returns default for invalid values", () => {
       process.env.GH_AW_ACTION_FAILURE_ISSUE_EXPIRES_HOURS = "invalid";
+      expect(getActionFailureIssueExpiresHours()).toBe(168);
+    });
+
+    it("returns default for malformed values with numeric prefixes", () => {
+      process.env.GH_AW_ACTION_FAILURE_ISSUE_EXPIRES_HOURS = "0invalid";
       expect(getActionFailureIssueExpiresHours()).toBe(168);
     });
   });
@@ -86,19 +107,27 @@ describe("handle_agent_failure", () => {
       hasStaleLockFileFailed: false,
       hasDailyAICExceeded: false,
       aiCreditsRateLimitError: false,
+      hasEngineRateLimit429: false,
       maxAICreditsExceeded: false,
       hasAssignmentErrors: false,
       http400ResponseError: false,
+      unknownModelAICredits: false,
+      missingModelPricingError: false,
+      missingModelPricingModelName: "",
+      shellExpansionGuardRejected: false,
     };
 
     const cases = [
       { flag: "hasDailyAICExceeded", expected: "[aw] Test Workflow exceeded daily AI credits budget" },
       { flag: "maxAICreditsExceeded", expected: "[aw] Test Workflow exceeded max AI credits" },
       { flag: "aiCreditsRateLimitError", expected: "[aw] Test Workflow hit AI credits rate limit" },
+      { flag: "hasEngineRateLimit429", expected: "[aw] Test Workflow hit engine rate limit (HTTP 429)" },
       { flag: "http400ResponseError", expected: "[aw] Test Workflow hit HTTP 400 bad request" },
+      { flag: "unknownModelAICredits", expected: "[aw] Test Workflow has unknown model pricing" },
       { flag: "hasAppTokenMintingFailed", expected: "[aw] Test Workflow failed to mint GitHub App token" },
       { flag: "hasLockdownCheckFailed", expected: "[aw] Test Workflow failed lockdown check" },
       { flag: "hasStaleLockFileFailed", expected: "[aw] Test Workflow has stale lock file" },
+      { flag: "shellExpansionGuardRejected", expected: "[aw] Test Workflow hit shell expansion guard rejection" },
       { flag: "isTimedOut", expected: "[aw] Test Workflow timed out" },
       { flag: "hasToolDenialsExceeded", expected: "[aw] Test Workflow exceeded tool denial limit" },
       { flag: "hasCacheMissMisconfiguration", expected: "[aw] Test Workflow has cache-memory miss misconfiguration" },
@@ -115,6 +144,38 @@ describe("handle_agent_failure", () => {
 
     it("falls back to generic failed title when no specific condition matches", () => {
       expect(buildFailureIssueTitle(baseOptions)).toBe("[aw] Test Workflow failed");
+    });
+
+    it("prefers unknownModelAICredits over isTimedOut when both are true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, unknownModelAICredits: true, isTimedOut: true })).toBe("[aw] Test Workflow has unknown model pricing");
+    });
+
+    it("prefers shellExpansionGuardRejected over isTimedOut when both are true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, shellExpansionGuardRejected: true, isTimedOut: true })).toBe("[aw] Test Workflow hit shell expansion guard rejection");
+    });
+
+    it("returns missing model pricing title with model name when missingModelPricingError is true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, missingModelPricingError: true, missingModelPricingModelName: "claude-opus-5" })).toBe("[aw] Test Workflow has no AI credits pricing for model (claude-opus-5)");
+    });
+
+    it("returns missing model pricing title without model name when model name is empty", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, missingModelPricingError: true, missingModelPricingModelName: "" })).toBe("[aw] Test Workflow has no AI credits pricing for model");
+    });
+
+    it("prefers missingModelPricingError over unknownModelAICredits when both are true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, missingModelPricingError: true, missingModelPricingModelName: "claude-opus-5", unknownModelAICredits: true })).toBe(
+        "[aw] Test Workflow has no AI credits pricing for model (claude-opus-5)"
+      );
+    });
+
+    it("prefers missingModelPricingError over http400ResponseError when both are true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, missingModelPricingError: true, missingModelPricingModelName: "claude-opus-5", http400ResponseError: true })).toBe(
+        "[aw] Test Workflow has no AI credits pricing for model (claude-opus-5)"
+      );
+    });
+
+    it("aiCreditsRateLimitError takes precedence over hasEngineRateLimit429 when both are true", () => {
+      expect(buildFailureIssueTitle({ ...baseOptions, aiCreditsRateLimitError: true, hasEngineRateLimit429: true })).toBe("[aw] Test Workflow hit AI credits rate limit");
     });
   });
 
@@ -139,6 +200,14 @@ describe("handle_agent_failure", () => {
       fs.writeFileSync(path.join(promptsDir, "daily_cap_rollup_issue.md"), "Daily cap rollup issue body cap={cap} window={window_hours}");
       fs.writeFileSync(path.join(promptsDir, "daily_cap_rollup_comment.md"), "Failure suppressed workflow={workflow_name} run={run_url} categories={summary} cap={cap} window={window_hours}h");
       fs.writeFileSync(path.join(promptsDir, "optimize_token_consumption_context.md"), "OPTIMIZE CONTEXT guardrail={guardrail_name} run={run_url}");
+      fs.writeFileSync(
+        path.join(promptsDir, "threat_detection_caution.md"),
+        "> [!CAUTION]\n> agentic threat detected\n> Threat detection flagged this output in warn mode. Manual review is REQUIRED before any follow-up automation.\n> {threat_detected_marker}\n>\n> <details>\n> <summary>Details</summary>\n>\n> {reason_text}\n>\n> Review the [workflow run logs]({run_url}) for details.\n> </details>"
+      );
+      fs.writeFileSync(
+        path.join(promptsDir, "threat_detection_engine_error.md"),
+        "> [!WARNING]\n> **Threat Detection Engine Failure** — The analysis engine could not complete. This is a tooling failure, not a security finding.\n> {threat_detected_marker}\n>\n> <details>\n> <summary>What happened</summary>\n>\n> {reason_text}\n>\n> Review the [workflow run logs]({run_url}) for details.\n> </details>"
+      );
 
       process.env.RUNNER_TEMP = tmpDir;
       process.env.GH_AW_WORKFLOW_NAME = "Test Workflow";
@@ -255,6 +324,7 @@ describe("handle_agent_failure", () => {
     it("includes AIC and ambient context metrics in the generated failure issue footer", async () => {
       process.env.GH_AW_AIC = "1.25";
       process.env.GH_AW_AMBIENT_CONTEXT = "900";
+      process.env.GH_AW_ENGINE_MODEL = "claude-sonnet-4.6";
       /** @type {string} */
       let capturedIssueBody = "";
 
@@ -286,10 +356,11 @@ describe("handle_agent_failure", () => {
       try {
         await main();
 
-        expect(capturedIssueBody).toContain("> Generated from [Test Workflow](https://github.com/owner/repo/actions/runs/123456) · 1.25 AIC · ⊞ 900");
+        expect(capturedIssueBody).toContain("> Generated from [Test Workflow](https://github.com/owner/repo/actions/runs/123456) · sonnet46 · 1.25 AIC · ⊞ 900");
       } finally {
         delete process.env.GH_AW_AIC;
         delete process.env.GH_AW_AMBIENT_CONTEXT;
+        delete process.env.GH_AW_ENGINE_MODEL;
       }
     });
 
@@ -440,6 +511,7 @@ describe("handle_agent_failure", () => {
       delete process.env.GH_AW_AGENT_CONCLUSION;
       delete process.env.GH_AW_FAILURE_REPORT_AS_ISSUE;
       delete process.env.GH_AW_AGENTIC_ENGINE_TIMEOUT;
+      delete process.env.GH_AW_SHELL_EXPANSION_GUARD_REJECTED;
       delete process.env.GITHUB_HEAD_REF;
       delete process.env.GITHUB_WORKSPACE;
       if (tmpDir && fs.existsSync(tmpDir)) {
@@ -647,6 +719,117 @@ describe("handle_agent_failure", () => {
       expect(parentCreateCall.headers).toEqual({ "X-GitHub-Api-Version": "2022-11-28" });
       expect(createCommentMock).not.toHaveBeenCalled();
       expect(searchMock).toHaveBeenCalledWith(expect.objectContaining({ q: expect.stringContaining('"[aw] Failed runs"') }));
+    });
+
+    it("creates a new parent issue when the existing parent issue has expired", async () => {
+      const createCommentMock = vi.fn();
+      const createIssueMock = vi.fn(async ({ title }) => ({
+        data: {
+          number: title === "[aw] Failed runs" ? 300 : 301,
+          html_url: `https://github.com/owner/repo/issues/${title === "[aw] Failed runs" ? 300 : 301}`,
+          node_id: title === "[aw] Failed runs" ? "I_parent_new" : "I_child",
+        },
+      }));
+      const expiredParentBody = "This issue tracks failures.\n\n> - [x] expires <!-- gh-aw-expires: 2000-01-01T00:00:00.000Z --> on Jan 1, 2000, 12:00 AM UTC";
+      const searchMock = vi.fn(async ({ q }) => {
+        if (q.includes("is:pr")) {
+          return { data: { total_count: 0, items: [] } };
+        }
+        if (q.includes('"[aw] Failed runs"')) {
+          return {
+            data: {
+              total_count: 1,
+              items: [{ number: 199, html_url: "https://github.com/owner/repo/issues/199", node_id: "I_parent_old", body: expiredParentBody }],
+            },
+          };
+        }
+        return { data: { total_count: 0, items: [] } };
+      });
+
+      process.env.GH_AW_GROUP_REPORTS = "true";
+
+      const graphqlMock = vi.fn(async () => ({ repository: { issue: { subIssues: { totalCount: 0 } } } }));
+
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: searchMock,
+          },
+          issues: {
+            create: createIssueMock,
+            createComment: createCommentMock,
+          },
+          pulls: { get: vi.fn() },
+        },
+        graphql: graphqlMock,
+      };
+
+      await main();
+
+      // github.rest.issues.create is always invoked with a single options object
+      // (see github.rest.issues.create({...}) call sites in handle_agent_failure.cjs),
+      // so destructuring the first call argument yields the options object itself.
+      const parentCreateCall = createIssueMock.mock.calls.map(([call]) => call).find(call => call.title === "[aw] Failed runs");
+      expect(parentCreateCall).toBeDefined();
+      expect(parentCreateCall.body).toContain("previous parent issue #199");
+      // Expired parent must not be reused: getSubIssueCount must not be queried
+      // for the expired parent #199, since the expiration check short-circuits first.
+      expect(graphqlMock).not.toHaveBeenCalledWith(expect.stringContaining("subIssues"), expect.objectContaining({ issueNumber: 199 }));
+    });
+
+    it("does not abort grouped handling when fetching parent issue body fails", async () => {
+      const createCommentMock = vi.fn();
+      const createIssueMock = vi.fn(async ({ title }) => ({
+        data: {
+          number: title === "[aw] Failed runs" ? 300 : 301,
+          html_url: `https://github.com/owner/repo/issues/${title === "[aw] Failed runs" ? 300 : 301}`,
+          node_id: title === "[aw] Failed runs" ? "I_parent_new" : "I_child",
+        },
+      }));
+      const searchMock = vi.fn(async ({ q }) => {
+        if (q.includes("is:pr")) {
+          return { data: { total_count: 0, items: [] } };
+        }
+        if (q.includes('"[aw] Failed runs"')) {
+          return {
+            data: {
+              total_count: 1,
+              items: [{ number: 199, html_url: "https://github.com/owner/repo/issues/199", node_id: "I_parent_old", body: null }],
+            },
+          };
+        }
+        return { data: { total_count: 0, items: [] } };
+      });
+      const getIssueMock = vi.fn(async () => {
+        throw new Error("transient API failure");
+      });
+      const graphqlMock = vi.fn(async () => ({ repository: { issue: { subIssues: { totalCount: 1 } } } }));
+
+      process.env.GH_AW_GROUP_REPORTS = "true";
+
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: searchMock,
+          },
+          issues: {
+            get: getIssueMock,
+            create: createIssueMock,
+            createComment: createCommentMock,
+          },
+          pulls: { get: vi.fn() },
+        },
+        graphql: graphqlMock,
+      };
+
+      await main();
+
+      expect(getIssueMock).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 199 }));
+      expect(global.core.warning).toHaveBeenCalledWith(expect.stringContaining("Could not fetch parent issue #199 body"));
+      const parentCreateCall = createIssueMock.mock.calls.map(([call]) => call).find(call => call.title === "[aw] Failed runs");
+      expect(parentCreateCall).toBeUndefined();
+      expect(createIssueMock).toHaveBeenCalledOnce();
+      expect(createCommentMock).not.toHaveBeenCalled();
     });
 
     it("escapes workflow IDs before searching for legacy XML marker matches", async () => {
@@ -872,6 +1055,45 @@ describe("handle_agent_failure", () => {
       expect(createIssueMock).toHaveBeenCalledOnce();
       const createCall = createIssueMock.mock.calls[0][0];
       expect(createCall.title).toBe("[aw] Test Workflow timed out");
+    });
+
+    it("uses shell expansion guard title instead of timeout when both flags are present", async () => {
+      const createIssueMock = vi.fn(async () => ({
+        data: { number: 101, html_url: "https://github.com/owner/repo/issues/101", node_id: "I_123" },
+      }));
+      fs.writeFileSync(path.join(promptsDir, "agent_failure_issue.md"), "{shell_expansion_guard_rejected_context}{timeout_context}{engine_failure_context}");
+      fs.writeFileSync(path.join(promptsDir, "agent_timeout.md"), "TIMEOUT TEMPLATE");
+      fs.writeFileSync(path.join(promptsDir, "shell_expansion_guard_rejected.md"), "SHELL GUARD TEMPLATE");
+      process.env.GH_AW_AGENT_CONCLUSION = "failure";
+      process.env.GH_AW_AGENTIC_ENGINE_TIMEOUT = "true";
+      process.env.GH_AW_SHELL_EXPANSION_GUARD_REJECTED = "true";
+      process.env.GH_AW_FAILURE_REPORT_AS_ISSUE = "true";
+
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: vi.fn(async () => ({ data: { total_count: 0, items: [] } })),
+          },
+          issues: {
+            create: createIssueMock,
+            createComment: vi.fn(),
+          },
+          pulls: { get: vi.fn() },
+        },
+        graphql: vi.fn(),
+      };
+
+      try {
+        await main();
+      } finally {
+        delete process.env.GH_AW_FAILURE_REPORT_AS_ISSUE;
+      }
+
+      expect(createIssueMock).toHaveBeenCalledOnce();
+      const createCall = createIssueMock.mock.calls[0][0];
+      expect(createCall.title).toBe("[aw] Test Workflow hit shell expansion guard rejection");
+      expect(createCall.body).toContain("SHELL GUARD TEMPLATE");
+      expect(createCall.body).not.toContain("TIMEOUT TEMPLATE");
     });
 
     it("uses a precise missing safe outputs title", async () => {
@@ -1313,6 +1535,7 @@ describe("handle_agent_failure", () => {
         branch: "main",
         pull_request_info: "",
         secret_verification_context: "",
+        docker_sbx_secrets_context: "",
         credential_auth_error_context: "",
         inference_access_error_context: "",
         mcp_policy_error_context: "",
@@ -1349,9 +1572,36 @@ describe("handle_agent_failure", () => {
 
   describe("buildSecretVerificationContext", () => {
     it("returns empty string when verification did not fail", () => {
-      expect(buildSecretVerificationContext("", "copilot")).toBe("");
-      expect(buildSecretVerificationContext("success", "copilot")).toBe("");
+      const copilotMessage = "**Alternative**: If your organization has a Copilot subscription, you can avoid the need for a personal access token by adding a top-level `permissions` block to your workflow file.";
+      expect(buildSecretVerificationContext("", copilotMessage)).toBe("");
+      expect(buildSecretVerificationContext("success", copilotMessage)).toBe("");
       expect(buildSecretVerificationContext("", "")).toBe("");
+    });
+
+    describe("buildDockerSbxSecretsContext", () => {
+      it("returns empty string when docker-sbx secret verification did not fail", () => {
+        expect(buildDockerSbxSecretsContext("")).toBe("");
+        expect(buildDockerSbxSecretsContext("success")).toBe("");
+      });
+
+      it("renders docker-sbx setup guidance from the dedicated markdown template", () => {
+        const originalPromptsDir = process.env.GH_AW_PROMPTS_DIR;
+        try {
+          process.env.GH_AW_PROMPTS_DIR = runtimePromptsDir;
+          const result = buildDockerSbxSecretsContext("failed");
+
+          expect(result).toContain("Docker sbx is not configured");
+          expect(result).toContain("DOCKER_USERNAME");
+          expect(result).toContain("DOCKER_PAT");
+          expect(result).toContain("sandbox.agent.runtime: docker-sbx");
+        } finally {
+          if (originalPromptsDir === undefined) {
+            delete process.env.GH_AW_PROMPTS_DIR;
+          } else {
+            process.env.GH_AW_PROMPTS_DIR = originalPromptsDir;
+          }
+        }
+      });
     });
 
     describe("buildAssignmentErrorsContext", () => {
@@ -1366,20 +1616,61 @@ describe("handle_agent_failure", () => {
       });
 
       it("renders assignment failures with token guidance docs", () => {
-        const result = buildAssignmentErrorsContext("issue:42:copilot:Bad credentials\npr:7:copilot:copilot coding agent is not available for this repository");
+        const originalPromptsDir = process.env.GH_AW_PROMPTS_DIR;
+        try {
+          process.env.GH_AW_PROMPTS_DIR = runtimePromptsDir;
+          const result = buildAssignmentErrorsContext("issue:42:copilot:Bad credentials\npr:7:copilot:copilot coding agent is not available for this repository");
 
-        expect(result).toContain("Agent Assignment Failed");
-        expect(result).toContain("Issue #42 (agent: copilot): Bad credentials");
-        expect(result).toContain("PR #7 (agent: copilot): copilot coding agent is not available for this repository");
-        expect(result).toContain("GH_AW_AGENT_TOKEN");
-        expect(result).toContain("Agent tasks: read and write");
-        expect(result).not.toContain("copilot-requests: write");
-        expect(result).toContain("https://github.github.com/gh-aw/reference/copilot-cloud-agent/#authentication");
+          expect(result).toContain("Agent Assignment Failed");
+          expect(result).toContain("Issue #42 (agent: copilot): Bad credentials");
+          expect(result).toContain("PR #7 (agent: copilot): copilot coding agent is not available for this repository");
+          expect(result).toContain("GH_AW_AGENT_TOKEN");
+          expect(result).toContain("metadata: read");
+          expect(result).toContain("GitHub App installation token");
+          expect(result).toContain("https://github.github.com/gh-aw/reference/copilot-cloud-agent/#authentication");
+          expect(result).toContain("https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api#using-the-issues-api");
+          expect(result).not.toContain("copilot-requests: write");
+        } finally {
+          if (originalPromptsDir === undefined) {
+            delete process.env.GH_AW_PROMPTS_DIR;
+          } else {
+            process.env.GH_AW_PROMPTS_DIR = originalPromptsDir;
+          }
+        }
       });
     });
 
-    it("returns generic warning for non-copilot engines when verification failed", () => {
-      const result = buildSecretVerificationContext("failed", "claude");
+    describe("buildAssignCopilotFailureContext", () => {
+      it("returns empty string when there are no copilot assignment failures", () => {
+        expect(buildAssignCopilotFailureContext(false, "")).toBe("");
+      });
+
+      it("renders standardized copilot assignment remediation guidance", () => {
+        const originalPromptsDir = process.env.GH_AW_PROMPTS_DIR;
+        try {
+          process.env.GH_AW_PROMPTS_DIR = runtimePromptsDir;
+          const result = buildAssignCopilotFailureContext(true, "issue:42:copilot:Bad credentials");
+
+          expect(result).toContain("Copilot Assignment Failed");
+          expect(result).toContain("Issue #42: Bad credentials");
+          expect(result).toContain("GH_AW_AGENT_TOKEN");
+          expect(result).toContain("metadata");
+          expect(result).toContain("GitHub App installation token");
+          expect(result).toContain("YOUR_AGENT_PAT");
+          expect(result).toContain("https://github.github.com/gh-aw/reference/copilot-cloud-agent/#authentication");
+          expect(result).toContain("https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/use-cloud-agent-via-the-api#using-the-issues-api");
+        } finally {
+          if (originalPromptsDir === undefined) {
+            delete process.env.GH_AW_PROMPTS_DIR;
+          } else {
+            process.env.GH_AW_PROMPTS_DIR = originalPromptsDir;
+          }
+        }
+      });
+    });
+
+    it("returns generic warning for engines with no failure message when verification failed", () => {
+      const result = buildSecretVerificationContext("failed", "");
       expect(result).toContain("Secret Verification Failed");
       expect(result).toContain("required secrets are configured");
       expect(result).toContain("https://github.github.com/gh-aw/reference/engines/");
@@ -1387,13 +1678,16 @@ describe("handle_agent_failure", () => {
     });
 
     it("returns copilot-specific message with copilot-requests: write permissions suggestion when verification failed", () => {
-      const result = buildSecretVerificationContext("failed", "copilot");
-      const mixedCaseResult = buildSecretVerificationContext("failed", "Copilot");
+      const copilotMessage =
+        "**Alternative**: If your organization has a Copilot subscription, you can avoid the need for a personal access token by adding a top-level `permissions` block to your workflow file. " +
+        "This enables Copilot inference through the org using the built-in GitHub Actions token.\n" +
+        "\n```yaml\npermissions:\n  copilot-requests: write\n```\n" +
+        "\nSee: https://github.github.com/gh-aw/reference/engines/#github-copilot-default";
+      const result = buildSecretVerificationContext("failed", copilotMessage);
       expect(result).toContain("Secret Verification Failed");
       expect(result).toContain("required secrets are configured");
       expect(result).toContain("```yaml\npermissions:\n  copilot-requests: write\n```");
       expect(result).toContain("https://github.github.com/gh-aw/reference/engines/#github-copilot-default");
-      expect(mixedCaseResult).toContain("copilot-requests: write");
     });
   });
 
@@ -2144,6 +2438,10 @@ describe("handle_agent_failure", () => {
       expect(shouldBuildEngineFailureContext("failure", true, false)).toBe(false);
     });
 
+    it("returns false when missing model pricing error is present", () => {
+      expect(shouldBuildEngineFailureContext("failure", false, false, true)).toBe(false);
+    });
+
     it("returns false for non-failure conclusions", () => {
       expect(shouldBuildEngineFailureContext("timed_out", false, true)).toBe(false);
       expect(shouldBuildEngineFailureContext("success", false, false)).toBe(false);
@@ -2197,6 +2495,8 @@ describe("handle_agent_failure", () => {
       fs.mkdirSync(promptsDir, { recursive: true });
       fs.writeFileSync(path.join(promptsDir, "engine_rate_limit_429.md"), ENGINE_RATE_LIMIT_TEMPLATE);
       fs.writeFileSync(path.join(promptsDir, "engine_max_runs_exceeded.md"), ENGINE_MAX_RUNS_EXCEEDED_TEMPLATE);
+      fs.writeFileSync(path.join(promptsDir, "max_cache_misses_exceeded.md"), ENGINE_MAX_CACHE_MISSES_EXCEEDED_TEMPLATE);
+      fs.writeFileSync(path.join(promptsDir, "shell_expansion_guard_rejected.md"), "SHELL GUARD TEMPLATE");
       process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "agent_output.json");
       process.env.RUNNER_TEMP = tmpDir;
       ({ buildEngineFailureContext } = require("./handle_agent_failure.cjs"));
@@ -2205,6 +2505,8 @@ describe("handle_agent_failure", () => {
     afterEach(() => {
       delete process.env.GH_AW_AGENT_OUTPUT;
       delete process.env.GH_AW_ENGINE_ID;
+      delete process.env.GH_AW_MAX_CACHE_MISSES_EXCEEDED;
+      delete process.env.GH_AW_SHELL_EXPANSION_GUARD_REJECTED;
       delete process.env.GH_AW_OTEL_JSONL_PATH;
       delete process.env.RUNNER_TEMP;
       // Clean up temp dir
@@ -2261,6 +2563,42 @@ describe("handle_agent_failure", () => {
       expect(result).not.toContain("Last agent output");
     });
 
+    it("returns dedicated context for max-cache-misses failures in stdio logs", () => {
+      fs.writeFileSync(
+        stdioLogPath,
+        '2026-07-30T06:14:50.000Z [ERROR] Error in API request: 403 {"error":{"type":"max_cache_misses_exceeded","message":"Maximum consecutive cache misses exceeded (6 / 5).","consecutive_cache_misses":6,"max_cache_misses":5}}\n'
+      );
+      const result = buildEngineFailureContext();
+      expect(result).toContain("Engine Cache Miss Limit Exceeded");
+      expect(result).toContain("cache misses guardrail");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("returns dedicated context when max-cache-misses is only present in structured logs", () => {
+      const logDir = path.join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs");
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(path.join(logDir, "event-logs.jsonl"), `${JSON.stringify({ type: "max_cache_misses_exceeded", consecutive_cache_misses: 6, max_cache_misses: 5 })}\n`);
+      fs.writeFileSync(stdioLogPath, "Agent terminated unexpectedly without clear error details\n");
+      process.env.GH_AW_MAX_CACHE_MISSES_EXCEEDED = "true";
+      const result = buildEngineFailureContext();
+      expect(result).toContain("Engine Cache Miss Limit Exceeded");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("returns dedicated context for shell expansion guard rejections in stdio logs", () => {
+      fs.writeFileSync(stdioLogPath, "Command rejected: shell command contains dangerous patterns that could enable arbitrary code execution. Please rewrite the command without these expansion patterns.\n");
+      const result = buildEngineFailureContext();
+      expect(result).toContain("SHELL GUARD TEMPLATE");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("returns dedicated context when shell expansion guard rejection is only present in detection output", () => {
+      fs.writeFileSync(stdioLogPath, "Agent terminated unexpectedly without clear error details\n");
+      const result = buildEngineFailureContext({ shellExpansionGuardRejected: true });
+      expect(result).toContain("SHELL GUARD TEMPLATE");
+      expect(result).not.toContain("Last agent output");
+    });
+
     it("suppresses engine 429 context when max-ai-credits-exceeded takes precedence", () => {
       fs.writeFileSync(stdioLogPath, "Failed to get response from the AI model; retried 5 times. Last error: CAPIError: 429 429 Sorry, you've exceeded your rate limit for utility models.\n");
       const result = buildEngineFailureContext({ suppressEngineRateLimit429: true });
@@ -2295,11 +2633,137 @@ describe("handle_agent_failure", () => {
       expect(result).not.toContain("Last agent output");
     });
 
+    it("strips ::add-mask:: command lines and redacts masked values from the last agent output", () => {
+      const logLines = ["   The Docker agent cgroup cannot be passed through.", "token is 79aab19823c27dbc1f3fcd49f16666ca8ab130b4b234b54f286cfcae347a844d", "::add-mask::79aab19823c27dbc1f3fcd49f16666ca8ab130b4b234b54f286cfcae347a844d"];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Last agent output");
+      expect(result).not.toContain("::add-mask::");
+      expect(result).not.toContain("79aab19823c27dbc1f3fcd49f16666ca8ab130b4b234b54f286cfcae347a844d");
+      expect(result).toContain("token is ***");
+    });
+
+    it("surfaces the harness terminal error instead of infrastructure noise", () => {
+      const logLines = [
+        "[WARN] ⚠️  --pids-limit/container.pidsLimit is not supported by this microVM runtime and will be ignored.",
+        "   The Docker agent cgroup cannot be passed through, so pids.max/pids.current are unavailable.",
+        "[copilot-harness] copilot-sdk: starting headless Copilot CLI server",
+        "[copilot-harness] unexpected error: copilot-sdk headless server did not become ready on 127.0.0.1:3002 within 5000ms (connect ETIMEDOUT 127.0.0.1:3002)",
+        "[INFO] [cloud-hypervisor] Agent command exited with code 1",
+        "[WARN] Command completed with exit code: 1",
+        "Process exiting with code: 1",
+      ];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Error details:");
+      expect(result).toContain("copilot-sdk headless server did not become ready on 127.0.0.1:3002");
+      expect(result).not.toContain("Last agent output");
+      expect(result).not.toContain("pids.max/pids.current");
+    });
+
+    it("filters indented AWF infrastructure continuation lines from the fallback tail", () => {
+      const logLines = [
+        "[WARN] ⚠️  --pids-limit/container.pidsLimit is not supported by this microVM runtime and will be ignored.",
+        "   The Docker agent cgroup cannot be passed through, so pids.max/pids.current are unavailable.",
+        "agent produced this final line",
+      ];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Last agent output");
+      expect(result).toContain("agent produced this final line");
+      expect(result).not.toContain("pids.max/pids.current");
+    });
+
+    it("treats a log of infrastructure lines and their continuations as producing no output", () => {
+      const logLines = [
+        "[WARN] ⚠️  --pids-limit/container.pidsLimit is not supported by this microVM runtime and will be ignored.",
+        "   The Docker agent cgroup cannot be passed through, so pids.max/pids.current are unavailable.",
+        "[WARN] Command completed with exit code: 1",
+        "Process exiting with code: 1",
+      ];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("terminated before producing output");
+      expect(result).not.toContain("Last agent output");
+    });
+
+    it("redacts masked values from engine error details", () => {
+      const logLines = ["::add-mask::sup3rs3cr3t", "Error: authentication failed with token sup3rs3cr3t"];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Error details:");
+      expect(result).toContain("authentication failed with token ***");
+      expect(result).not.toContain("sup3rs3cr3t");
+    });
+
     it("detects Error: prefix pattern (Node.js style)", () => {
       fs.writeFileSync(stdioLogPath, "Error: connect ECONNREFUSED 127.0.0.1:8080\n");
       const result = buildEngineFailureContext();
       expect(result).toContain("Engine Failure");
       expect(result).toContain("connect ECONNREFUSED 127.0.0.1:8080");
+    });
+
+    it("suppresses recovered no-deferred-marker retry errors and surfaces the terminal failure tail", () => {
+      const logLines = [
+        "[claude-harness] attempt 1: partial execution — will retry with --continue",
+        "Error: No deferred tool marker found in the resumed session. Either the session was not deferred, the marker is stale (tool already ran), or it exceeds the tail-scan window. Provide a prompt to continue the conversation.",
+        "[claude-harness] attempt 2: no deferred tool marker on --continue — retrying as fresh run (failure_reason=harness_retry_path_invalid, --continue disabled permanently, attempt 3/4)",
+        "[claude-harness] attempt 3: spawning: claude --print",
+        "2026-08-11T09:12:53.245Z [ERROR] API error (attempt 11/11): undefined Connection error.",
+        "[claude-harness] all 3 retries exhausted — giving up (exitCode=1)",
+      ];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Engine Failure");
+      expect(result).toContain("Last agent output");
+      expect(result).toContain("Connection error");
+      expect(result).not.toContain("No deferred tool marker");
+      expect(result).not.toContain("Error details:");
+    });
+
+    it("still surfaces unrecovered no-deferred-marker errors", () => {
+      fs.writeFileSync(stdioLogPath, "Error: No deferred tool marker found in the resumed session.\n");
+      const result = buildEngineFailureContext();
+      expect(result).toContain("Engine Failure");
+      expect(result).toContain("No deferred tool marker found");
+      expect(result).toContain("Error details:");
+    });
+
+    it("surfaces a terminal no-deferred-marker error that follows a recovered one", () => {
+      const logLines = [
+        "Error: No deferred tool marker found in the resumed session.",
+        "[claude-harness] attempt 2: no deferred tool marker on --continue — retrying as fresh run (failure_reason=harness_retry_path_invalid, --continue disabled permanently, attempt 3/4)",
+        "Error: No deferred tool marker found in the resumed session.",
+        "[claude-harness] attempt 3: no deferred tool marker — not retriable via --continue (failure_reason=harness_retry_path_invalid)",
+      ];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Error details:");
+      expect(result).toContain("No deferred tool marker found");
+    });
+
+    it("does not treat agent output quoting the recovery phrase as a harness recovery", () => {
+      const logLines = ["Error: No deferred tool marker found in the resumed session.", "The log said: no deferred tool marker on --continue — retrying as fresh run (--continue disabled permanently)"];
+      fs.writeFileSync(stdioLogPath, logLines.join("\n") + "\n");
+
+      const result = buildEngineFailureContext();
+
+      expect(result).toContain("Error details:");
+      expect(result).toContain("No deferred tool marker found");
     });
 
     it("extracts AWF startup errors from dependency lines and container startup failures", () => {
@@ -2832,6 +3296,151 @@ describe("handle_agent_failure", () => {
   });
 
   // ──────────────────────────────────────────────────────
+  // detectEngineRateLimit429Failure
+  // ──────────────────────────────────────────────────────
+
+  describe("detectEngineRateLimit429Failure", () => {
+    let detectEngineRateLimit429Failure;
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+
+    /** @type {string} */
+    let tmpDir;
+    /** @type {string} */
+    let stdioLogPath;
+
+    beforeEach(() => {
+      vi.resetModules();
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-test-detect-429-"));
+      stdioLogPath = path.join(tmpDir, "agent-stdio.log");
+      process.env.GH_AW_AGENT_OUTPUT = path.join(tmpDir, "agent_output.json");
+      ({ detectEngineRateLimit429Failure } = require("./handle_agent_failure.cjs"));
+    });
+
+    afterEach(() => {
+      delete process.env.GH_AW_AGENT_OUTPUT;
+      delete process.env.GH_AW_OTEL_JSONL_PATH;
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns true when stdio log contains a 429 rate-limit signal", () => {
+      fs.writeFileSync(stdioLogPath, "Failed to get response from the AI model; retried 5 times. Last error: CAPIError: 429 429 Sorry, you've exceeded your rate limit.\n");
+      expect(detectEngineRateLimit429Failure()).toBe(true);
+    });
+
+    it("returns false when stdio log contains terminal_reason: completed even with a 429 signal", () => {
+      fs.writeFileSync(stdioLogPath, 'Failed to get response; CAPIError: 429 rate limit\n{"type":"result","subtype":"success","terminal_reason":"completed","num_turns":10}\n');
+      expect(detectEngineRateLimit429Failure()).toBe(false);
+    });
+
+    it("returns false when stdio log contains terminal_reason: completed and no 429 signal", () => {
+      fs.writeFileSync(stdioLogPath, '{"type":"result","subtype":"success","terminal_reason":"completed","num_turns":5}\n');
+      expect(detectEngineRateLimit429Failure()).toBe(false);
+    });
+
+    it("returns false when stdio log has no 429 signal and OTLP mirror is absent", () => {
+      fs.writeFileSync(stdioLogPath, "Agent exited normally.\n");
+      expect(detectEngineRateLimit429Failure()).toBe(false);
+    });
+
+    it("returns false when log file does not exist and OTLP mirror is absent", () => {
+      expect(detectEngineRateLimit429Failure()).toBe(false);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
+  // hasEngineMaxCacheMissesExceededSignal
+  // ──────────────────────────────────────────────────────
+
+  describe("hasEngineMaxCacheMissesExceededSignal", () => {
+    let hasEngineMaxCacheMissesExceededSignal;
+
+    beforeEach(() => {
+      vi.resetModules();
+      ({ hasEngineMaxCacheMissesExceededSignal } = require("./handle_agent_failure.cjs"));
+    });
+
+    it("returns false for empty-like content", () => {
+      expect(hasEngineMaxCacheMissesExceededSignal("")).toBe(false);
+      expect(hasEngineMaxCacheMissesExceededSignal(null)).toBe(false);
+      expect(hasEngineMaxCacheMissesExceededSignal(undefined)).toBe(false);
+    });
+
+    it("returns true when max_cache_misses_exceeded marker is present", () => {
+      expect(hasEngineMaxCacheMissesExceededSignal('{"error":{"type":"max_cache_misses_exceeded"}}')).toBe(true);
+    });
+
+    it("returns true when Maximum consecutive cache misses exceeded text is present", () => {
+      expect(hasEngineMaxCacheMissesExceededSignal("Maximum consecutive cache misses exceeded (6 / 5).")).toBe(true);
+    });
+
+    it("returns true for the exact error seen in production logs", () => {
+      const logLine =
+        '2026-07-30T06:14:50.000Z [ERROR] Error in API request: 403 {"error":{"type":"max_cache_misses_exceeded","message":"Maximum consecutive cache misses exceeded (6 / 5).","consecutive_cache_misses":6,"max_cache_misses":5}}';
+      expect(hasEngineMaxCacheMissesExceededSignal(logLine)).toBe(true);
+    });
+
+    it("returns false for unrelated content", () => {
+      expect(hasEngineMaxCacheMissesExceededSignal("request failed for unrelated reason")).toBe(false);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
+  // buildEngineMaxCacheMissesExceededContext
+  // ──────────────────────────────────────────────────────
+
+  describe("buildEngineMaxCacheMissesExceededContext", () => {
+    let buildEngineMaxCacheMissesExceededContext;
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+
+    /** @type {string} */
+    let tmpDir;
+
+    /** @type {string} */
+    let promptsDir;
+
+    beforeEach(() => {
+      vi.resetModules();
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-test-cache-misses-"));
+      promptsDir = path.join(tmpDir, "gh-aw", "prompts");
+      fs.mkdirSync(promptsDir, { recursive: true });
+      process.env.RUNNER_TEMP = tmpDir;
+      ({ buildEngineMaxCacheMissesExceededContext } = require("./handle_agent_failure.cjs"));
+      fs.writeFileSync(path.join(promptsDir, "max_cache_misses_exceeded.md"), ENGINE_MAX_CACHE_MISSES_EXCEEDED_TEMPLATE);
+    });
+
+    afterEach(() => {
+      delete process.env.RUNNER_TEMP;
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("renders template content for a provided engine label", () => {
+      const result = buildEngineMaxCacheMissesExceededContext("claude");
+      expect(result).toContain("Engine Cache Miss Limit Exceeded");
+      expect(result).toContain("cache misses guardrail");
+      expect(result).toContain("claude");
+    });
+
+    it("falls back to AI when engine label is empty or whitespace", () => {
+      expect(buildEngineMaxCacheMissesExceededContext("")).toContain("AI");
+      expect(buildEngineMaxCacheMissesExceededContext("   ")).toContain("AI");
+    });
+
+    it("trims leading/trailing whitespace from engine label", () => {
+      const result = buildEngineMaxCacheMissesExceededContext("  claude  ");
+      expect(result).toContain("claude");
+      expect(result).not.toContain("  claude  ");
+    });
+  });
+
+  // ──────────────────────────────────────────────────────
   // buildMCPPolicyErrorContext
   // ──────────────────────────────────────────────────────
 
@@ -3021,6 +3630,118 @@ describe("handle_agent_failure", () => {
 
     it("throws when template is missing", () => {
       expect(() => buildUnknownModelAICreditsContext(true)).toThrow(/ENOENT|no such file/i);
+    });
+  });
+  // ──────────────────────────────────────────────────────
+
+  describe("models.dev pricing helpers", () => {
+    it("prefers the inferred provider match before cross-provider fallback", async () => {
+      const https = require("https");
+      const { EventEmitter } = require("events");
+      vi.spyOn(https, "get").mockImplementation((url, callback) => {
+        expect(url).toBe("https://models.dev/catalog.json");
+        const req = new EventEmitter();
+        req.destroy = vi.fn();
+        process.nextTick(() => {
+          const res = new EventEmitter();
+          res.statusCode = 200;
+          callback(res);
+          res.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                providers: {
+                  openai: { models: { "shared-model": { cost: { input: 1, output: 2 } } } },
+                  anthropic: { models: { "shared-model": { cost: { input: 3, output: 4 } } } },
+                },
+              })
+            )
+          );
+          res.emit("end");
+          req.emit("close");
+        });
+        return req;
+      });
+
+      await expect(fetchModelPricingFromModelsDev("shared-model", "anthropic")).resolves.toEqual({ input: 3, output: 4 });
+    });
+
+    it("quotes model names when building frontmatter pricing snippets", () => {
+      const snippet = buildModelPricingFrontmatterSnippet("model: alias", "claude", { input: 15, output: 75 });
+      expect(snippet).toContain("anthropic:");
+      expect(snippet).toContain("'model: alias':");
+    });
+  });
+
+  describe("buildMissingModelPricingContext", () => {
+    let buildMissingModelPricingContext;
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+
+    /** @type {string} */
+    let tmpDir;
+
+    /** @type {string} */
+    let promptsDir;
+
+    beforeEach(() => {
+      vi.resetModules();
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aw-test-missing-pricing-"));
+      promptsDir = path.join(tmpDir, "gh-aw", "prompts");
+      fs.mkdirSync(promptsDir, { recursive: true });
+      process.env.RUNNER_TEMP = tmpDir;
+      ({ buildMissingModelPricingContext } = require("./handle_agent_failure.cjs"));
+    });
+
+    afterEach(() => {
+      delete process.env.RUNNER_TEMP;
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("returns empty string when hasMissingModelPricingError is false", async () => {
+      const result = await buildMissingModelPricingContext(false, "claude-opus-5", "claude");
+      expect(result).toBe("");
+    });
+
+    it("returns template content with model name substituted when template exists", async () => {
+      const templateContent = "> [!WARNING]\n> **Missing AI Credits Pricing for model `{model_name}`**: Test message.\n{pricing_snippet}";
+      fs.writeFileSync(path.join(promptsDir, "missing_model_pricing.md"), templateContent);
+      const result = await buildMissingModelPricingContext(true, "claude-opus-5", "claude");
+      expect(result).toContain("claude-opus-5");
+    });
+
+    it("renders the manual pricing fallback when no pricing snippet is available", async () => {
+      const https = require("https");
+      const { EventEmitter } = require("events");
+      vi.spyOn(https, "get").mockImplementation((url, callback) => {
+        const req = new EventEmitter();
+        req.destroy = vi.fn();
+        process.nextTick(() => {
+          const res = new EventEmitter();
+          res.statusCode = 200;
+          callback(res);
+          res.emit("data", Buffer.from(JSON.stringify({ providers: {} })));
+          res.emit("end");
+          req.emit("close");
+        });
+        return req;
+      });
+      fs.writeFileSync(path.join(promptsDir, "missing_model_pricing.md"), "manual snippet:\n{pricing_snippet}\noption2 key {model_name_yaml_key}");
+      const result = await buildMissingModelPricingContext(true, "model: alias", "claude");
+      expect(result).toContain("manual snippet:");
+      expect(result).toContain("anthropic:");
+      expect(result).toContain("'model: alias':");
+      expect(result).toContain('input: "0e0"');
+      expect(result).toContain('cache_read: "0e0"');
+      expect(result).toContain('cache_write: "0e0"');
+      expect(result).toContain("Placeholder values");
+    });
+
+    it("throws when template is missing and error is true", async () => {
+      await expect(buildMissingModelPricingContext(true, "claude-opus-5", "claude")).rejects.toThrow(/ENOENT|no such file/i);
     });
   });
   // ──────────────────────────────────────────────────────
@@ -4093,6 +4814,47 @@ describe("handle_agent_failure", () => {
       // report_incomplete overrides the hasCompletedDespiteJobFailure exemption
       expect(createIssueMock).toHaveBeenCalled();
     });
+
+    it("ignores report_incomplete when it only describes task_complete registration trouble after successful outputs", async () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "agent_output.json"),
+        JSON.stringify({
+          items: [
+            { type: "add_comment", body: "done" },
+            { type: "submit_pull_request_review", event: "APPROVE", body: "done" },
+            {
+              type: "report_incomplete",
+              reason: "Test Quality Sentinel analysis completed successfully. However, task_complete tool calls are not registering with the system despite repeated attempts and no remaining work identified.",
+            },
+          ],
+        })
+      );
+      fs.writeFileSync(path.join(tmpDir, "agent-stdio.log"), '{"type":"result","subtype":"success","terminal_reason":"completed","num_turns":10}\n');
+
+      const createIssueMock = vi.fn();
+      const createCommentMock = vi.fn();
+
+      global.github = {
+        rest: {
+          search: {
+            issuesAndPullRequests: vi.fn(async () => ({ data: { total_count: 0, items: [] } })),
+          },
+          issues: {
+            create: createIssueMock,
+            createComment: createCommentMock,
+          },
+          pulls: { get: vi.fn() },
+        },
+        graphql: vi.fn(),
+      };
+
+      vi.resetModules();
+      const { main: mainFn } = require("./handle_agent_failure.cjs");
+      await mainFn();
+
+      expect(createIssueMock).not.toHaveBeenCalled();
+      expect(createCommentMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("parseFirewallAuthErrors", () => {
@@ -4803,6 +5565,47 @@ describe("handle_agent_failure", () => {
         isAWFFirewallStartupFailed: false,
       });
       expect(categories).not.toContain("awf_firewall_startup_failed");
+    });
+
+    it("returns missing_model_pricing category when missingModelPricingError is true", () => {
+      const categories = buildFailureMatchCategories({
+        missingModelPricingError: true,
+      });
+      expect(categories).toContain("missing_model_pricing");
+    });
+
+    it("returns shell_expansion_guard_rejected category when shellExpansionGuardRejected is true", () => {
+      const categories = buildFailureMatchCategories({
+        agentConclusion: "failure",
+        shellExpansionGuardRejected: true,
+      });
+      expect(categories).toContain("shell_expansion_guard_rejected");
+      expect(categories).not.toContain("agent_failure");
+    });
+
+    it("does not return missing_model_pricing category when missingModelPricingError is false", () => {
+      const categories = buildFailureMatchCategories({
+        agentConclusion: "failure",
+        missingModelPricingError: false,
+      });
+      expect(categories).not.toContain("missing_model_pricing");
+    });
+
+    it("returns engine_rate_limit_429 category when hasEngineRateLimit429 is true", () => {
+      const categories = buildFailureMatchCategories({
+        agentConclusion: "failure",
+        hasEngineRateLimit429: true,
+      });
+      expect(categories).toContain("engine_rate_limit_429");
+      expect(categories).not.toContain("agent_failure");
+    });
+
+    it("does not return engine_rate_limit_429 category when hasEngineRateLimit429 is false", () => {
+      const categories = buildFailureMatchCategories({
+        agentConclusion: "failure",
+        hasEngineRateLimit429: false,
+      });
+      expect(categories).not.toContain("engine_rate_limit_429");
     });
   });
 

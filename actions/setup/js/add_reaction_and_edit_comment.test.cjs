@@ -38,8 +38,8 @@ global.context = mockContext;
 
 // Helper to import the module fresh (bust module cache)
 async function loadModule() {
-  const { main, addCommentWithWorkflowLink, addReaction, addDiscussionReaction, resolveEventEndpoints, VALID_REACTIONS } = await import("./add_reaction_and_edit_comment.cjs?" + Date.now());
-  return { main, addCommentWithWorkflowLink, addReaction, addDiscussionReaction, resolveEventEndpoints, VALID_REACTIONS };
+  const { main, addCommentWithWorkflowLink, addReaction, addDiscussionReaction, resolveEventEndpoints, VALID_REACTIONS, expectRestEndpoint } = await import("./add_reaction_and_edit_comment.cjs?" + Date.now());
+  return { main, addCommentWithWorkflowLink, addReaction, addDiscussionReaction, resolveEventEndpoints, VALID_REACTIONS, expectRestEndpoint };
 }
 
 describe("add_reaction_and_edit_comment.cjs", () => {
@@ -48,6 +48,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
     delete process.env.GH_AW_REACTION;
     delete process.env.GH_AW_COMMANDS;
     delete process.env.GH_AW_WORKFLOW_NAME;
+    delete process.env.GH_AW_WORKFLOW_EMOJI;
     delete process.env.GH_AW_LOCK_FOR_AGENT;
     delete process.env.GITHUB_WORKFLOW;
     delete process.env.GH_AW_TRACKER_ID;
@@ -81,8 +82,16 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/123/reactions", expect.objectContaining({ content: "eyes" }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", expect.objectContaining({ content: "eyes", owner: "testowner", repo: "testrepo", issue_number: 123 }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("reaction-id", "456");
+    });
+
+    describe("Endpoint validation", () => {
+      it("should throw a validation error when a REST endpoint is unexpectedly a string", async () => {
+        const { expectRestEndpoint } = await loadModule();
+
+        expect(() => expectRestEndpoint("discussion:12", "reaction", "issues")).toThrow(`${ERR_VALIDATION}: Unexpected reaction endpoint shape for event: issues`);
+      });
     });
 
     it("should default to 'eyes' reaction when GH_AW_REACTION is not set", async () => {
@@ -94,7 +103,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/123/reactions", expect.objectContaining({ content: "eyes" }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", expect.objectContaining({ content: "eyes", owner: "testowner", repo: "testrepo", issue_number: 123 }));
     });
 
     it("should reject invalid reaction type", async () => {
@@ -125,6 +134,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
     it("should add reaction to pull request and create comment", async () => {
       process.env.GH_AW_REACTION = "heart";
       process.env.GH_AW_WORKFLOW_NAME = "Test Workflow";
+      process.env.GH_AW_WORKFLOW_EMOJI = "🤖";
       global.context.eventName = "pull_request";
       global.context.payload = {
         pull_request: { number: 456 },
@@ -135,8 +145,9 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/456/reactions", expect.objectContaining({ content: "heart" }));
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/456/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this pull request") }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", expect.objectContaining({ content: "heart", owner: "testowner", repo: "testrepo", issue_number: 456 }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("🤖 [Test Workflow]") }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this pull request") }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("reaction-id", "789");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-id", "999");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-url", "https://github.com/testowner/testrepo/pull/456#issuecomment-999");
@@ -169,7 +180,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/123/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this issue comment") }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this issue comment") }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-id", "789");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-url", "https://github.com/testowner/testrepo/issues/123#issuecomment-789");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-repo", "testowner/testrepo");
@@ -208,8 +219,8 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/targetowner/targetrepo/issues/comments/456/reactions", expect.objectContaining({ content: "eyes" }));
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/targetowner/targetrepo/issues/123/comments", expect.objectContaining({ body: expect.stringContaining("https://github.com/sideowner/siderepo/actions/runs/12345") }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", expect.objectContaining({ content: "eyes", owner: "targetowner", repo: "targetrepo", comment_id: 456 }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("https://github.com/sideowner/siderepo/actions/runs/12345") }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-repo", "targetowner/targetrepo");
     });
   });
@@ -229,7 +240,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const { main } = await loadModule();
       await main();
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/456/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this pull request review comment") }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", expect.objectContaining({ body: expect.stringContaining("has started processing this pull request review comment") }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-id", "999");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-url", "https://github.com/testowner/testrepo/pull/456#discussion_r999");
       expect(mockCore.setOutput).toHaveBeenCalledWith("comment-repo", "testowner/testrepo");
@@ -472,7 +483,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issues");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issues"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.stringContaining("<!-- gh-aw-workflow-id: test-workflow.yml -->") }));
     });
@@ -482,7 +497,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issues");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issues"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.stringContaining("<!-- gh-aw-tracker-id: tracker-123 -->") }));
     });
@@ -491,7 +510,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issues");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issues"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.stringContaining("<!-- gh-aw-comment-type: reaction -->") }));
     });
@@ -501,7 +524,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issues");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issues"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.stringContaining("🔒 This issue has been locked") }));
     });
@@ -511,7 +538,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issue_comment");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issue_comment"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.stringContaining("🔒 This issue has been locked") }));
     });
@@ -535,7 +566,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 123, html_url: "https://example.com" } });
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "pull_request");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "pull_request"
+      );
 
       expect(mockGithub.request).toHaveBeenCalledWith(expect.stringContaining("POST"), expect.objectContaining({ body: expect.not.stringContaining("🔒 This issue has been locked") }));
     });
@@ -582,7 +617,11 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockRejectedValueOnce(new Error("Network failure"));
 
       const { addCommentWithWorkflowLink } = await loadModule();
-      await addCommentWithWorkflowLink("/repos/testowner/testrepo/issues/123/comments", "https://github.com/testowner/testrepo/actions/runs/12345", "issues");
+      await addCommentWithWorkflowLink(
+        { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "testowner", repo: "testrepo", issue_number: 123 } },
+        "https://github.com/testowner/testrepo/actions/runs/12345",
+        "issues"
+      );
 
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Failed to create comment with workflow link"));
       expect(mockCore.setFailed).not.toHaveBeenCalled();
@@ -594,9 +633,9 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: { id: 789 } });
 
       const { addReaction } = await loadModule();
-      await addReaction("/repos/testowner/testrepo/issues/123/reactions", "eyes");
+      await addReaction("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", { owner: "testowner", repo: "testrepo", issue_number: 123 }, "eyes");
 
-      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/testowner/testrepo/issues/123/reactions", expect.objectContaining({ content: "eyes" }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", expect.objectContaining({ content: "eyes", owner: "testowner", repo: "testrepo", issue_number: 123 }));
       expect(mockCore.setOutput).toHaveBeenCalledWith("reaction-id", "789");
     });
 
@@ -604,7 +643,7 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       mockGithub.request.mockResolvedValueOnce({ data: {} });
 
       const { addReaction } = await loadModule();
-      await addReaction("/repos/testowner/testrepo/issues/123/reactions", "eyes");
+      await addReaction("POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", { owner: "testowner", repo: "testrepo", issue_number: 123 }, "eyes");
 
       expect(mockCore.setOutput).toHaveBeenCalledWith("reaction-id", "");
     });
@@ -623,8 +662,8 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const payload = { issue: { number: 42 } };
       const result = await resolveEventEndpoints("issues", "owner", "repo", payload);
       expect(result).toEqual({
-        reactionEndpoint: "/repos/owner/repo/issues/42/reactions",
-        commentUpdateEndpoint: "/repos/owner/repo/issues/42/comments",
+        reactionEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", params: { owner: "owner", repo: "repo", issue_number: 42 } },
+        commentUpdateEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "owner", repo: "repo", issue_number: 42 } },
       });
     });
 
@@ -640,8 +679,8 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const payload = { pull_request: { number: 7 } };
       const result = await resolveEventEndpoints("pull_request", "owner", "repo", payload);
       expect(result).toEqual({
-        reactionEndpoint: "/repos/owner/repo/issues/7/reactions",
-        commentUpdateEndpoint: "/repos/owner/repo/issues/7/comments",
+        reactionEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", params: { owner: "owner", repo: "repo", issue_number: 7 } },
+        commentUpdateEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "owner", repo: "repo", issue_number: 7 } },
       });
     });
 
@@ -650,8 +689,8 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const payload = { comment: { id: 55 }, issue: { number: 10 } };
       const result = await resolveEventEndpoints("issue_comment", "owner", "repo", payload);
       expect(result).toEqual({
-        reactionEndpoint: "/repos/owner/repo/issues/comments/55/reactions",
-        commentUpdateEndpoint: "/repos/owner/repo/issues/10/comments",
+        reactionEndpoint: { route: "POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", params: { owner: "owner", repo: "repo", comment_id: 55 } },
+        commentUpdateEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "owner", repo: "repo", issue_number: 10 } },
       });
     });
 
@@ -660,8 +699,8 @@ describe("add_reaction_and_edit_comment.cjs", () => {
       const payload = { comment: { id: 99 }, pull_request: { number: 3 } };
       const result = await resolveEventEndpoints("pull_request_review_comment", "owner", "repo", payload);
       expect(result).toEqual({
-        reactionEndpoint: "/repos/owner/repo/pulls/comments/99/reactions",
-        commentUpdateEndpoint: "/repos/owner/repo/issues/3/comments",
+        reactionEndpoint: { route: "POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", params: { owner: "owner", repo: "repo", comment_id: 99 } },
+        commentUpdateEndpoint: { route: "POST /repos/{owner}/{repo}/issues/{issue_number}/comments", params: { owner: "owner", repo: "repo", issue_number: 3 } },
       });
     });
 

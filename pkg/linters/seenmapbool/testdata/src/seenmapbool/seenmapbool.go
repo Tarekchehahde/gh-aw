@@ -19,6 +19,22 @@ func BadSetBoolLiteral() {
 	_ = seen
 }
 
+func getSeenMap() map[string]bool {
+	return make(map[string]bool)
+}
+
+func BadSetBoolFromHelper() {
+	seen := getSeenMap() // want `map\[string\]bool "seen" used as a set`
+	seen["x"] = true
+	_ = seen
+}
+
+func BadSetBoolFromMapCopy(other map[string]bool) {
+	seen := other // want `map\[string\]bool "seen" used as a set`
+	seen["x"] = true
+	_ = seen
+}
+
 func SuppressedSetBool() {
 	seen := map[string]bool{} //nolint:seenmapbool
 	seen["x"] = true
@@ -29,7 +45,7 @@ func GoodSetStruct() {
 	// Using map[string]struct{} is the correct pattern — no diagnostic expected.
 	seen := make(map[string]struct{})
 	seen["x"] = struct{}{}
-	_, _ = seen["x"]
+	_ = seen
 }
 
 func GoodBoolMapWithFalse() {
@@ -37,6 +53,18 @@ func GoodBoolMapWithFalse() {
 	flags := make(map[string]bool)
 	flags["enabled"] = true
 	flags["disabled"] = false
+	_ = flags
+}
+
+func GoodBoolMapLiteralWithFalse() {
+	// The false value is embedded directly in the initial composite literal.
+	flags := map[string]bool{"enabled": true, "disabled": false}
+	_ = flags
+}
+
+func GoodBoolMapVarLiteralWithFalse() {
+	// Same, declared with var inside a function body.
+	var flags = map[string]bool{"enabled": true, "disabled": false}
 	_ = flags
 }
 

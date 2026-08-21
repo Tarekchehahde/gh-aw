@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,18 +33,53 @@ type AccessLogEntry struct {
 
 // DomainAnalysis represents analysis of domains from access logs
 type DomainAnalysis struct {
-	DomainBuckets
-	TotalRequests int `json:"total_requests"`
-	AllowedCount  int `json:"allowed_count"`
-	BlockedCount  int `json:"blocked_count"`
+	AnalysisBase
+}
+
+// domainAnalysisWire is the stable JSON schema for DomainAnalysis.
+// It preserves the original "allowed_count"/"blocked_count" field names so that
+// cached RunSummary.access_analysis JSON and AccessLogSummary.by_workflow values
+// remain backward-compatible after the AnalysisBase refactor, which renamed those
+// fields to AllowedRequests/BlockedRequests internally.
+type domainAnalysisWire struct {
+	TotalRequests  int      `json:"total_requests"`
+	AllowedCount   int      `json:"allowed_count"`
+	BlockedCount   int      `json:"blocked_count"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
+}
+
+// MarshalJSON emits the original "allowed_count"/"blocked_count" wire names so
+// existing consumers of the access-analysis JSON do not see a silent field rename.
+func (d DomainAnalysis) MarshalJSON() ([]byte, error) {
+	return json.Marshal(domainAnalysisWire{
+		TotalRequests:  d.TotalRequests,
+		AllowedCount:   d.AllowedRequests,
+		BlockedCount:   d.BlockedRequests,
+		AllowedDomains: d.AllowedDomains,
+		BlockedDomains: d.BlockedDomains,
+	})
+}
+
+// UnmarshalJSON accepts the original "allowed_count"/"blocked_count" wire names,
+// keeping round-trip compatibility with cached JSON produced before the refactor.
+func (d *DomainAnalysis) UnmarshalJSON(data []byte) error {
+	var wire domainAnalysisWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	d.TotalRequests = wire.TotalRequests
+	d.AllowedRequests = wire.AllowedCount
+	d.BlockedRequests = wire.BlockedCount
+	d.AllowedDomains = wire.AllowedDomains
+	d.BlockedDomains = wire.BlockedDomains
+	return nil
 }
 
 // AddMetrics adds metrics from another analysis
 func (d *DomainAnalysis) AddMetrics(other LogAnalysis) {
 	if otherDomain, ok := other.(*DomainAnalysis); ok {
-		d.TotalRequests += otherDomain.TotalRequests
-		d.AllowedCount += otherDomain.AllowedCount
-		d.BlockedCount += otherDomain.BlockedCount
+		d.addBaseMetrics(&otherDomain.AnalysisBase)
 	}
 }
 
@@ -67,54 +103,7 @@ func parseSquidAccessLog(logPath string, verbose bool) (*DomainAnalysis, error) 
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		entry, err := parseSquidLogLine(line)
-		if err != nil {
-			if verbose {
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to parse log line: %v", err)))
-			}
-			continue
-		}
-
-		analysis.TotalRequests++
-
-		// Extract domain from URL
-		domain := stringutil.ExtractDomainFromURL(entry.URL)
-		if domain == "" {
-			continue
-		}
-
-		// Determine if request was allowed or blocked based on status code
-		// Squid typically returns:
-		// - 200, 206, 304: Allowed/successful
-		// - 403: Forbidden (blocked by ACL)
-		// - 407: Proxy authentication required
-		// - 502, 503: Connection/upstream errors
-		statusCode := entry.Status
-		isAllowed := statusCode == "TCP_HIT/200" || statusCode == "TCP_MISS/200" ||
-			statusCode == "TCP_REFRESH_MODIFIED/200" || statusCode == "TCP_IMS_HIT/304" ||
-			strings.Contains(statusCode, "/200") || strings.Contains(statusCode, "/206") ||
-			strings.Contains(statusCode, "/304")
-
-		if isAllowed {
-			analysis.AllowedCount++
-			if !setutil.Contains(allowedDomainsSet, domain) {
-				allowedDomainsSet[domain] = struct {
-				}{}
-				analysis.AllowedDomains = append(analysis.AllowedDomains, domain)
-			}
-		} else {
-			analysis.BlockedCount++
-			if !setutil.Contains(blockedDomainsSet, domain) {
-				blockedDomainsSet[domain] = struct {
-				}{}
-				analysis.BlockedDomains = append(analysis.BlockedDomains, domain)
-			}
-		}
+		processSquidAccessLogLine(strings.TrimSpace(scanner.Text()), verbose, analysis, allowedDomainsSet, blockedDomainsSet)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -126,9 +115,53 @@ func parseSquidAccessLog(logPath string, verbose bool) (*DomainAnalysis, error) 
 	sort.Strings(analysis.BlockedDomains)
 
 	accessLogLog.Printf("Parsed access log: total_requests=%d, allowed=%d, blocked=%d, unique_allowed_domains=%d, unique_blocked_domains=%d",
-		analysis.TotalRequests, analysis.AllowedCount, analysis.BlockedCount, len(analysis.AllowedDomains), len(analysis.BlockedDomains))
+		analysis.TotalRequests, analysis.AllowedRequests, analysis.BlockedRequests, len(analysis.AllowedDomains), len(analysis.BlockedDomains))
 
 	return analysis, nil
+}
+
+func processSquidAccessLogLine(line string, verbose bool, analysis *DomainAnalysis, allowedDomainsSet, blockedDomainsSet map[string]struct{}) {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return
+	}
+
+	entry, err := parseSquidLogLine(line)
+	if err != nil {
+		if verbose {
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to parse log line: %v", err)))
+		}
+		return
+	}
+
+	analysis.TotalRequests++
+	domain := stringutil.ExtractDomainFromURL(entry.URL)
+	if domain == "" {
+		return
+	}
+
+	if isAllowedSquidStatus(entry.Status) {
+		analysis.AllowedRequests++
+		addUniqueDomain(allowedDomainsSet, domain, &analysis.AllowedDomains)
+		return
+	}
+
+	analysis.BlockedRequests++
+	addUniqueDomain(blockedDomainsSet, domain, &analysis.BlockedDomains)
+}
+
+func isAllowedSquidStatus(statusCode string) bool {
+	return statusCode == "TCP_HIT/200" || statusCode == "TCP_MISS/200" ||
+		statusCode == "TCP_REFRESH_MODIFIED/200" || statusCode == "TCP_IMS_HIT/304" ||
+		strings.Contains(statusCode, "/200") || strings.Contains(statusCode, "/206") ||
+		strings.Contains(statusCode, "/304")
+}
+
+func addUniqueDomain(domainSet map[string]struct{}, domain string, domains *[]string) {
+	if setutil.Contains(domainSet, domain) {
+		return
+	}
+	domainSet[domain] = struct{}{}
+	*domains = append(*domains, domain)
 }
 
 // parseSquidLogLine parses a single squid access log line

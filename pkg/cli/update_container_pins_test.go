@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,20 @@ jobs:
 `,
 			expectedImages: []string{
 				"ghcr.io/github/gh-aw-mcpg:v0.2.17",
+				"ghcr.io/github/github-mcp-server:v0.32.0",
+				"node:lts-alpine",
+			},
+		},
+		{
+			name: "digest pinned images normalized to base ref",
+			lockFileContent: `name: test
+jobs:
+  setup:
+    steps:
+      - name: Download container images
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/github-mcp-server:v0.32.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa node:lts-alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+`,
+			expectedImages: []string{
 				"ghcr.io/github/github-mcp-server:v0.32.0",
 				"node:lts-alpine",
 			},
@@ -121,14 +136,14 @@ func TestBuildxDigestPattern(t *testing.T) {
 			name: "standard OCI index output",
 			output: `Name:      docker.io/mcp/brave-search:latest
 MediaType: application/vnd.oci.image.index.v1+json
-Digest:    sha256:ca96b8acb27d8cf601a8faef86a084602cffa41d8cb18caa1e29ba4d16989d22
+Digest:    sha256:f58a5c22c1196ec7bd1ca586ce216f2334fc298550ddcf652c0e8adb6d256d78
 
 Manifests:
   Name:        docker.io/mcp/brave-search:latest@sha256:ae3b30d079370f67495d75085ffb73a11efcf9f9b23b919ffcb990ed2c076cfe
   MediaType:   application/vnd.oci.image.manifest.v1+json
   Platform:    linux/amd64
 `,
-			expectedDigest: "sha256:ca96b8acb27d8cf601a8faef86a084602cffa41d8cb18caa1e29ba4d16989d22",
+			expectedDigest: "sha256:f58a5c22c1196ec7bd1ca586ce216f2334fc298550ddcf652c0e8adb6d256d78",
 			shouldMatch:    true,
 		},
 		{
@@ -243,13 +258,90 @@ jobs:
 
 // TestUpdateContainerPins_PrunesStaleEntries verifies that UpdateContainerPins
 // removes container pin entries from actions-lock.json that are no longer
-// referenced in the compiled lock files (e.g. superseded AWF versions).
+// referenced in the compiled lock files (e.g. a superseded image version).
+//
+// Note: gh-aw-firewall images are intentionally exempt from this pruning (see
+// TestUpdateContainerPins_KeepsStaleFirewallEntries below and gh-aw#51248), so
+// this test uses a generic non-firewall image family to exercise the normal
+// pruning path.
 func TestUpdateContainerPins_PrunesStaleEntries(t *testing.T) {
 	// Create a temp directory acting as the repo root.
 	tmpDir := t.TempDir()
 
 	// Write an actions-lock.json with a stale container pin and a live one.
-	// The live pin (0.27.2) should be kept; the stale one (0.27.0) should be pruned.
+	// The live pin (v2) should be kept; the stale one (v1) should be pruned.
+	actionsLockDir := filepath.Join(tmpDir, ".github", "aw")
+	require.NoError(t, os.MkdirAll(actionsLockDir, 0755))
+	actionsLockContent := `{
+  "entries": {},
+  "containers": {
+    "ghcr.io/example/tool:v1": {
+      "image": "ghcr.io/example/tool:v1",
+      "digest": "sha256:olddigest0000000000000000000000000000000000000000000000000000000",
+      "pinned_image": "ghcr.io/example/tool:v1@sha256:olddigest0000000000000000000000000000000000000000000000000000000"
+    },
+    "ghcr.io/example/tool:v2": {
+      "image": "ghcr.io/example/tool:v2",
+      "digest": "sha256:newdigest0000000000000000000000000000000000000000000000000000000",
+      "pinned_image": "ghcr.io/example/tool:v2@sha256:newdigest0000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}
+`
+	actionsLockPath := filepath.Join(actionsLockDir, "actions-lock.json")
+	require.NoError(t, os.WriteFile(actionsLockPath, []byte(actionsLockContent), 0644))
+
+	// Write a lock file referencing the NEW version (v2), not the old one.
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0755))
+	lockFileContent := `name: test
+jobs:
+  setup:
+    steps:
+      - name: Download container images
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/example/tool:v2
+`
+	require.NoError(t, os.WriteFile(filepath.Join(workflowsDir, "my-workflow.lock.yml"), []byte(lockFileContent), 0644))
+
+	// collectImagesFromLockFiles should find the new version only.
+	images, err := collectImagesFromLockFiles(workflowsDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ghcr.io/example/tool:v2"}, images)
+
+	// Load the cache and exercise PruneStaleContainerPins directly (Docker is not
+	// available in unit tests so we can't call the full UpdateContainerPins function).
+	cache := workflow.NewActionCache(tmpDir)
+	require.NoError(t, cache.Load())
+
+	imageSet := map[string]struct{}{"ghcr.io/example/tool:v2": {}}
+	pruned := cache.PruneStaleContainerPins(imageSet)
+	assert.Equal(t, 1, pruned, "stale v1 entry should be pruned")
+
+	_, ok := cache.GetContainerPin("ghcr.io/example/tool:v1")
+	assert.False(t, ok, "old-version pin should not be in cache after prune")
+
+	pin, ok := cache.GetContainerPin("ghcr.io/example/tool:v2")
+	require.True(t, ok, "current-version pin should still be in cache")
+	assert.Equal(t, "sha256:newdigest0000000000000000000000000000000000000000000000000000000", pin.Digest)
+
+	// Save and verify the stale entry is gone from disk.
+	require.NoError(t, cache.Save())
+
+	data, err := os.ReadFile(actionsLockPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "\"ghcr.io/example/tool:v1\"", "stale version should not appear in saved file")
+	assert.Contains(t, string(data), "ghcr.io/example/tool:v2", "current version should be in saved file")
+}
+
+// TestUpdateContainerPins_KeepsStaleFirewallEntries verifies that
+// gh-aw-firewall container pins are retained across pruning even when no
+// longer referenced by any local lock file (e.g. after bumping
+// constants.DefaultFirewallVersion). This prevents the recurring regression
+// where a previously-shipped AWF version silently loses its embedded digest
+// pin (gh-aw#38561 / #43307 / #44040 / #51248).
+func TestUpdateContainerPins_KeepsStaleFirewallEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+
 	actionsLockDir := filepath.Join(tmpDir, ".github", "aw")
 	require.NoError(t, os.MkdirAll(actionsLockDir, 0755))
 	actionsLockContent := `{
@@ -271,7 +363,7 @@ func TestUpdateContainerPins_PrunesStaleEntries(t *testing.T) {
 	actionsLockPath := filepath.Join(actionsLockDir, "actions-lock.json")
 	require.NoError(t, os.WriteFile(actionsLockPath, []byte(actionsLockContent), 0644))
 
-	// Write a lock file referencing the NEW AWF version (0.27.2), not the old one.
+	// Write a lock file referencing only the NEW AWF version (0.27.2).
 	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
 	require.NoError(t, os.MkdirAll(workflowsDir, 0755))
 	lockFileContent := `name: test
@@ -283,32 +375,117 @@ jobs:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(workflowsDir, "my-workflow.lock.yml"), []byte(lockFileContent), 0644))
 
-	// collectImagesFromLockFiles should find the new version only.
-	images, err := collectImagesFromLockFiles(workflowsDir)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"ghcr.io/github/gh-aw-firewall/agent:0.27.2"}, images)
-
-	// Load the cache and exercise PruneStaleContainerPins directly (Docker is not
-	// available in unit tests so we can't call the full UpdateContainerPins function).
 	cache := workflow.NewActionCache(tmpDir)
 	require.NoError(t, cache.Load())
 
 	imageSet := map[string]struct{}{"ghcr.io/github/gh-aw-firewall/agent:0.27.2": {}}
 	pruned := cache.PruneStaleContainerPins(imageSet)
-	assert.Equal(t, 1, pruned, "stale 0.27.0 entry should be pruned")
+	assert.Equal(t, 0, pruned, "gh-aw-firewall pins must never be pruned")
 
-	_, ok := cache.GetContainerPin("ghcr.io/github/gh-aw-firewall/agent:0.27.0")
-	assert.False(t, ok, "old-version pin should not be in cache after prune")
+	pin, ok := cache.GetContainerPin("ghcr.io/github/gh-aw-firewall/agent:0.27.0")
+	require.True(t, ok, "stale AWF version pin must be retained")
+	assert.Equal(t, "sha256:olddigest0000000000000000000000000000000000000000000000000000000", pin.Digest)
 
-	pin, ok := cache.GetContainerPin("ghcr.io/github/gh-aw-firewall/agent:0.27.2")
-	require.True(t, ok, "current-version pin should still be in cache")
+	pin, ok = cache.GetContainerPin("ghcr.io/github/gh-aw-firewall/agent:0.27.2")
+	require.True(t, ok, "current AWF version pin should still be in cache")
 	assert.Equal(t, "sha256:newdigest0000000000000000000000000000000000000000000000000000000", pin.Digest)
 
-	// Save and verify the stale entry is gone from disk.
 	require.NoError(t, cache.Save())
-
 	data, err := os.ReadFile(actionsLockPath)
 	require.NoError(t, err)
-	assert.NotContains(t, string(data), "0.27.0", "stale version should not appear in saved file")
-	assert.Contains(t, string(data), "0.27.2", "current version should be in saved file")
+	assert.Contains(t, string(data), "0.27.0", "stale AWF version must still appear in saved file")
+	assert.Contains(t, string(data), "0.27.2", "current AWF version must still appear in saved file")
+}
+
+func TestUpdateContainerPins_RefreshExistingPin(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	actionsLockDir := filepath.Join(tmpDir, ".github", "aw")
+	require.NoError(t, os.MkdirAll(actionsLockDir, 0755))
+	actionsLockContent := `{
+  "entries": {},
+  "containers": {
+    "ghcr.io/github/github-mcp-server:v0.32.0": {
+      "image": "ghcr.io/github/github-mcp-server:v0.32.0",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "pinned_image": "ghcr.io/github/github-mcp-server:v0.32.0@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  }
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(actionsLockDir, "actions-lock.json"), []byte(actionsLockContent), 0644))
+
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0755))
+	lockFileContent := `name: test
+jobs:
+  setup:
+    steps:
+      - name: Download container images
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/github-mcp-server:v0.32.0@sha256:1111111111111111111111111111111111111111111111111111111111111111
+`
+	require.NoError(t, os.WriteFile(filepath.Join(workflowsDir, "test.lock.yml"), []byte(lockFileContent), 0644))
+
+	originalDir, _ := os.Getwd()
+	defer os.Chdir(originalDir) //nolint:errcheck
+	require.NoError(t, os.Chdir(tmpDir))
+
+	deps := defaultContainerPinUpdateDeps()
+	const refreshedDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	deps.fetchDigest = func(_ context.Context, image string, verbose bool) (string, error) {
+		require.Equal(t, "ghcr.io/github/github-mcp-server:v0.32.0", image)
+		return refreshedDigest, nil
+	}
+
+	changed, err := updateContainerPins(context.Background(), deps, workflowsDir, false, containerPinUpdateOptions{refreshExisting: true})
+	require.NoError(t, err)
+	assert.True(t, changed, "refreshing an existing pin should report a change")
+
+	cache := workflow.NewActionCache(tmpDir)
+	require.NoError(t, cache.Load())
+	pin, ok := cache.GetContainerPin("ghcr.io/github/github-mcp-server:v0.32.0")
+	require.True(t, ok)
+	assert.Equal(t, refreshedDigest, pin.Digest)
+	assert.Equal(t, "ghcr.io/github/github-mcp-server:v0.32.0@"+refreshedDigest, pin.PinnedImage)
+}
+
+func TestUpdateContainerPins_FailOnResolveErrorsOption(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	actionsLockDir := filepath.Join(tmpDir, ".github", "aw")
+	require.NoError(t, os.MkdirAll(actionsLockDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(actionsLockDir, "actions-lock.json"), []byte(`{"entries":{},"containers":{}}`), 0644))
+
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0755))
+	lockFileContent := `name: test
+jobs:
+  setup:
+    steps:
+      - name: Download container images
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/github-mcp-server:v0.32.0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(workflowsDir, "test.lock.yml"), []byte(lockFileContent), 0644))
+
+	originalDir, _ := os.Getwd()
+	defer os.Chdir(originalDir) //nolint:errcheck
+	require.NoError(t, os.Chdir(tmpDir))
+
+	deps := defaultContainerPinUpdateDeps()
+	deps.fetchDigest = func(_ context.Context, image string, verbose bool) (string, error) {
+		return "", fmt.Errorf("resolution failed for %s", image)
+	}
+
+	t.Run("non-fatal by default", func(t *testing.T) {
+		changed, err := updateContainerPins(context.Background(), deps, workflowsDir, false, containerPinUpdateOptions{})
+		require.NoError(t, err)
+		assert.False(t, changed)
+	})
+
+	t.Run("fatal when enabled", func(t *testing.T) {
+		changed, err := updateContainerPins(context.Background(), deps, workflowsDir, false, containerPinUpdateOptions{failOnResolveErrors: true})
+		require.Error(t, err)
+		assert.False(t, changed)
+		assert.Contains(t, err.Error(), "failed to resolve digest for 1 image(s)")
+	})
 }

@@ -76,6 +76,9 @@ func addWorkflowsWithPR(ctx context.Context, workflows []*ResolvedWorkflow, opts
 
 	// Create file tracker for rollback capability
 	tracker := NewFileTracker()
+	for _, initializedFile := range opts.initializedFiles {
+		tracker.TrackCreated(initializedFile)
+	}
 
 	// Ensure we switch back to original branch on exit
 	defer func() {
@@ -161,7 +164,7 @@ func addWorkflowsWithPR(ctx context.Context, workflows []*ResolvedWorkflow, opts
 
 	// Create PR
 	addWorkflowPRLog.Printf("Creating pull request: %s", prTitle)
-	prNumber, prURL, err := createPR(branchName, prTitle, prBody, opts.Verbose)
+	prNumber, prURL, err := createPR(ctx, branchName, prTitle, prBody, opts.Verbose)
 	if err != nil {
 		addWorkflowPRLog.Printf("Failed to create PR: %v", err)
 		if rollbackErr := tracker.RollbackAllFiles(opts.Verbose); rollbackErr != nil && opts.Verbose {

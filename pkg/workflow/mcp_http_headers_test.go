@@ -144,44 +144,6 @@ func TestReplaceSecretsWithEnvVars(t *testing.T) {
 	}
 }
 
-func TestReplaceSecretsWithBashVars(t *testing.T) {
-	tests := []struct {
-		name     string
-		value    string
-		expected string
-	}{
-		{
-			name:     "Replace single secret",
-			value:    "${{ secrets.SENTRY_ACCESS_TOKEN }}",
-			expected: "${SENTRY_ACCESS_TOKEN}",
-		},
-		{
-			name:     "Replace secret with default",
-			value:    "${{ secrets.DD_SITE || 'datadoghq.com' }}",
-			expected: "${DD_SITE}",
-		},
-		{
-			name:     "Replace in Bearer token",
-			value:    "Bearer ${{ secrets.TOKEN }}",
-			expected: "Bearer ${TOKEN}",
-		},
-		{
-			name:     "No replacement needed",
-			value:    "static-value",
-			expected: "static-value",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ReplaceSecretsWithBashVars(tt.value)
-			if result != tt.expected {
-				t.Errorf("Expected %q, got %q", tt.expected, result)
-			}
-		})
-	}
-}
-
 func TestRenderSharedMCPConfig_HTTPWithHeaderSecrets(t *testing.T) {
 	toolConfig := map[string]any{
 		"type": "http",
@@ -380,6 +342,11 @@ func TestRenderSharedMCPConfig_PropertyOrder(t *testing.T) {
 
 func TestRenderSharedMCPConfig_WithAuth(t *testing.T) {
 	t.Run("renders auth after headers with type and audience", func(t *testing.T) {
+		// Set sentinel values so we can assert neither the var names nor the values
+		// appear in the rendered config (guards against value-embedding regressions).
+		t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://sentinel-oidc-url.example.com/token")
+		t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "sentinel-oidc-token-value")
+
 		toolConfig := map[string]any{
 			"type": "http",
 			"url":  "https://my-server.example.com/mcp",
@@ -416,6 +383,13 @@ func TestRenderSharedMCPConfig_WithAuth(t *testing.T) {
 		if !strings.Contains(result, `"audience": "https://my-server.example.com"`) {
 			t.Errorf("Expected auth.audience not found in output:\n%s", result)
 		}
+		// Assert neither the env var names nor the sentinel values are embedded.
+		if strings.Contains(result, "ACTIONS_ID_TOKEN_REQUEST_URL") || strings.Contains(result, "ACTIONS_ID_TOKEN_REQUEST_TOKEN") {
+			t.Errorf("Auth config must not embed Actions OIDC runtime var names:\n%s", result)
+		}
+		if strings.Contains(result, "https://sentinel-oidc-url.example.com/token") || strings.Contains(result, "sentinel-oidc-token-value") {
+			t.Errorf("Auth config must not embed Actions OIDC runtime var values:\n%s", result)
+		}
 
 		// Property order: type < url < headers < auth < tools
 		typeIdx := strings.Index(result, `"type": "http"`)
@@ -434,6 +408,11 @@ func TestRenderSharedMCPConfig_WithAuth(t *testing.T) {
 	})
 
 	t.Run("renders auth without audience (type only)", func(t *testing.T) {
+		// Set sentinel values so we can assert neither the var names nor the values
+		// appear in the rendered config (guards against value-embedding regressions).
+		t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://sentinel-oidc-url.example.com/token")
+		t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "sentinel-oidc-token-value")
+
 		toolConfig := map[string]any{
 			"type": "http",
 			"url":  "https://my-server.example.com/mcp",
@@ -464,6 +443,13 @@ func TestRenderSharedMCPConfig_WithAuth(t *testing.T) {
 		}
 		if strings.Contains(result, `"audience"`) {
 			t.Errorf("Unexpected audience field in output:\n%s", result)
+		}
+		// Assert neither the env var names nor the sentinel values are embedded.
+		if strings.Contains(result, "ACTIONS_ID_TOKEN_REQUEST_URL") || strings.Contains(result, "ACTIONS_ID_TOKEN_REQUEST_TOKEN") {
+			t.Errorf("Auth config must not embed Actions OIDC runtime var names:\n%s", result)
+		}
+		if strings.Contains(result, "https://sentinel-oidc-url.example.com/token") || strings.Contains(result, "sentinel-oidc-token-value") {
+			t.Errorf("Auth config must not embed Actions OIDC runtime var values:\n%s", result)
 		}
 	})
 

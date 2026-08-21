@@ -102,7 +102,7 @@ function getSummaryTitle() {
  * @returns {string}
  */
 function buildStepSummarySection(title, markdown) {
-  return `### ${title}\n\n<details>\n<summary>Per-request AI credits and token totals</summary>\n\n${markdown}</details>\n\n`;
+  return `<details>\n<summary>${title}</summary>\n\nPer-request AI credits and token totals\n\n${markdown}</details>\n\n`;
 }
 
 /**
@@ -136,7 +136,11 @@ async function appendStepSummarySection(title, markdown) {
   const section = buildStepSummarySection(title, markdown);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
-    fs.appendFileSync(summaryPath, section, "utf8");
+    try {
+      fs.appendFileSync(summaryPath, section, "utf8");
+    } catch {
+      /* ignore */
+    }
     return;
   }
 
@@ -196,6 +200,11 @@ async function main() {
     };
     fs.writeFileSync(AGENT_USAGE_PATH, JSON.stringify(agentUsage) + "\n");
 
+    if (primaryModel) {
+      core.exportVariable("GH_AW_PRIMARY_MODEL", primaryModel);
+      core.setOutput("primary_model", primaryModel);
+      core.info(`Primary model: ${primaryModel}`);
+    }
     if (summary.totalAIC > 0) {
       const aic = summary.totalAIC.toFixed(3);
       core.exportVariable("GH_AW_AIC", aic);

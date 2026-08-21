@@ -19,7 +19,7 @@ func newSecretsBootstrapSubcommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "bootstrap",
-		Short: "Analyze workflows and set up required secrets",
+		Short: "Analyze workflows and interactively configure required secrets",
 		Long: `Analyze all workflows in the repository to determine which secrets
 are required, check which ones are already configured, and interactively
 prompt for any missing required secrets.
@@ -35,7 +35,7 @@ Only required secrets are prompted for. Optional secrets are not shown.`,
 	}
 
 	cmd.Flags().BoolVar(&nonInteractiveFlag, "non-interactive", false, "Check secrets without prompting (display-only mode)")
-	cmd.Flags().StringVarP(&engineFlag, "engine", "e", "", "Check tokens for specific engine (copilot, claude, codex, gemini, crush)")
+	cmd.Flags().StringVarP(&engineFlag, "engine", "e", "", "Check tokens for specific engine ("+engineFlagHelpList+")")
 	addRepoFlag(cmd)
 
 	return cmd
@@ -43,6 +43,11 @@ Only required secrets are prompted for. Optional secrets are not shown.`,
 
 func runTokensBootstrap(engine, repo string, nonInteractive bool) error {
 	tokensBootstrapLog.Printf("Running tokens bootstrap: engine=%s, repo=%s, nonInteractive=%v", engine, repo, nonInteractive)
+
+	// Configure the gh CLI host from the git remote before any gh calls so that
+	// secret discovery and upload both target the correct host.
+	configureDefaultGHHostFromOriginRemoteIfUnset()
+
 	var repoSlug string
 	var err error
 

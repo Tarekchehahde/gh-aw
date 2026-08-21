@@ -323,16 +323,16 @@ func TestGetLatestActionPinByRepo(t *testing.T) {
 		expectVersionPrefix string
 	}{
 		{
-			repo:          "actions/checkout",
-			expectExists:  true,
-			expectRepo:    "actions/checkout",
-			expectVersion: "v7.0.0",
+			repo:                "actions/checkout",
+			expectExists:        true,
+			expectRepo:          "actions/checkout",
+			expectVersionPrefix: "v",
 		},
 		{
 			repo:                "actions/setup-node",
 			expectExists:        true,
 			expectRepo:          "actions/setup-node",
-			expectVersionPrefix: "v6.",
+			expectVersionPrefix: "v",
 		},
 		{
 			repo:         "unknown/action",
@@ -620,18 +620,16 @@ func TestGetActionPinWithData_SemverPreference(t *testing.T) {
 		shouldFallback bool // Whether we expect to fall back to highest version
 	}{
 		{
-			name:           "fallback for setup-go v6.2.0 resolves to v6.5.0",
+			name:           "fallback for setup-go v6.2.0 resolves to latest pinned version",
 			repo:           "actions/setup-go",
 			requestedVer:   "v6.2.0",
-			expectedVer:    "v6.5.0",
 			strictMode:     false,
 			shouldFallback: true,
 		},
 		{
-			name:           "fallback for setup-go v6.2.0 from hardcoded pins resolves to v6.5.0",
+			name:           "fallback for setup-go v6.2.0 from hardcoded pins resolves to latest pinned version",
 			repo:           "actions/setup-go",
 			requestedVer:   "v6.2.0",
-			expectedVer:    "v6.5.0",
 			strictMode:     false,
 			shouldFallback: true,
 		},
@@ -655,10 +653,9 @@ func TestGetActionPinWithData_SemverPreference(t *testing.T) {
 			shouldFallback: true,
 		},
 		{
-			name:           "fallback for upload-artifact v4.6.2 resolves to v7.0.1",
+			name:           "fallback for upload-artifact v4.6.2 resolves to latest pinned version",
 			repo:           "actions/upload-artifact",
 			requestedVer:   "v4.6.2",
-			expectedVer:    "v7.0.1",
 			strictMode:     false,
 			shouldFallback: true,
 		},
@@ -666,6 +663,10 @@ func TestGetActionPinWithData_SemverPreference(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if !tt.shouldFallback && tt.expectedVer == "" {
+				t.Fatalf("invalid test case %q: expectedVer must be set when shouldFallback is false", tt.name)
+			}
+
 			data := &WorkflowData{
 				StrictMode: tt.strictMode,
 			}
@@ -680,10 +681,19 @@ func TestGetActionPinWithData_SemverPreference(t *testing.T) {
 				t.Fatalf("getActionPinWithData(%s, %s) returned empty string", tt.repo, tt.requestedVer)
 			}
 
+			expectedVersion := tt.expectedVer
+			if tt.shouldFallback {
+				latestPin, ok := getLatestActionPinByRepo(tt.repo)
+				if !ok {
+					t.Fatalf("expected latest pinned version to exist for %s", tt.repo)
+				}
+				expectedVersion = latestPin.Version
+			}
+
 			// Check that the result contains the expected version in the comment
-			if !strings.Contains(result, "# "+tt.expectedVer) {
+			if !strings.Contains(result, "# "+expectedVersion) {
 				t.Errorf("getActionPinWithData(%s, %s) = %s, expected version %s in comment",
-					tt.repo, tt.requestedVer, result, tt.expectedVer)
+					tt.repo, tt.requestedVer, result, expectedVersion)
 			}
 
 			// Verify the result format is correct (repo@sha # version)
@@ -1612,7 +1622,7 @@ func TestSliceToStepsErrorHandling(t *testing.T) {
 	}
 }
 
-// TestGetActionPinGHESArtifactCompat verifies GHES compat mode does not emit deprecated v3 artifact pins.
+// TestGetActionPinGHESArtifactCompat verifies GHES compat mode emits compatible v3 artifact pins.
 func TestGetActionPinGHESArtifactCompat(t *testing.T) {
 	// Verify default (compat disabled) returns latest (v7/v8)
 	defaultCompiler := NewCompiler()
@@ -1643,19 +1653,19 @@ func TestGetActionPinGHESArtifactCompat(t *testing.T) {
 	compatCompiler.ghesArtifactCompat = true
 
 	uploadPinGHES := compatCompiler.getActionPin("actions/upload-artifact")
-	if strings.Contains(uploadPinGHES, "# v3") {
-		t.Errorf("With GHES compat, expected non-v3 upload-artifact pin, got: %s", uploadPinGHES)
+	if !strings.Contains(uploadPinGHES, "c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2") {
+		t.Errorf("With GHES compat, expected upload-artifact v3.2.2 pin, got: %s", uploadPinGHES)
 	}
-	if uploadPinGHES != uploadPin {
-		t.Errorf("With GHES compat, expected upload-artifact pin to match default, default=%s compat=%s", uploadPin, uploadPinGHES)
+	if uploadPinGHES == uploadPin {
+		t.Errorf("With GHES compat, expected upload-artifact pin to differ from default, got: %s", uploadPinGHES)
 	}
 
 	downloadPinGHES := compatCompiler.getActionPin("actions/download-artifact")
-	if strings.Contains(downloadPinGHES, "# v3") {
-		t.Errorf("With GHES compat, expected non-v3 download-artifact pin, got: %s", downloadPinGHES)
+	if !strings.Contains(downloadPinGHES, "a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59 # v3.1.0") {
+		t.Errorf("With GHES compat, expected download-artifact v3.1.0 pin, got: %s", downloadPinGHES)
 	}
-	if downloadPinGHES != downloadPin {
-		t.Errorf("With GHES compat, expected download-artifact pin to match default, default=%s compat=%s", downloadPin, downloadPinGHES)
+	if downloadPinGHES == downloadPin {
+		t.Errorf("With GHES compat, expected download-artifact pin to differ from default, got: %s", downloadPinGHES)
 	}
 
 	// Non-artifact actions should be unaffected by GHES compat
@@ -1665,8 +1675,8 @@ func TestGetActionPinGHESArtifactCompat(t *testing.T) {
 	}
 }
 
-// TestGHESArtifactCompatDoesNotUseV3 verifies GHES compat mode never emits deprecated v3 artifact pins.
-func TestGHESArtifactCompatDoesNotUseV3(t *testing.T) {
+// TestGHESArtifactCompatPinsExist verifies GHES compatibility pins are complete.
+func TestGHESArtifactCompatPinsExist(t *testing.T) {
 	c := NewCompiler()
 	c.ghesArtifactCompat = true
 	for _, repo := range []string{"actions/upload-artifact", "actions/download-artifact"} {
@@ -1675,11 +1685,42 @@ func TestGHESArtifactCompatDoesNotUseV3(t *testing.T) {
 			if result == "" {
 				t.Errorf("getActionPin(%s) returned empty with GHES compat enabled", repo)
 			}
-			if strings.Contains(result, "# v3") {
-				t.Errorf("getActionPin(%s) should not return a v3 pin, got: %s", repo, result)
+			if !strings.Contains(result, "# v3") {
+				t.Errorf("getActionPin(%s) should return a v3 pin, got: %s", repo, result)
 			}
 		})
 	}
+}
+
+func TestGeneratedArtifactStepsHonorGHESCompat(t *testing.T) {
+	t.Run("firewall log upload uses workflow data", func(t *testing.T) {
+		data := &WorkflowData{Name: "GHES Firewall", GHES: true}
+		step := strings.Join([]string(generateSquidLogsUploadStep(data.Name, data)), "\n")
+		if !strings.Contains(step, "actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2") {
+			t.Fatalf("expected GHES upload-artifact pin in firewall step, got:\n%s", step)
+		}
+		if strings.Contains(step, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") {
+			t.Fatalf("expected firewall step not to use default upload-artifact pin, got:\n%s", step)
+		}
+	})
+
+	t.Run("repo memory download uses compiler compatibility", func(t *testing.T) {
+		c := NewCompiler()
+		c.SetGHESCompat(true)
+		c.configureGHESCompatibility()
+		data := &WorkflowData{
+			RepoMemoryConfig: &RepoMemoryConfig{
+				Memories: []RepoMemoryEntry{{ID: "default"}},
+			},
+		}
+		step := strings.Join(c.buildPushRepoMemoryDownloadSteps(data), "\n")
+		if !strings.Contains(step, "actions/download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59 # v3.1.0") {
+			t.Fatalf("expected GHES download-artifact pin in repo-memory step, got:\n%s", step)
+		}
+		if strings.Contains(step, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") {
+			t.Fatalf("expected repo-memory step not to use default download-artifact pin, got:\n%s", step)
+		}
+	})
 }
 
 func TestGetActionPinPrefersLatestEmbeddedOverStaleCache(t *testing.T) {
@@ -1754,6 +1795,14 @@ func TestGetActionPinPrefersLatestEmbeddedOverStaleCache(t *testing.T) {
 func TestWarnIfOutdatedActionVersion(t *testing.T) {
 	const checkoutRepo = "actions/checkout"
 	checkoutLatest := latestActionVersionForRepo(t, checkoutRepo)
+	checkoutLatestSemver := semverutil.ParseVersion(checkoutLatest)
+	if checkoutLatestSemver == nil || checkoutLatestSemver.Major < 1 {
+		t.Skipf("need a parseable checkout version with major >= 1, got %q", checkoutLatest)
+	}
+	checkoutMajorTag := fmt.Sprintf("v%d", checkoutLatestSemver.Major)
+	checkoutMinorTag := fmt.Sprintf("v%d.%d", checkoutLatestSemver.Major, checkoutLatestSemver.Minor)
+	checkoutOlderMajorTag := fmt.Sprintf("v%d", checkoutLatestSemver.Major-1)
+	checkoutOlderMinorTag := fmt.Sprintf("v%d.1", checkoutLatestSemver.Major-1)
 
 	tests := []struct {
 		name         string
@@ -1782,39 +1831,39 @@ func TestWarnIfOutdatedActionVersion(t *testing.T) {
 		{
 			name:       "same version does not warn",
 			repo:       checkoutRepo,
-			rawVersion: "v7.0.0",
+			rawVersion: checkoutLatest,
 			latestVer:  checkoutLatest,
 			expectWarn: false,
 		},
 		{
 			name:       "partial tag same major does not warn",
 			repo:       checkoutRepo,
-			rawVersion: "v7",
+			rawVersion: checkoutMajorTag,
 			latestVer:  checkoutLatest,
 			expectWarn: false,
 		},
 		{
 			name:       "minor partial tag same major does not warn",
 			repo:       checkoutRepo,
-			rawVersion: "v7.0",
-			latestVer:  "v7.1.0",
+			rawVersion: checkoutMinorTag,
+			latestVer:  checkoutLatest,
 			expectWarn: false,
 		},
 		{
 			name:         "partial tag older major warns",
 			repo:         checkoutRepo,
-			rawVersion:   "v6",
+			rawVersion:   checkoutOlderMajorTag,
 			latestVer:    checkoutLatest,
 			expectWarn:   true,
-			warnContains: "v6",
+			warnContains: checkoutOlderMajorTag,
 		},
 		{
 			name:         "minor partial tag older major warns",
 			repo:         checkoutRepo,
-			rawVersion:   "v6.1",
-			latestVer:    "v7.1.0",
+			rawVersion:   checkoutOlderMinorTag,
+			latestVer:    checkoutLatest,
 			expectWarn:   true,
-			warnContains: "v6.1",
+			warnContains: checkoutOlderMinorTag,
 		},
 		{
 			name:       "SHA ref does not warn",

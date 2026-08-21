@@ -2,9 +2,13 @@ package workflow
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/sliceutil"
+	"github.com/github/gh-aw/pkg/stringutil"
 )
 
 var consolidatedSafeOutputsStepsLog = logger.New("workflow:compiler_safe_outputs_steps")
@@ -30,6 +34,9 @@ func (c *Compiler) buildSharedPRCheckoutSteps(data *WorkflowData) []string {
 
 	// Build the same CheckoutManager the agent job builds from the workflow's checkout: config.
 	checkoutMgr := NewCheckoutManager(data.CheckoutConfigs)
+	if isPreCreatePullRequestEnabled(data) {
+		checkoutMgr.SetDefaultRefOverride("${{ needs.activation.outputs.pre_created_pull_request_branch }}")
+	}
 
 	// Unlike the agent job, the safe_outputs job performs git fetch/push against the
 	// checked-out repositories (create_pull_request, push_to_pull_request_branch), so its
@@ -92,16 +99,7 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 
 	var steps []string
 
-	// Add per-handler GitHub App token minting steps before the handler manager step.
-	// These run before the main handler step so the minted token expressions (e.g.
-	// ${{ steps.create-check-run-app-token.outputs.token }}) are resolved at runtime.
-	if data.SafeOutputs != nil && data.SafeOutputs.CreateCheckRun != nil && data.SafeOutputs.CreateCheckRun.GitHubApp != nil {
-		consolidatedSafeOutputsStepsLog.Print("Adding per-handler GitHub App token minting step for create-check-run")
-		permissions := NewPermissionsContentsReadChecksWrite()
-		for _, step := range c.buildGitHubAppTokenMintStep(data.SafeOutputs.CreateCheckRun.GitHubApp, permissions, "") {
-			steps = append(steps, replaceStepID(step, "safe-outputs-app-token", "create-check-run-app-token"))
-		}
-	}
+	steps = append(steps, c.addAppTokenMintingSteps(data)...)
 
 	// Step name and metadata
 	steps = append(steps, "      - name: Process Safe Outputs\n")
@@ -110,8 +108,241 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 
 	// Environment variables
 	steps = append(steps, "        env:\n")
-	steps = append(steps, "          GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}\n")
-	steps = append(steps, "          GH_AW_COMMENT_ID: ${{ needs.activation.outputs.comment_id }}\n")
+	if err := c.addSafeOutputCoreEnvVars(&steps, data); err != nil {
+		return nil, err
+	}
+	c.addSafeOutputTokenEnvVars(&steps, data)
+
+	// With section for github-token
+	// Use the standard safe-outputs token for the shared github-script client.
+	// Project operations use GH_AW_PROJECT_GITHUB_TOKEN from env with dedicated handler logic.
+	steps = append(steps, "        with:\n")
+	// Token precedence for the handler manager step:
+	//   1. Safe-outputs level token (so.GitHubToken)
+	//   2. Magic secret fallback via getEffectiveSafeOutputGitHubToken()
+	//
+	// Note: We do NOT fall back to per-output tokens (add-comment, create-issue, etc.)
+	// because those are specific to their operations. The handler manager needs a
+	// general-purpose token for the github-script client.
+	configToken := ""
+	if data.SafeOutputs != nil && data.SafeOutputs.GitHubToken != "" {
+		configToken = data.SafeOutputs.GitHubToken
+	}
+	c.addSafeOutputGitHubTokenForConfig(&steps, data, configToken)
+
+	steps = append(steps, "          script: |\n")
+	steps = append(steps, generateGitHubScriptWithRequire("process_safe_outputs.cjs"))
+
+	return steps, nil
+}
+
+// addAppTokenMintingSteps adds per-handler and dispatch-repository GitHub App token minting
+// steps that must precede the handler manager step. For each registered handler that has a
+// per-handler github-app configured, a dedicated token step is minted whose permissions are
+// scoped to only that handler's needs (principle of least privilege).
+func (c *Compiler) addAppTokenMintingSteps(data *WorkflowData) []string {
+	if data.SafeOutputs == nil {
+		return nil
+	}
+
+	var steps []string
+
+	// Per-handler GitHub App tokens: each registered handler may declare its own app.
+	for _, handler := range safeOutputHandlers {
+		if handler.StructField == "" {
+			continue
+		}
+		handlerApp := getHandlerGitHubApp(data.SafeOutputs, handler.StructField)
+		if handlerApp == nil || handler.PermissionBuilder == nil {
+			continue
+		}
+		handlerPermissions := handler.PermissionBuilder(data.SafeOutputs)
+		if handlerPermissions == nil {
+			continue
+		}
+		stepID := handler.Key + "-app-token"
+		consolidatedSafeOutputsStepsLog.Printf("Adding per-handler GitHub App token minting step for %s", handler.Key)
+		steps = append(steps, c.buildGitHubAppTokenMintStepWithMeta(
+			handlerApp,
+			handlerPermissions,
+			"",
+			"",
+			fmt.Sprintf("Generate GitHub App token (%s)", handler.Key),
+			stepID,
+		)...)
+	}
+	if commentMemory := data.CommentMemoryConfig; commentMemory != nil && commentMemory.GitHubApp != nil &&
+		!isHandlerStaged(templatableBoolIsTrue(data.SafeOutputs.Staged), commentMemory.Staged) {
+		steps = append(steps, c.buildGitHubAppTokenMintStepWithMeta(
+			commentMemory.GitHubApp,
+			NewPermissionsIssuesWrite(),
+			"",
+			"",
+			"Generate GitHub App token (comment-memory)",
+			"comment-memory-app-token",
+		)...)
+	}
+
+	// Dispatch-repository tool tokens: each non-staged tool with a github-app gets a token step.
+	if data.SafeOutputs.DispatchRepository != nil && len(data.SafeOutputs.DispatchRepository.Tools) > 0 {
+		toolKeys := make([]string, 0, len(data.SafeOutputs.DispatchRepository.Tools))
+		for toolKey := range data.SafeOutputs.DispatchRepository.Tools {
+			toolKeys = append(toolKeys, toolKey)
+		}
+		sort.Strings(toolKeys)
+		globalStaged := templatableBoolIsTrue(data.SafeOutputs.Staged)
+		for _, toolKey := range toolKeys {
+			tool := data.SafeOutputs.DispatchRepository.Tools[toolKey]
+			if tool == nil || tool.GitHubApp == nil || isHandlerStaged(globalStaged, tool.Staged) {
+				continue
+			}
+			stepID := dispatchRepositoryToolAppTokenStepID(toolKey)
+			consolidatedSafeOutputsStepsLog.Printf("Adding dispatch-repository GitHub App token minting step for %s", toolKey)
+			steps = append(steps, c.buildGitHubAppTokenMintStepWithMeta(
+				tool.GitHubApp,
+				NewPermissionsContentsWrite(),
+				"",
+				"",
+				fmt.Sprintf("Generate GitHub App token (dispatch-repository %s)", toolKey),
+				stepID,
+			)...)
+		}
+	}
+
+	return steps
+}
+
+// buildSafeOutputItemsManifestUploadStep builds the step that uploads the safe output
+// items manifest and temporary ID map as a separate artifact.
+func buildSafeOutputItemsManifestUploadStep(prefix string, pinAction func(string) string) []string {
+	return []string{
+		"      - name: Upload Safe Outputs Items\n",
+		"        if: always()\n",
+		fmt.Sprintf("        uses: %s\n", pinAction("actions/upload-artifact")),
+		"        with:\n",
+		fmt.Sprintf("          name: %s%s\n", prefix, constants.SafeOutputItemsArtifactName),
+		"          path: |\n",
+		"            /tmp/gh-aw/safe-output-items.jsonl\n",
+		fmt.Sprintf("            /tmp/gh-aw/%s\n", constants.TemporaryIdMapFilename),
+		"          if-no-files-found: ignore\n",
+	}
+}
+
+// buildSarifArtifactUploadStep builds the step that uploads the SARIF file generated by
+// the create_code_scanning_alert handler as a GitHub Actions artifact.
+func buildSarifArtifactUploadStep(prefix string, pinAction func(string) string) []string {
+	return []string{
+		"      - name: Upload SARIF artifact\n",
+		"        if: steps.process_safe_outputs.outputs.sarif_file != ''\n",
+		fmt.Sprintf("        uses: %s\n", pinAction("actions/upload-artifact")),
+		"        with:\n",
+		fmt.Sprintf("          name: %s%s\n", prefix, constants.SarifArtifactName),
+		"          path: ${{ steps.process_safe_outputs.outputs.sarif_file }}\n",
+		"          if-no-files-found: error\n",
+		"          retention-days: 1\n",
+	}
+}
+
+// scriptNameToHandlerName converts a script name like "post-slack-message" to a
+// JavaScript function name like "handlePostSlackMessage".
+func scriptNameToHandlerName(scriptName string) string {
+	parts := strings.FieldsFunc(scriptName, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	var sb strings.Builder
+	sb.WriteString("handle")
+	for _, part := range parts {
+		if part != "" {
+			sb.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		}
+	}
+	if sb.Len() == len("handle") {
+		if scriptName == "" {
+			sb.WriteString("Unknown")
+		} else {
+			sb.WriteString(strings.ToUpper(scriptName[:1]) + scriptName[1:])
+		}
+	}
+	return sb.String()
+}
+
+// generateSafeOutputScriptContent generates a complete JavaScript module for a custom safe-output
+// script handler.
+func generateSafeOutputScriptContent(scriptName string, scriptConfig *SafeScriptConfig) string {
+	var sb strings.Builder
+	sb.WriteString("// @ts-check\n")
+	sb.WriteString("/// <reference types=\"./safe-output-script\" />\n")
+	sb.WriteString("// Auto-generated safe-output script handler: " + scriptName + "\n\n")
+	sb.WriteString("const { sanitizeContent } = require(\"./sanitize_content.cjs\");\n\n")
+	sb.WriteString("/** @type {import('./types/safe-output-script').SafeOutputScriptMain} */\n")
+	sb.WriteString("async function main(config = {}) {\n")
+
+	if len(scriptConfig.Inputs) > 0 {
+		inputNames := make([]string, 0, len(scriptConfig.Inputs))
+		for name := range scriptConfig.Inputs {
+			safeName := stringutil.SanitizeParameterName(name)
+			if safeName != name {
+				inputNames = append(inputNames, name+": "+safeName)
+			} else {
+				inputNames = append(inputNames, name)
+			}
+		}
+		sort.Strings(inputNames)
+		sb.WriteString("  const { " + strings.Join(inputNames, ", ") + " } = config;\n")
+	}
+
+	handlerName := scriptNameToHandlerName(scriptName)
+	sb.WriteString("  return async function " + handlerName + "(item, resolvedTemporaryIds, temporaryIdMap) {\n")
+	for line := range strings.SplitSeq(scriptConfig.Script, "\n") {
+		sb.WriteString("    " + line + "\n")
+	}
+	sb.WriteString("  };\n")
+	sb.WriteString("}\n")
+	sb.WriteString("module.exports = { main };\n")
+	return sb.String()
+}
+
+// buildCustomScriptFilesStep generates a run step that writes inline safe-output script files
+// to the setup action destination folder so they can be required by the handler manager.
+func buildCustomScriptFilesStep(scripts map[string]*SafeScriptConfig) ([]string, error) {
+	if len(scripts) == 0 {
+		return nil, nil
+	}
+
+	scriptNames := sliceutil.SortedKeys(scripts)
+	var steps []string
+	steps = append(steps, "      - name: Configure Safe Output Scripts\n")
+	steps = append(steps, "        run: |\n")
+
+	for _, scriptName := range scriptNames {
+		scriptConfig := scripts[scriptName]
+		normalizedName := stringutil.NormalizeSafeOutputIdentifier(scriptName)
+		filename := safeOutputScriptFilename(normalizedName)
+		filePath := SetupActionDestinationShell + "/" + filename
+		scriptContent := generateSafeOutputScriptContent(scriptName, scriptConfig)
+		delimiter := GenerateHeredocDelimiterFromContent("SAFE_OUTPUT_SCRIPT_"+strings.ToUpper(normalizedName), scriptContent)
+
+		if err := ValidateHeredocContent(scriptContent, delimiter); err != nil {
+			return nil, fmt.Errorf("safe-output script %q: %w", scriptName, err)
+		}
+
+		steps = append(steps, fmt.Sprintf("          cat > \"%s\" << '%s'\n", filePath, delimiter)) //nolint:generatedyamlheredoc // Legacy safe-output script rendering remains to be migrated.
+		for line := range strings.SplitSeq(scriptContent, "\n") {
+			steps = append(steps, "          "+line+"\n")
+		}
+		steps = append(steps, "          "+delimiter+"\n")
+	}
+
+	return steps, nil
+}
+
+// addSafeOutputCoreEnvVars appends the core environment variables required by the handler
+// manager step: the agent output reference, allowed-domains configuration, URL policy,
+// GitHub server/API URLs, custom handler registration maps, and the delegated per-handler
+// config env vars.
+func (c *Compiler) addSafeOutputCoreEnvVars(steps *[]string, data *WorkflowData) error {
+	*steps = append(*steps, "          GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}\n")
+	*steps = append(*steps, "          GH_AW_COMMENT_ID: ${{ needs.activation.outputs.comment_id }}\n")
 
 	// Add allowed domains configuration for URL sanitization in safe output handlers.
 	// Without this, sanitizeContent() in safe_output_handler_manager.cjs only allows
@@ -121,25 +352,25 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 		// allowed-domains: additional domains unioned with engine/network base set; supports ecosystem identifiers
 		expanded, err := c.computeExpandedAllowedDomainsForSanitization(data)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		domainsStr = expanded
 	} else {
 		computed, err := c.computeAllowedDomainsForSanitization(data)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		domainsStr = computed
 	}
 	if domainsStr != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_ALLOWED_DOMAINS: %q\n", domainsStr))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_ALLOWED_DOMAINS: %q\n", domainsStr))
 	}
 	if data.SafeOutputs != nil && data.SafeOutputs.URLs != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUTS_URLS: %q\n", data.SafeOutputs.URLs))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUTS_URLS: %q\n", data.SafeOutputs.URLs))
 	}
 	// Pass GitHub server/API URLs so buildAllowedDomains() can add GHES domains dynamically
-	steps = append(steps, "          GITHUB_SERVER_URL: ${{ github.server_url }}\n")
-	steps = append(steps, "          GITHUB_API_URL: ${{ github.api_url }}\n")
+	*steps = append(*steps, "          GITHUB_SERVER_URL: ${{ github.server_url }}\n")
+	*steps = append(*steps, "          GITHUB_API_URL: ${{ github.api_url }}\n")
 
 	// Note: The project handler manager has been removed.
 	// All project-related operations are now handled by the unified handler.
@@ -148,33 +379,36 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 	// handled by custom safe-output job steps and should be silently skipped rather than
 	// reported as "No handler loaded for message type '...'".
 	if customJobsJSON := buildCustomSafeOutputJobsJSON(data); customJobsJSON != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_JOBS: %q\n", customJobsJSON))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_JOBS: %q\n", customJobsJSON))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_SAFE_OUTPUT_JOBS env var for custom safe job types")
 	}
 
 	// Add GH_AW_SAFE_OUTPUT_SCRIPTS so the handler manager can load inline script handlers.
 	// The env var maps normalized script names to their .cjs filenames in the actions folder.
 	if customScriptsJSON := buildCustomSafeOutputScriptsJSON(data); customScriptsJSON != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_SCRIPTS: %q\n", customScriptsJSON))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_SCRIPTS: %q\n", customScriptsJSON))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_SAFE_OUTPUT_SCRIPTS env var for custom script handlers")
 	}
 
 	// Add GH_AW_SAFE_OUTPUT_ACTIONS so the handler manager can load custom action handlers.
 	// The env var maps normalized action names to themselves (reserved for future extensibility).
 	if customActionsJSON := buildCustomSafeOutputActionsJSON(data); customActionsJSON != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_ACTIONS: %q\n", customActionsJSON))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_SAFE_OUTPUT_ACTIONS: %q\n", customActionsJSON))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_SAFE_OUTPUT_ACTIONS env var for custom action handlers")
 	}
 
-	// Add custom safe output env vars
-	c.addCustomSafeOutputEnvVars(&steps, data)
+	// Delegated helpers: custom env vars, handler config JSON, and per-handler config env vars.
+	c.addCustomSafeOutputEnvVars(steps, data)
+	c.addHandlerManagerConfigEnvVar(steps, data)
+	c.addAllSafeOutputConfigEnvVars(steps, data)
 
-	// Add handler manager config as JSON
-	c.addHandlerManagerConfigEnvVar(&steps, data)
+	return nil
+}
 
-	// Add all safe output configuration env vars (still needed by individual handlers)
-	c.addAllSafeOutputConfigEnvVars(&steps, data)
-
+// addSafeOutputTokenEnvVars appends token-related environment variables required by the
+// handler manager step: the CI-trigger token, project URL/token, assign-to-agent token,
+// agent-session token, and the optional GITHUB_TOKEN override for cross-repo PR operations.
+func (c *Compiler) addSafeOutputTokenEnvVars(steps *[]string, data *WorkflowData) {
 	// Add extra empty commit token if create-pull-request or push-to-pull-request-branch is configured.
 	// This token is used to push an empty commit after code changes to trigger CI events,
 	// working around the GITHUB_TOKEN limitation where events don't trigger other workflows.
@@ -189,56 +423,45 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 
 		switch ciTriggerToken {
 		case "app":
-			steps = append(steps, "          GH_AW_CI_TRIGGER_TOKEN: ${{ steps.safe-outputs-app-token.outputs.token || '' }}\n")
+			*steps = append(*steps, "          GH_AW_CI_TRIGGER_TOKEN: ${{ steps.safe-outputs-app-token.outputs.token || '' }}\n")
 			consolidatedSafeOutputsStepsLog.Print("Extra empty commit using GitHub App token")
 		default:
 			// Use the magic GH_AW_CI_TRIGGER_TOKEN secret (default behavior when not explicitly configured)
-			steps = append(steps, fmt.Sprintf("          GH_AW_CI_TRIGGER_TOKEN: %s\n", getEffectiveCITriggerGitHubToken(ciTriggerToken)))
+			*steps = append(*steps, fmt.Sprintf("          GH_AW_CI_TRIGGER_TOKEN: %s\n", getEffectiveCITriggerGitHubToken(ciTriggerToken)))
 			consolidatedSafeOutputsStepsLog.Print("Extra empty commit using GH_AW_CI_TRIGGER_TOKEN")
 		}
 	}
 
-	// Add GH_AW_PROJECT_URL and GH_AW_PROJECT_GITHUB_TOKEN environment variables for project operations
+	// Add GH_AW_PROJECT_URL and GH_AW_PROJECT_GITHUB_TOKEN environment variables for project operations.
 	// These are set from the project URL and token configured in any project-related safe-output:
-	// - update-project
-	// - create-project-status-update
-	// - create-project
-	//
-	// The project field is REQUIRED in update-project and create-project-status-update (enforced by schema validation)
-	// Agents can optionally override this per-message by including a project field in their output
-	//
-	// Note: If multiple project configs are present, we prefer update-project > create-project-status-update > create-project
-	// This is only relevant for the environment variables - each configuration must explicitly specify its own settings
+	// update-project, create-project-status-update, or create-project.
+	// Note: If multiple project configs are present, we prefer update-project > create-project-status-update > create-project.
 	projectURL, projectToken := resolveProjectURLAndToken(data.SafeOutputs)
-
 	if projectURL != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_PROJECT_URL: %q\n", projectURL))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_PROJECT_URL: %q\n", projectURL))
 	}
-
 	if projectToken != "" {
-		steps = append(steps, fmt.Sprintf("          GH_AW_PROJECT_GITHUB_TOKEN: %s\n", projectToken))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_PROJECT_GITHUB_TOKEN: %s\n", projectToken))
 	}
 
 	// Add GH_AW_ASSIGN_TO_AGENT_TOKEN when assign-to-agent is configured OR when create-issue
 	// or create-pull-request is configured with copilot in assignees. All handlers create a
 	// dedicated Octokit using this token (agent token preference chain), which is required
-	// because the Copilot assignment API only accepts PATs (not GitHub App tokens). This env
-	// var is evaluated as a GitHub Actions expression, so it resolves to the actual token value
-	// before the step runs.
+	// because the Copilot assignment API only accepts PATs (not GitHub App tokens).
 	if data.SafeOutputs != nil && data.SafeOutputs.AssignToAgent != nil {
 		agentTokenStr := getEffectiveCopilotCodingAgentGitHubToken(data.SafeOutputs.AssignToAgent.GitHubToken)
 		//nolint:gosec // G101: False positive - this is a GitHub Actions expression template, not a hardcoded credential
-		steps = append(steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_ASSIGN_TO_AGENT_TOKEN env var for assign-to-agent handler")
 	} else if data.SafeOutputs != nil && data.SafeOutputs.CreateIssues != nil && hasCopilotAssignee(data.SafeOutputs.CreateIssues.Assignees) {
 		agentTokenStr := getEffectiveCopilotCodingAgentGitHubToken(data.SafeOutputs.CreateIssues.GitHubToken)
 		//nolint:gosec // G101: False positive - this is a GitHub Actions expression template, not a hardcoded credential
-		steps = append(steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_ASSIGN_TO_AGENT_TOKEN env var for create-issue copilot assignment handler")
 	} else if data.SafeOutputs != nil && data.SafeOutputs.CreatePullRequests != nil && hasCopilotAssignee(data.SafeOutputs.CreatePullRequests.Assignees) {
 		agentTokenStr := getEffectiveCopilotCodingAgentGitHubToken(data.SafeOutputs.CreatePullRequests.GitHubToken)
 		//nolint:gosec // G101: False positive - this is a GitHub Actions expression template, not a hardcoded credential
-		steps = append(steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_ASSIGN_TO_AGENT_TOKEN: %s\n", agentTokenStr))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_ASSIGN_TO_AGENT_TOKEN env var for create-pull-request copilot assignment handler")
 	}
 
@@ -249,7 +472,7 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 	if data.SafeOutputs != nil && data.SafeOutputs.CreateAgentSessions != nil {
 		agentSessionTokenStr := getEffectiveCopilotCodingAgentGitHubToken(data.SafeOutputs.CreateAgentSessions.GitHubToken)
 		//nolint:gosec // G101: False positive - this is a GitHub Actions expression template, not a hardcoded credential
-		steps = append(steps, fmt.Sprintf("          GH_AW_AGENT_SESSION_TOKEN: %s\n", agentSessionTokenStr))
+		*steps = append(*steps, fmt.Sprintf("          GH_AW_AGENT_SESSION_TOKEN: %s\n", agentSessionTokenStr))
 		consolidatedSafeOutputsStepsLog.Print("Added GH_AW_AGENT_SESSION_TOKEN env var for create-agent-session handler")
 	}
 
@@ -266,45 +489,8 @@ func (c *Compiler) buildHandlerManagerStep(data *WorkflowData) ([]string, error)
 		// is already in the environment and overriding it with the same default is unnecessary.
 		if isCustom {
 			//nolint:gosec // G101: False positive - this is a GitHub Actions expression template, not a hardcoded credential
-			steps = append(steps, fmt.Sprintf("          GITHUB_TOKEN: %s\n", gitToken))
+			*steps = append(*steps, fmt.Sprintf("          GITHUB_TOKEN: %s\n", gitToken))
 			consolidatedSafeOutputsStepsLog.Printf("Adding GITHUB_TOKEN env var for cross-repo git CLI operations")
 		}
 	}
-
-	// With section for github-token
-	// Use the standard safe outputs token for all operations.
-	// If project operations are configured, prefer the project token for the github-script client.
-	// Rationale: update_project/create_project_status_update call the Projects v2 GraphQL API, which
-	// cannot be accessed with the default GITHUB_TOKEN. GH_AW_PROJECT_GITHUB_TOKEN is the required
-	// token for Projects v2 operations.
-	steps = append(steps, "        with:\n")
-	// Token precedence for the handler manager step:
-	//   1. Project token (if project operations are configured) - already set above
-	//   2. Safe-outputs level token (so.GitHubToken)
-	//   3. Magic secret fallback via getEffectiveSafeOutputGitHubToken()
-	//
-	// Note: We do NOT fall back to per-output tokens (add-comment, create-issue, etc.)
-	// because those are specific to their operations. The handler manager needs a
-	// general-purpose token for the github-script client.
-	configToken := ""
-	if projectToken != "" {
-		configToken = projectToken
-	} else if data.SafeOutputs != nil && data.SafeOutputs.GitHubToken != "" {
-		configToken = data.SafeOutputs.GitHubToken
-	}
-	c.addSafeOutputGitHubTokenForConfig(&steps, data, configToken)
-
-	steps = append(steps, "          script: |\n")
-	steps = append(steps, "            const { setupGlobals } = require('"+SetupActionDestination+"/setup_globals.cjs');\n")
-	steps = append(steps, "            setupGlobals(core, github, context, exec, io, getOctokit);\n")
-	steps = append(steps, "            const { main } = require('"+SetupActionDestination+"/safe_output_handler_manager.cjs');\n")
-	steps = append(steps, "            await main();\n")
-
-	return steps, nil
-}
-
-// replaceStepID replaces all occurrences of oldID with newID in a YAML step string.
-// Used to generate per-handler token steps from the generic safe-outputs-app-token template.
-func replaceStepID(step, oldID, newID string) string {
-	return strings.ReplaceAll(step, oldID, newID)
 }

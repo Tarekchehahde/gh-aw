@@ -1,6 +1,6 @@
 ---
 title: Custom Steps and Jobs
-description: "Add deterministic pre-processing steps and custom GitHub Actions jobs to agentic workflows using steps:, pre-agent-steps:, post-steps:, and jobs:"
+description: "Add deterministic pre-processing steps and custom GitHub Actions jobs to agentic workflows using pre-steps:, steps:, pre-agent-steps:, post-steps:, and jobs:"
 sidebar:
   order: 820
 ---
@@ -8,6 +8,28 @@ sidebar:
 Custom steps and jobs let you mix deterministic computation with agentic execution. All custom steps and jobs run **outside the firewall sandbox** with standard GitHub Actions security.
 
 See [DeterministicOps](/gh-aw/patterns/deterministic-ops/) for patterns combining computation with AI reasoning.
+
+## Choosing the Right Step Hook
+
+Use these top-level step hooks in this order:
+
+1. `pre-steps:` — runs before checkout and all later built-in agent-job setup; only compiler-injected OTLP masking steps may run earlier. Use this for short-lived token minting or anything that must happen before repository checkout.
+2. `steps:` — runs after checkout and the normal runtime/bootstrap steps, but before the final pre-agent phase. Use this for deterministic preprocessing that needs the checked-out repository.
+3. `pre-agent-steps:` — runs after framework-owned initialization such as checkout cleanup and base-branch restoration, and before MCP startup and engine execution. Use this for last-moment environment preparation immediately before the agent starts.
+4. `post-steps:` — runs after the engine finishes. Use this for cleanup, summaries, uploads, or follow-up automation.
+
+## Custom Pre-Checkout Steps (`pre-steps:`)
+
+Add custom steps before checkout and the later pre-checkout agent-job setup. Compiler-injected OTLP masking steps may still run earlier.
+
+```yaml wrap
+pre-steps:
+  - name: Mint checkout token
+    id: checkout_app
+    uses: actions/create-github-app-token@v2
+```
+
+Use pre-steps when later checkout or setup must consume outputs from a step in the same job.
 
 ## Custom Steps (`steps:`)
 
@@ -133,6 +155,25 @@ Set `jobs.<job-id>.restore-memory: true` to restore any configured `cache-memory
 | `conclusion` | `jobs.conclusion.setup-steps` → compiler setup checkout/setup → `jobs.conclusion.pre-steps` → built-in conclusion steps (including GitHub App token minting when configured) |
 | `detection` | `jobs.detection.setup-steps` → compiler setup checkout/setup → `jobs.detection.pre-steps` → built-in detection steps |
 | `unlock` | `jobs.unlock.setup-steps` → compiler setup checkout/setup → `jobs.unlock.pre-steps` → built-in unlock steps |
+
+Built-in job sections also support additive `needs` and `if` overrides. For example, use `jobs.agent.needs` and `jobs.agent.if` to gate the generated agent job on a custom setup job without relying on `on.needs` plus a top-level workflow `if`:
+
+```yaml wrap
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.result.outputs.outcome }}
+    steps:
+      - id: result
+        run: echo "outcome=failure" >> "$GITHUB_OUTPUT"
+
+  agent:
+    needs: [build]
+    if: needs.build.outputs.outcome == 'failure'
+```
+
+`jobs.<built-in>.needs` is merged with compiler-generated dependencies, and `jobs.<built-in>.if` is combined with compiler-generated conditions using logical `&&`.
 
 Example using `timeout-minutes` and `env`:
 

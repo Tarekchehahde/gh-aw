@@ -15,7 +15,21 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 
-import { sanitizeForFilename, sanitizeBranchNameForPatch, sanitizeRepoSlugForPatch, getPatchPathForBranch, getPatchPathForBranchInRepo, buildExcludePathspecs, computeIncrementalDiffSize } from "./git_patch_utils.cjs";
+import {
+  sanitizeForFilename,
+  sanitizeBranchNameForPatch,
+  sanitizeRepoSlugForPatch,
+  getPatchPathForBranch,
+  getPatchPathForBranchInRepo,
+  buildExcludePathspecs,
+  computeIncrementalDiffSize,
+  rewriteCrossRepoCreatePatches,
+  getPatchDiffSizeBytes,
+  getStagedPatchDiffSizeBytes,
+  isAncestorCommit,
+  isPartialClone,
+  describeGitFailure,
+} from "./git_patch_utils.cjs";
 
 // computeIncrementalDiffSize delegates to execGitSync from git_helpers.cjs,
 // which calls the GitHub Actions `core.debug` / `core.error` globals. Stub
@@ -218,5 +232,448 @@ describe("git_patch_utils.computeIncrementalDiffSize - real git repo", () => {
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "", cwd: "/tmp", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "", tmpPath: "/tmp/x" })).toBeNull();
     expect(computeIncrementalDiffSize({ baseRef: "HEAD", headRef: "HEAD", cwd: "/tmp", tmpPath: "" })).toBeNull();
+  });
+});
+
+describe("rewriteCrossRepoCreatePatches", () => {
+  const tempDirs = [];
+
+  function execGit(args, cwd) {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    }
+    return result.stdout;
+  }
+
+  function initRepo(dir, branch = "main") {
+    execGit(["init", "-q"], dir);
+    execGit(["config", "user.email", "test@example.com"], dir);
+    execGit(["config", "user.name", "Test User"], dir);
+    execGit(["checkout", "-b", branch], dir);
+  }
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
+    }
+  });
+
+  it("rewrites create hunks to modify when the file exists on the target base branch", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-patch-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const docPath = path.join(targetDir, "docs", "guide.md");
+    fs.mkdirSync(path.dirname(docPath), { recursive: true });
+    fs.writeFileSync(docPath, "original target content\n");
+    execGit(["add", "docs/guide.md"], targetDir);
+    execGit(["commit", "-m", "target base"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "docs", "guide.md"), "agent edited content\n");
+    execGit(["add", "docs/guide.md"], agentDir);
+    execGit(["commit", "-m", "agent edit"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("new file mode");
+
+    const rewritten = rewriteCrossRepoCreatePatches(rawPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toContain("--- a/docs/guide.md");
+    expect(rewritten).toContain("+agent edited content");
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(docPath, "utf8")).toBe("agent edited content\n");
+  });
+
+  it("preserves executable mode (100755) instead of hardcoding 100644", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-exec-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const scriptPath = path.join(targetDir, "scripts", "run.sh");
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho target\n");
+    fs.chmodSync(scriptPath, 0o755);
+    execGit(["add", "scripts/run.sh"], targetDir);
+    execGit(["update-index", "--chmod=+x", "scripts/run.sh"], targetDir);
+    execGit(["commit", "-m", "target script"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "scripts", "run.sh"), "#!/bin/sh\necho agent\n");
+    fs.chmodSync(path.join(agentDir, "scripts", "run.sh"), 0o755);
+    execGit(["add", "scripts/run.sh"], agentDir);
+    execGit(["update-index", "--chmod=+x", "scripts/run.sh"], agentDir);
+    execGit(["commit", "-m", "agent script"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("new file mode 100755");
+
+    const rewritten = rewriteCrossRepoCreatePatches(rawPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toMatch(/index [0-9a-f]+\.\.[0-9a-f]+ 100755/);
+    expect(rewritten).not.toMatch(/index [0-9a-f]+\.\.[0-9a-f]+ 100644/);
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["reset", "--hard"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(scriptPath, "utf8")).toBe("#!/bin/sh\necho agent\n");
+    const mode = execGit(["ls-files", "-s", "scripts/run.sh"], targetDir);
+    expect(mode).toMatch(/^100755\s/);
+  });
+
+  it("rewrites create hunks for paths that contain spaces (quoted diff --git headers)", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cross-repo-space-"));
+    tempDirs.push(root);
+    const targetDir = path.join(root, "target");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(targetDir);
+    fs.mkdirSync(agentDir);
+
+    initRepo(targetDir, "main");
+    const docPath = path.join(targetDir, "docs", "my guide.md");
+    fs.mkdirSync(path.dirname(docPath), { recursive: true });
+    fs.writeFileSync(docPath, "original target content\n");
+    execGit(["add", "docs/my guide.md"], targetDir);
+    execGit(["commit", "-m", "target base"], targetDir);
+    execGit(["branch", "-M", "main"], targetDir);
+    execGit(["update-ref", "refs/remotes/origin/main", "HEAD"], targetDir);
+
+    initRepo(agentDir, "main");
+    fs.writeFileSync(path.join(agentDir, "README.md"), "agent workspace\n");
+    execGit(["add", "README.md"], agentDir);
+    execGit(["commit", "-m", "agent base"], agentDir);
+    execGit(["checkout", "-b", "feature/cross-repo"], agentDir);
+    fs.mkdirSync(path.join(agentDir, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "docs", "my guide.md"), "agent edited content\n");
+    execGit(["add", "docs/my guide.md"], agentDir);
+    execGit(["commit", "-m", "agent edit"], agentDir);
+
+    const rawPatch = execGit(["format-patch", "main..feature/cross-repo", "--stdout"], agentDir);
+    expect(rawPatch).toContain("docs/my guide.md");
+    expect(rawPatch).toContain("new file mode");
+
+    const quotedPatch = rawPatch.replace("diff --git a/docs/my guide.md b/docs/my guide.md", 'diff --git "a/docs/my guide.md" "b/docs/my guide.md"').replace("+++ b/docs/my guide.md", '+++ "b/docs/my guide.md"');
+
+    const rewritten = rewriteCrossRepoCreatePatches(quotedPatch, {
+      agentCwd: agentDir,
+      targetTreeCwd: targetDir,
+      baseBranch: "main",
+      pinnedSha: execGit(["rev-parse", "feature/cross-repo"], agentDir).trim(),
+    });
+
+    expect(rewritten).not.toContain("new file mode");
+    expect(rewritten).toContain('--- "a/docs/my guide.md"');
+    expect(rewritten).toContain("+agent edited content");
+
+    const patchFile = path.join(root, "rewritten.patch");
+    fs.writeFileSync(patchFile, rewritten);
+    execGit(["checkout", "-b", "apply-branch"], targetDir);
+    execGit(["am", "--3way", patchFile], targetDir);
+    expect(fs.readFileSync(docPath, "utf8")).toBe("agent edited content\n");
+  });
+});
+
+describe("getPatchDiffSizeBytes", () => {
+  it("returns 0 for an empty diff", () => {
+    expect(getPatchDiffSizeBytes("")).toBe(0);
+  });
+
+  it("counts only addition bytes for a new file (first push)", () => {
+    const diff = ["diff --git a/history.jsonl b/history.jsonl", "new file mode 100644", "index 0000000..abc1234", "--- /dev/null", "+++ b/history.jsonl", "@@ -0,0 +1,2 @@", '+{"event":"a"}', '+{"event":"b"}'].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    // Both lines are additions with no deletions → net = additions
+    const expected = Buffer.byteLength('+{"event":"a"}\n', "utf8") + Buffer.byteLength('+{"event":"b"}\n', "utf8");
+    expect(result).toBe(expected);
+  });
+
+  it("returns a small net value when a file is appended (not rewritten)", () => {
+    // Simulates appending one new line to an existing JSONL file
+    const diff = ["diff --git a/history.jsonl b/history.jsonl", "index abc1234..def5678 100644", "--- a/history.jsonl", "+++ b/history.jsonl", "@@ -1,2 +1,3 @@", ' {"event":"a"}', ' {"event":"b"}', '+{"event":"c"}'].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    // Only the added line contributes; no deletions
+    const expected = Buffer.byteLength('+{"event":"c"}\n', "utf8");
+    expect(result).toBe(expected);
+  });
+
+  it("returns near-zero for a complete rewrite with the same size (the key bug fix)", () => {
+    // Simulates a JSON object completely regenerated with equivalent size.
+    // Previously getAddedPatchSizeBytesFromDiff would return the full new-file
+    // size ("entire source code size").  getPatchDiffSizeBytes returns the net
+    // change (additions − deletions), which is ≈ 0 for same-size rewrites.
+    const oldLine = '{"key":"old_value_aaaa"}';
+    const newLine = '{"key":"new_value_bbbb"}';
+    const diff = ["diff --git a/state.json b/state.json", "index abc1234..def5678 100644", "--- a/state.json", "+++ b/state.json", "@@ -1 +1 @@", `-${oldLine}`, `+${newLine}`].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    const additionBytes = Buffer.byteLength(`+${newLine}\n`, "utf8");
+    const deletionBytes = Buffer.byteLength(`-${oldLine}\n`, "utf8");
+    // Both lines have the same length, so net ≈ 0
+    expect(result).toBe(Math.max(0, additionBytes - deletionBytes));
+    // Explicitly: this should NOT equal the full new-file size
+    expect(result).toBeLessThan(additionBytes);
+  });
+
+  it("returns 0 when deletions exceed additions (content shrinks)", () => {
+    const diff = [
+      "diff --git a/state.json b/state.json",
+      "index abc1234..def5678 100644",
+      "--- a/state.json",
+      "+++ b/state.json",
+      "@@ -1,3 +1,1 @@",
+      '-{"key":"value_one"}',
+      '-{"key":"value_two"}',
+      '-{"key":"value_three"}',
+      '+{"key":"v"}',
+    ].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    // Deletions > additions → clamped to 0
+    expect(result).toBe(0);
+  });
+
+  it("handles multiple files in one diff", () => {
+    const diff = [
+      "diff --git a/a.json b/a.json",
+      "index 0000000..abc1234 100644",
+      "--- /dev/null",
+      "+++ b/a.json",
+      "@@ -0,0 +1 @@",
+      '+{"a":1}',
+      "diff --git a/b.json b/b.json",
+      "index 0000000..def5678 100644",
+      "--- /dev/null",
+      "+++ b/b.json",
+      "@@ -0,0 +1 @@",
+      '+{"b":2}',
+    ].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    const expected = Buffer.byteLength('+{"a":1}\n', "utf8") + Buffer.byteLength('+{"b":2}\n', "utf8");
+    expect(result).toBe(expected);
+  });
+
+  it("does not let deletions in one file mask additions in another file (per-file clamping)", () => {
+    // File A: pure addition of new content
+    // File B: pure deletion of similar-sized content
+    // Global net ≈ 0 would be wrong — the added content must still count toward the limit
+    const addLine = '+{"new_key":"aaaaaaaaaaaaaaaaaaa"}';
+    const delLine = '-{"old_key":"bbbbbbbbbbbbbbbbbbb"}';
+    const diff = [
+      "diff --git a/new_file.json b/new_file.json",
+      "index 0000000..abc1234 100644",
+      "--- /dev/null",
+      "+++ b/new_file.json",
+      "@@ -0,0 +1 @@",
+      addLine,
+      "diff --git a/old_file.json b/old_file.json",
+      "index def5678..0000000 100644",
+      "--- a/old_file.json",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      delLine,
+    ].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    const addBytes = Buffer.byteLength(addLine + "\n", "utf8");
+    // File A contributes its addBytes; File B contributes max(0, 0 - delBytes) = 0
+    // Total must equal addBytes, not near-zero
+    expect(result).toBe(addBytes);
+  });
+
+  it("does not count +++ file header lines (they appear before any @@ hunk)", () => {
+    const diff = [
+      "diff --git a/file.json b/file.json",
+      "index 0000000..abc1234 100644",
+      "--- /dev/null",
+      "+++ b/file.json",
+      // No @@ yet — the +++ line above must NOT be counted
+      "@@ -0,0 +1 @@",
+      '+{"x":1}',
+    ].join("\n");
+    const result = getPatchDiffSizeBytes(diff);
+    const expected = Buffer.byteLength('+{"x":1}\n', "utf8");
+    expect(result).toBe(expected);
+  });
+});
+
+describe("getStagedPatchDiffSizeBytes", () => {
+  it("calls git diff --cached and returns net patch diff size", () => {
+    const diffOutput = ["diff --git a/data.json b/data.json", "index abc..def 100644", "--- a/data.json", "+++ b/data.json", "@@ -1 +1,2 @@", '-{"old":1}', '+{"new":1}', '+{"extra":2}'].join("\n");
+
+    const execGitSyncFn = (/** @type {string[]} */ args, /** @type {any} */ _opts) => {
+      if (args[0] === "diff" && args[1] === "--cached") return diffOutput;
+      return "";
+    };
+
+    const result = getStagedPatchDiffSizeBytes({ execGitSyncFn, cwd: "/some/dir" });
+    const additions = Buffer.byteLength('+{"new":1}\n', "utf8") + Buffer.byteLength('+{"extra":2}\n', "utf8");
+    const deletions = Buffer.byteLength('-{"old":1}\n', "utf8");
+    expect(result).toBe(Math.max(0, additions - deletions));
+  });
+
+  it("passes the cwd option to execGitSyncFn", () => {
+    const calls = /** @type {Array<{args: string[], opts: any}>} */ [];
+    const execGitSyncFn = (/** @type {string[]} */ args, /** @type {any} */ opts) => {
+      calls.push({ args, opts });
+      return "";
+    };
+
+    getStagedPatchDiffSizeBytes({ execGitSyncFn, cwd: "/memory/dir" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["diff", "--cached"]);
+    expect(calls[0].opts.cwd).toBe("/memory/dir");
+  });
+});
+
+describe("isAncestorCommit", () => {
+  /** @type {string} */
+  let repoDir;
+
+  beforeEach(() => {
+    repoDir = createTestRepo();
+  });
+
+  afterEach(() => {
+    cleanupRepo(repoDir);
+  });
+
+  it("returns true when ancestor commit is an ancestor of descendant", () => {
+    const rootSha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+    fs.writeFileSync(path.join(repoDir, "file.txt"), "content\n");
+    execGit(["add", "."], { cwd: repoDir });
+    execGit(["commit", "-q", "-m", "Second commit"], { cwd: repoDir });
+    const tipSha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+
+    expect(isAncestorCommit(rootSha, tipSha, repoDir)).toBe(true);
+  });
+
+  it("returns true when ancestor and descendant are identical", () => {
+    const sha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+    expect(isAncestorCommit(sha, sha, repoDir)).toBe(true);
+  });
+
+  it("returns false when ancestor commit is not an ancestor of descendant", () => {
+    const rootSha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+    fs.writeFileSync(path.join(repoDir, "file.txt"), "content\n");
+    execGit(["add", "."], { cwd: repoDir });
+    execGit(["commit", "-q", "-m", "Second commit"], { cwd: repoDir });
+    const tipSha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+
+    expect(isAncestorCommit(tipSha, rootSha, repoDir)).toBe(false);
+  });
+
+  it("returns false for an unknown revision instead of throwing", () => {
+    const rootSha = execGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim();
+    expect(isAncestorCommit("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", rootSha, repoDir)).toBe(false);
+  });
+});
+
+describe("isPartialClone", () => {
+  /** @type {string} */
+  let repoDir;
+
+  beforeEach(() => {
+    repoDir = createTestRepo();
+  });
+
+  afterEach(() => {
+    cleanupRepo(repoDir);
+  });
+
+  it("returns false when remote.origin.promisor is not set", () => {
+    expect(isPartialClone(repoDir)).toBe(false);
+  });
+
+  it("returns true when remote.origin.promisor is set to true", () => {
+    execGit(["config", "remote.origin.promisor", "true"], { cwd: repoDir });
+    expect(isPartialClone(repoDir)).toBe(true);
+  });
+
+  it("returns false when remote.origin.promisor is set to false", () => {
+    execGit(["config", "remote.origin.promisor", "false"], { cwd: repoDir });
+    expect(isPartialClone(repoDir)).toBe(false);
+  });
+});
+
+describe("describeGitFailure", () => {
+  /** @type {string} */
+  let repoDir;
+
+  beforeEach(() => {
+    repoDir = createTestRepo();
+  });
+
+  afterEach(() => {
+    cleanupRepo(repoDir);
+  });
+
+  it("leaves the message unchanged when the repo is not a partial clone", () => {
+    const message = "fatal: remote error: Invalid username or token.";
+    expect(describeGitFailure(message, repoDir)).toBe(message);
+  });
+
+  it("leaves the message unchanged when it does not look like an auth/promisor failure", () => {
+    execGit(["config", "remote.origin.promisor", "true"], { cwd: repoDir });
+    const message = "fatal: bad object HEAD";
+    expect(describeGitFailure(message, repoDir)).toBe(message);
+  });
+
+  it("appends the partial-clone diagnostic when the repo is a partial clone and the message matches", () => {
+    execGit(["config", "remote.origin.promisor", "true"], { cwd: repoDir });
+    const message = "remote: Invalid username or token.";
+    const result = describeGitFailure(message, repoDir);
+    expect(result).toContain(message);
+    expect(result).toContain("partial clone");
+    expect(result).toContain("persist-credentials: false");
+  });
+
+  it("matches on 'promisor' in the message even without the exact auth wording", () => {
+    execGit(["config", "remote.origin.promisor", "true"], { cwd: repoDir });
+    const message = "error: promisor remote fetch failed";
+    const result = describeGitFailure(message, repoDir);
+    expect(result).toContain("partial clone");
+  });
+
+  it("does not append the diagnostic for unrelated network errors even on a partial clone", () => {
+    execGit(["config", "remote.origin.promisor", "true"], { cwd: repoDir });
+    const message = "fatal: unable to access 'https://example.com/': Could not resolve host";
+    expect(describeGitFailure(message, repoDir)).toBe(message);
   });
 });

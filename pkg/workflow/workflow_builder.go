@@ -51,6 +51,7 @@ func (c *Compiler) buildInitialWorkflowData(
 		ImportedFiles:              importsResult.ImportedFiles,
 		Skills:                     extractFrontmatterSkills(toolsResult.parsedFrontmatter, result.Frontmatter),
 		SkillReferences:            extractFrontmatterSkillReferences(toolsResult.parsedFrontmatter, result.Frontmatter),
+		Plugins:                    mergeFrontmatterPlugins(toolsResult.parsedFrontmatter, result.Frontmatter, importsResult.MergedPlugins),
 		ImportedMarkdown:           toolsResult.importedMarkdown, // Only imports WITH inputs
 		ImportPaths:                toolsResult.importPaths,      // Import paths for runtime-import macros (imports without inputs)
 		PromptImports:              toolsResult.promptImports,    // Ordered prompt contributions from imports
@@ -64,13 +65,16 @@ func (c *Compiler) buildInitialWorkflowData(
 		RunInstallScripts:          toolsResult.runInstallScripts,
 		MarkdownContent:            toolsResult.markdownContent,
 		AI:                         engineSetup.engineSetting,
+		Model:                      engineSetup.model,
 		EngineConfig:               engineSetup.engineConfig,
+		GHES:                       c.ghesArtifactCompat,
 		AgentFile:                  agentFile,
 		AgentImportSpec:            agentImportSpec,
 		RepositoryImports:          importsResult.RepositoryImports,
 		NetworkPermissions:         engineSetup.networkPermissions,
 		SandboxConfig:              applySandboxDefaults(engineSetup.sandboxConfig, engineSetup.engineConfig),
 		RunnerConfig:               extractRunnerConfig(result.Frontmatter),
+		Enclaves:                   extractEnclavesConfig(result.Frontmatter),
 		NeedsTextOutput:            toolsResult.needsTextOutput,
 		ToolsTimeout:               toolsResult.toolsTimeout,
 		ToolsStartupTimeout:        toolsResult.toolsStartupTimeout,
@@ -96,9 +100,11 @@ func (c *Compiler) buildInitialWorkflowData(
 	if toolsResult.parsedFrontmatter != nil {
 		workflowData.CheckoutConfigs = toolsResult.parsedFrontmatter.CheckoutConfigs
 		workflowData.CheckoutDisabled = toolsResult.parsedFrontmatter.CheckoutDisabled
+		workflowData.CheckoutExplicitlyDisabled = toolsResult.parsedFrontmatter.CheckoutExplicitlyDisabled
 	} else if rawCheckout, ok := result.Frontmatter["checkout"]; ok {
 		if checkoutValue, ok := rawCheckout.(bool); ok && !checkoutValue {
 			workflowData.CheckoutDisabled = true
+			workflowData.CheckoutExplicitlyDisabled = true
 		} else if configs, err := ParseCheckoutConfigs(rawCheckout); err == nil {
 			workflowData.CheckoutConfigs = configs
 		}
@@ -124,6 +130,29 @@ func (c *Compiler) buildInitialWorkflowData(
 				continue
 			}
 			workflowData.CheckoutConfigs = append(workflowData.CheckoutConfigs, importedConfigs...)
+		}
+	}
+
+	// Auto-disable checkout for pull_request_target-only workflows when not explicitly configured.
+	// For pull_request_target events, the head branch is often deleted (closed/merged PRs)
+	// or inaccessible (fork PRs), causing the "Checkout PR branch" step to fail.
+	// Users who need checkout can explicitly set a checkout configuration in frontmatter.
+	// This block runs after import merging so that imported checkout configs prevent auto-disable.
+	// Auto-disable is skipped when pull_request (or other checkout-compatible) triggers co-exist,
+	// because those events do have accessible head branches.
+	onVal := result.Frontmatter["on"]
+	hasPRT := frontmatterHasTrigger(onVal, "pull_request_target")
+	hasPR := frontmatterHasTrigger(onVal, "pull_request")
+	if hasPRT && !hasPR {
+		// Mark the workflow as pull_request_target-only so ShouldGeneratePRCheckoutStep
+		// suppresses the checkout_pr_branch.cjs step regardless of checkout configuration.
+		workflowData.IsPullRequestTarget = true
+
+		if !workflowData.CheckoutDisabled && len(workflowData.CheckoutConfigs) == 0 {
+			if _, checkoutExplicitlySet := result.Frontmatter["checkout"]; !checkoutExplicitlySet {
+				workflowBuilderLog.Print("Auto-disabling checkout for pull_request_target workflow")
+				workflowData.CheckoutDisabled = true
+			}
 		}
 	}
 
@@ -161,7 +190,7 @@ func (c *Compiler) buildInitialWorkflowData(
 	// Attempt to resolve pricing for the workflow model from models.dev when it is absent
 	// from both the frontmatter overlay and the embedded models.json catalog.  The result
 	// is injected into ModelCosts so the runtime receives it via GH_AW_INFO_MODEL_COSTS.
-	workflowData.ModelCosts = c.resolveModelPricingIfMissing(workflowData.ModelCosts, workflowData.EngineConfig)
+	workflowData.ModelCosts = c.resolveModelPricingIfMissing(workflowData.ModelCosts, workflowData)
 	mainModelPolicy := extractMainModelPolicyOverlay(toolsResult, result.Frontmatter)
 	allowedModels, disallowedModels := mergeModelPolicyOverlays(importsResult.MergedModelPolicies, mainModelPolicy)
 	if len(allowedModels) > 0 {
@@ -171,7 +200,37 @@ func (c *Compiler) buildInitialWorkflowData(
 		workflowData.ModelPolicyBlocked = disallowedModels
 	}
 
+	if pricing := resolveDefaultAiCreditsPricing(result.Frontmatter, importsResult.MergedDefaultAiCreditsPricing); pricing != nil {
+		workflowData.DefaultAiCreditsPricing = pricing
+	}
+
+	// Populate explicitly excluded env var names: union of imported workflows' excluded-env
+	// and the main workflow's excluded-env. Deduplicate and sort for stability.
+	var mainExcludedEnv []string
+	if toolsResult.parsedFrontmatter != nil {
+		mainExcludedEnv = toolsResult.parsedFrontmatter.ExcludedEnv
+	}
+	if names := mergeExcludedEnvVarNames(importsResult.MergedExcludedEnv, mainExcludedEnv); len(names) > 0 {
+		workflowData.ExcludedEnv = names
+	}
+
 	return workflowData
+}
+
+func extractEnclavesConfig(frontmatter map[string]any) EnclavesConfig {
+	raw, ok := frontmatter["enclaves"]
+	if !ok {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return EnclavesConfig{nil}
+	}
+	var enclaves EnclavesConfig
+	if err := json.Unmarshal(data, &enclaves); err != nil {
+		return EnclavesConfig{nil}
+	}
+	return enclaves
 }
 
 func extractLSPConfig(parsedFrontmatter *FrontmatterConfig, frontmatter map[string]any) map[string]LSPServerConfig {
@@ -219,6 +278,29 @@ func extractFrontmatterSkills(parsedFrontmatter *FrontmatterConfig, frontmatter 
 		return nil
 	}
 	return skills
+}
+
+func extractFrontmatterPlugins(parsedFrontmatter *FrontmatterConfig, frontmatter map[string]any) []string {
+	if parsedFrontmatter != nil {
+		return append([]string(nil), parsedFrontmatter.Plugins...)
+	}
+
+	rawPlugins, ok := frontmatter["plugins"].([]any)
+	if !ok {
+		return nil
+	}
+	plugins := make([]string, 0, len(rawPlugins))
+	for _, rawPlugin := range rawPlugins {
+		if plugin, ok := rawPlugin.(string); ok {
+			plugins = append(plugins, plugin)
+		}
+	}
+	return plugins
+}
+
+func mergeFrontmatterPlugins(parsedFrontmatter *FrontmatterConfig, frontmatter map[string]any, importedPlugins []string) []string {
+	plugins := extractFrontmatterPlugins(parsedFrontmatter, frontmatter)
+	return append(plugins, importedPlugins...)
 }
 
 func extractFrontmatterSkillReferences(parsedFrontmatter *FrontmatterConfig, frontmatter map[string]any) []SkillReference {
@@ -365,6 +447,92 @@ func extractMainModelPolicyOverlay(toolsResult *toolsProcessingResult, frontmatt
 	return mainPolicy
 }
 
+// toFloat64 converts any numeric value from a parsed YAML/JSON frontmatter map to float64.
+// Returns (value, true) on success, or (0, false) if the value is nil or not a numeric type.
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}
+
+// resolveDefaultAiCreditsPricing returns models.default-ai-credits-pricing from the main
+// workflow frontmatter when present, otherwise falls back to the first imported value.
+func resolveDefaultAiCreditsPricing(frontmatter map[string]any, imported map[string]any) *AiCreditsPricingConfig {
+	if pricing := extractDefaultAiCreditsPricingFromModels(frontmatter); pricing != nil {
+		return pricing
+	}
+	return extractDefaultAiCreditsPricingFromObject(imported)
+}
+
+// extractDefaultAiCreditsPricingFromModels returns the fallback AI credits pricing configured
+// under models.default-ai-credits-pricing in the workflow frontmatter, or nil if absent.
+func extractDefaultAiCreditsPricingFromModels(frontmatter map[string]any) *AiCreditsPricingConfig {
+	modelsMap, ok := frontmatter["models"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return extractDefaultAiCreditsPricingFromModelsMap(modelsMap)
+}
+
+func extractDefaultAiCreditsPricingFromModelsMap(modelsMap map[string]any) *AiCreditsPricingConfig {
+	if modelsMap == nil {
+		return nil
+	}
+	pricingVal, hasPricing := modelsMap["default-ai-credits-pricing"]
+	if !hasPricing {
+		return nil
+	}
+	pricingObj, ok := pricingVal.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return extractDefaultAiCreditsPricingFromObject(pricingObj)
+}
+
+func extractDefaultAiCreditsPricingFromObject(pricingObj map[string]any) *AiCreditsPricingConfig {
+	if pricingObj == nil {
+		return nil
+	}
+	var input, output float64
+	if v, ok := toFloat64(pricingObj["input"]); ok {
+		input = v
+	}
+	if v, ok := toFloat64(pricingObj["output"]); ok {
+		output = v
+	}
+	var cachedInput *float64
+	if v, ok := toFloat64(pricingObj["cache_read"]); ok {
+		cachedInput = &v
+	}
+	var cacheWrite *float64
+	if v, ok := toFloat64(pricingObj["cache_write"]); ok {
+		cacheWrite = &v
+	}
+	return &AiCreditsPricingConfig{
+		Input:       input,
+		Output:      output,
+		CachedInput: cachedInput,
+		CacheWrite:  cacheWrite,
+	}
+}
+
 func mergeModelPolicyOverlays(importedPolicies []map[string][]string, mainPolicy map[string][]string) ([]string, []string) {
 	overlays := make([]map[string][]string, 0, len(importedPolicies)+1)
 	overlays = append(overlays, importedPolicies...)
@@ -454,6 +622,34 @@ func modelPolicyPatternMatches(pattern, value string) bool {
 // populated regardless of whether ParseFrontmatterConfig succeeded.
 func resolveInlinedImports(rawFrontmatter map[string]any) bool {
 	return ParseBoolFromConfig(rawFrontmatter, "inlined-imports", nil)
+}
+
+// mergeExcludedEnvVarNames unions the imported and main excluded-env name lists,
+// deduplicates entries across both sources, and returns a sorted slice for
+// deterministic output.
+func mergeExcludedEnvVarNames(fromImports, fromMain []string) []string {
+	if len(fromImports) == 0 && len(fromMain) == 0 {
+		return nil
+	}
+	// Use max() for capacity hints: overflow-safe (no addition) and a tighter
+	// lower-bound than either length alone.
+	hint := max(len(fromImports), len(fromMain))
+	seen := make(map[string]struct{}, hint)
+	merged := make([]string, 0, hint)
+	for _, name := range fromImports {
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			merged = append(merged, name)
+		}
+	}
+	for _, name := range fromMain {
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			merged = append(merged, name)
+		}
+	}
+	sort.Strings(merged)
+	return merged
 }
 
 // extractYAMLSections extracts YAML configuration sections from frontmatter
@@ -616,12 +812,12 @@ func (c *Compiler) processAndMergeSteps(frontmatter map[string]any, workflowData
 	var otherImportedSteps []any
 	if importsResult.MergedSteps != "" {
 		if err := yaml.Unmarshal([]byte(importsResult.MergedSteps), &otherImportedSteps); err != nil {
-			return fmt.Errorf("failed to parse imported steps: %w", err)
+			return fmt.Errorf("imported steps YAML is not recognized, expected a valid list of GitHub Actions steps: %w", err)
 		}
 		// Convert to typed steps for action pinning
 		typedOtherSteps, err := SliceToSteps(otherImportedSteps)
 		if err != nil {
-			return fmt.Errorf("failed to convert imported steps: %w", err)
+			return fmt.Errorf("imported steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 		}
 		// Apply action pinning to other imported steps
 		typedOtherSteps, err = applyActionPinsToTypedSteps(typedOtherSteps, workflowData)
@@ -637,7 +833,7 @@ func (c *Compiler) processAndMergeSteps(frontmatter map[string]any, workflowData
 	if workflowData.CustomSteps != "" {
 		var mainStepsWrapper map[string]any
 		if err := yaml.Unmarshal([]byte(workflowData.CustomSteps), &mainStepsWrapper); err != nil {
-			return fmt.Errorf("failed to parse custom steps: %w", err)
+			return fmt.Errorf("custom steps YAML is not recognized, expected a 'steps:' mapping with a valid list of steps: %w", err)
 		}
 		if mainStepsVal, hasSteps := mainStepsWrapper["steps"]; hasSteps {
 			if steps, ok := mainStepsVal.([]any); ok {
@@ -645,7 +841,7 @@ func (c *Compiler) processAndMergeSteps(frontmatter map[string]any, workflowData
 				// Convert to typed steps for action pinning
 				typedMainSteps, err := SliceToSteps(mainSteps)
 				if err != nil {
-					return fmt.Errorf("failed to convert main steps: %w", err)
+					return fmt.Errorf("main steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 				}
 				// Apply action pinning to main steps
 				typedMainSteps, err = applyActionPinsToTypedSteps(typedMainSteps, workflowData)
@@ -693,11 +889,11 @@ func (c *Compiler) processAndMergePreSteps(frontmatter map[string]any, workflowD
 	var importedPreSteps []any
 	if importsResult.MergedPreSteps != "" {
 		if err := yaml.Unmarshal([]byte(importsResult.MergedPreSteps), &importedPreSteps); err != nil {
-			return fmt.Errorf("failed to parse imported pre-steps: %w", err)
+			return fmt.Errorf("imported pre-steps YAML is not recognized, expected a valid list of GitHub Actions steps: %w", err)
 		}
 		typedImported, err := SliceToSteps(importedPreSteps)
 		if err != nil {
-			return fmt.Errorf("failed to convert imported pre-steps: %w", err)
+			return fmt.Errorf("imported pre-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 		}
 		typedImported, err = applyActionPinsToTypedSteps(typedImported, workflowData)
 		if err != nil {
@@ -711,14 +907,14 @@ func (c *Compiler) processAndMergePreSteps(frontmatter map[string]any, workflowD
 	if mainPreStepsYAML != "" {
 		var mainWrapper map[string]any
 		if err := yaml.Unmarshal([]byte(mainPreStepsYAML), &mainWrapper); err != nil {
-			return fmt.Errorf("failed to parse pre-steps: %w", err)
+			return fmt.Errorf("pre-steps YAML is not recognized, expected a 'pre-steps:' mapping with a valid list of steps: %w", err)
 		}
 		if mainVal, ok := mainWrapper["pre-steps"]; ok {
 			if steps, ok := mainVal.([]any); ok {
 				mainPreSteps = steps
 				typedMain, err := SliceToSteps(mainPreSteps)
 				if err != nil {
-					return fmt.Errorf("failed to convert pre-steps: %w", err)
+					return fmt.Errorf("pre-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 				}
 				typedMain, err = applyActionPinsToTypedSteps(typedMain, workflowData)
 				if err != nil {
@@ -754,11 +950,11 @@ func (c *Compiler) processAndMergePreAgentSteps(frontmatter map[string]any, work
 	var importedPreAgentSteps []any
 	if importsResult.MergedPreAgentSteps != "" {
 		if err := yaml.Unmarshal([]byte(importsResult.MergedPreAgentSteps), &importedPreAgentSteps); err != nil {
-			return fmt.Errorf("failed to parse imported pre-agent-steps: %w", err)
+			return fmt.Errorf("imported pre-agent-steps YAML is not recognized, expected a valid list of GitHub Actions steps: %w", err)
 		}
 		typedImported, err := SliceToSteps(importedPreAgentSteps)
 		if err != nil {
-			return fmt.Errorf("failed to convert imported pre-agent-steps: %w", err)
+			return fmt.Errorf("imported pre-agent-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 		}
 		typedImported, err = applyActionPinsToTypedSteps(typedImported, workflowData)
 		if err != nil {
@@ -771,14 +967,14 @@ func (c *Compiler) processAndMergePreAgentSteps(frontmatter map[string]any, work
 	if mainPreAgentStepsYAML != "" {
 		var mainWrapper map[string]any
 		if err := yaml.Unmarshal([]byte(mainPreAgentStepsYAML), &mainWrapper); err != nil {
-			return fmt.Errorf("failed to parse pre-agent-steps: %w", err)
+			return fmt.Errorf("pre-agent-steps YAML is not recognized, expected a 'pre-agent-steps:' mapping with a valid list of steps: %w", err)
 		}
 		if mainVal, ok := mainWrapper["pre-agent-steps"]; ok {
 			if steps, ok := mainVal.([]any); ok {
 				mainPreAgentSteps = steps
 				typedMain, err := SliceToSteps(mainPreAgentSteps)
 				if err != nil {
-					return fmt.Errorf("failed to convert pre-agent-steps: %w", err)
+					return fmt.Errorf("pre-agent-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 				}
 				typedMain, err = applyActionPinsToTypedSteps(typedMain, workflowData)
 				if err != nil {
@@ -814,11 +1010,11 @@ func (c *Compiler) processAndMergePostSteps(frontmatter map[string]any, workflow
 	var importedPostSteps []any
 	if importsResult.MergedPostSteps != "" {
 		if err := yaml.Unmarshal([]byte(importsResult.MergedPostSteps), &importedPostSteps); err != nil {
-			return fmt.Errorf("failed to parse imported post-steps: %w", err)
+			return fmt.Errorf("imported post-steps YAML is not recognized, expected a valid list of GitHub Actions steps: %w", err)
 		}
 		typedImported, err := SliceToSteps(importedPostSteps)
 		if err != nil {
-			return fmt.Errorf("failed to convert imported post-steps: %w", err)
+			return fmt.Errorf("imported post-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 		}
 		typedImported, err = applyActionPinsToTypedSteps(typedImported, workflowData)
 		if err != nil {
@@ -832,14 +1028,14 @@ func (c *Compiler) processAndMergePostSteps(frontmatter map[string]any, workflow
 	if mainPostStepsYAML != "" {
 		var mainWrapper map[string]any
 		if err := yaml.Unmarshal([]byte(mainPostStepsYAML), &mainWrapper); err != nil {
-			return fmt.Errorf("failed to parse post-steps: %w", err)
+			return fmt.Errorf("post-steps YAML is not recognized, expected a 'post-steps:' mapping with a valid list of steps: %w", err)
 		}
 		if mainVal, ok := mainWrapper["post-steps"]; ok {
 			if steps, ok := mainVal.([]any); ok {
 				mainPostSteps = steps
 				typedMain, err := SliceToSteps(mainPostSteps)
 				if err != nil {
-					return fmt.Errorf("failed to convert post-steps: %w", err)
+					return fmt.Errorf("post-steps could not be converted to typed steps, expected each entry to be a valid step object: %w", err)
 				}
 				typedMain, err = applyActionPinsToTypedSteps(typedMain, workflowData)
 				if err != nil {
@@ -863,4 +1059,26 @@ func (c *Compiler) processAndMergePostSteps(frontmatter map[string]any, workflow
 		}
 	}
 	return nil
+}
+
+// frontmatterHasTrigger reports whether the given "on:" frontmatter value contains
+// the specified trigger name. It handles all three YAML "on:" forms:
+//   - string scalar:  on: pull_request_target
+//   - sequence:       on: [pull_request_target, push]
+//   - mapping:        on:\n  pull_request_target:\n    types: [closed]
+func frontmatterHasTrigger(onVal any, trigger string) bool {
+	switch v := onVal.(type) {
+	case string:
+		return v == trigger
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s == trigger {
+				return true
+			}
+		}
+	case map[string]any:
+		_, ok := v[trigger]
+		return ok
+	}
+	return false
 }

@@ -23,6 +23,57 @@ import (
 // - TestStageWorkflowChanges (tests staging behavior during workflow compilation)
 // - TestStageGitAttributesIfChanged (tests conditional staging during compilation)
 
+func TestIsSafeGitRevisionArg(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"leading dash", "-oops", false},
+		{"leading double dash", "--upload-pack=evil", false},
+		{"plain branch", "main", true},
+		{"remote branch", "origin/main", true},
+		{"contains dash not leading", "feature-branch", true},
+		{"short sha", "abc1234", true},
+		{"fully qualified ref", "refs/heads/main", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSafeGitRevisionArg(tt.ref))
+		})
+	}
+}
+
+func TestValidateRelPathForGit(t *testing.T) {
+	tests := []struct {
+		name    string
+		relPath string
+		wantErr bool
+	}{
+		{"empty", "", true},
+		{"leading dash", "-oops", true},
+		{"leading double dash flag", "--upload-pack=evil", true},
+		{"parent traversal", "..", true},
+		{"parent traversal with subpath", "../secret.txt", true},
+		{"nested parent traversal", "sub/../../secret.txt", true},
+		{"absolute path", "/etc/passwd", true},
+		{"plain relative path", "workflow.md", false},
+		{"nested relative path", ".github/workflows/workflow.md", false},
+		{"dot prefixed but within repo", "./workflow.md", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRelPathForGit(tt.relPath)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestGetCurrentBranch(t *testing.T) {
 	tmpDir := testutil.TempDir(t, "test-*")
 
@@ -77,6 +128,88 @@ func TestGetCurrentBranchNotInRepo(t *testing.T) {
 	// Don't initialize git - should error
 	_, err = getCurrentBranch()
 	assert.Error(t, err, "getCurrentBranch should return an error when not in a git repository")
+}
+
+func TestCheckCleanWorkingDirectoryIgnoring(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "test-*")
+
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, os.Chdir(originalDir))
+	}()
+
+	require.NoError(t, os.Chdir(tmpDir))
+	require.NoError(t, exec.Command("git", "init").Run())
+	require.NoError(t, exec.Command("git", "config", "user.name", "Test User").Run())
+	require.NoError(t, exec.Command("git", "config", "user.email", "test@example.com").Run())
+
+	generatedFile := filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(generatedFile), 0755))
+	require.NoError(t, os.WriteFile(generatedFile, []byte("generated"), 0644))
+
+	require.NoError(t, checkCleanWorkingDirectoryIgnoring(false, []string{generatedFile}))
+	require.ErrorContains(t, checkCleanWorkingDirectory(false), "working directory has uncommitted changes")
+
+	// Staged (but not committed) init file should also be excluded.
+	require.NoError(t, exec.Command("git", "add", generatedFile).Run())
+	require.NoError(t, checkCleanWorkingDirectoryIgnoring(false, []string{generatedFile}))
+	require.ErrorContains(t, checkCleanWorkingDirectory(false), "working directory has uncommitted changes")
+
+	require.NoError(t, exec.Command("git", "commit", "-m", "initial commit").Run())
+	require.NoError(t, os.WriteFile(generatedFile, []byte("updated"), 0644))
+
+	require.NoError(t, checkCleanWorkingDirectoryIgnoring(false, []string{generatedFile}))
+	require.ErrorContains(t, checkCleanWorkingDirectory(false), "working directory has uncommitted changes")
+
+	require.NoError(t, os.WriteFile("README.md", []byte("user file"), 0644))
+	require.ErrorContains(
+		t,
+		checkCleanWorkingDirectoryIgnoring(false, []string{generatedFile}),
+		"working directory has uncommitted changes",
+	)
+}
+
+// TestCheckCleanWorkingDirectoryIgnoringAbsolutePaths verifies that absolute
+// paths are accepted when the current directory is a subdirectory of the repo.
+// This is the case when the wizard is invoked from a nested directory and
+// ensureAddRepositoryInitializedWithDetails returns absolute paths.
+func TestCheckCleanWorkingDirectoryIgnoringAbsolutePaths(t *testing.T) {
+	repoDir := testutil.TempDir(t, "test-*")
+
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, os.Chdir(originalDir))
+	}()
+
+	require.NoError(t, os.Chdir(repoDir))
+	require.NoError(t, exec.Command("git", "init").Run())
+	require.NoError(t, exec.Command("git", "config", "user.name", "Test User").Run())
+	require.NoError(t, exec.Command("git", "config", "user.email", "test@example.com").Run())
+
+	// Create the init file at the repo root.
+	generatedFile := filepath.Join(".github", "skills", "agentic-workflows", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(generatedFile), 0755))
+	require.NoError(t, os.WriteFile(generatedFile, []byte("generated"), 0644))
+	absGenerated := filepath.Join(repoDir, generatedFile)
+
+	// Create a subdirectory and cd into it to simulate a nested invocation.
+	subDir := filepath.Join(repoDir, "subdir")
+	require.NoError(t, os.MkdirAll(subDir, 0755))
+	require.NoError(t, os.Chdir(subDir))
+
+	// Passing the absolute path from a nested CWD should still exclude the file.
+	require.NoError(t, checkCleanWorkingDirectoryIgnoring(false, []string{absGenerated}))
+	require.ErrorContains(t, checkCleanWorkingDirectory(false), "working directory has uncommitted changes")
+
+	// An unrelated untracked file must still be detected even when the init file is excluded.
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("user file"), 0644))
+	require.ErrorContains(
+		t,
+		checkCleanWorkingDirectoryIgnoring(false, []string{absGenerated}),
+		"working directory has uncommitted changes",
+	)
 }
 
 func TestCreateAndSwitchBranch(t *testing.T) {

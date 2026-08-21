@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func stubFetchJobStatusesForProcessedRun(t *testing.T, fn func(int64, bool) (int, error)) {
+func stubFetchJobStatusesForProcessedRun(t *testing.T, fn func(context.Context, int64, bool) (int, error)) {
 	t.Helper()
 	previous := fetchJobStatusesForProcessedRun
 	fetchJobStatusesForProcessedRun = fn
@@ -29,8 +30,9 @@ func makeDownloadResult(t *testing.T, awInfoJSON string) DownloadResult {
 	if awInfoJSON != "" {
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "aw_info.json"), []byte(awInfoJSON), 0644))
 	}
-	return DownloadResult{
-		Run:      WorkflowRun{DatabaseID: 42},
+	return DownloadResult{RunAnalysis: RunAnalysis{
+		Run: WorkflowRun{DatabaseID: 42},
+	},
 		LogsPath: tmpDir,
 	}
 }
@@ -39,7 +41,7 @@ func makeDownloadResult(t *testing.T, awInfoJSON string) DownloadResult {
 // passes every run through (returns false = do not skip).
 func TestApplyRunFilters_NoFilters(t *testing.T) {
 	result := makeDownloadResult(t, `{"engine_id":"claude"}`)
-	skip := applyRunFilters(result, runFilterOpts{}, false)
+	skip := applyRunFilters(context.Background(), result, runFilterOpts{}, false)
 	assert.False(t, skip, "no filters should never skip a run")
 }
 
@@ -73,13 +75,55 @@ func TestApplyRunFilters_Engine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := makeDownloadResult(t, tt.awInfo)
-			skip := applyRunFilters(result, runFilterOpts{engine: tt.filterEngine}, false)
+			skip := applyRunFilters(context.Background(), result, runFilterOpts{engine: tt.filterEngine}, false)
 			assert.Equal(t, tt.wantSkip, skip)
 		})
 	}
 }
 
-// TestApplyRunFilters_NoStaged verifies that --no-staged skips staged runs.
+// TestApplyRunFilters_Runtime exercises both the matching and non-matching runtime cases.
+func TestApplyRunFilters_Runtime(t *testing.T) {
+	tests := []struct {
+		name          string
+		awInfo        string
+		filterRuntime string
+		wantSkip      bool
+	}{
+		{
+			name:          "matching runtime passes",
+			awInfo:        `{"agent_runtime":"gvisor"}`,
+			filterRuntime: "gvisor",
+			wantSkip:      false,
+		},
+		{
+			name:          "non-matching runtime skipped",
+			awInfo:        `{"agent_runtime":"docker-sbx"}`,
+			filterRuntime: "gvisor",
+			wantSkip:      true,
+		},
+		{
+			name:          "missing aw_info skipped",
+			awInfo:        "", // no file
+			filterRuntime: "gvisor",
+			wantSkip:      true,
+		},
+		{
+			name:          "empty agent_runtime is skipped",
+			awInfo:        `{"agent_runtime":""}`,
+			filterRuntime: "gvisor",
+			wantSkip:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := makeDownloadResult(t, tt.awInfo)
+			skip := applyRunFilters(context.Background(), result, runFilterOpts{runtime: tt.filterRuntime}, false)
+			assert.Equal(t, tt.wantSkip, skip)
+		})
+	}
+}
+
+// TestApplyRunFilters_NoStaged verifies that --exclude-staged skips staged runs.
 func TestApplyRunFilters_NoStaged(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -105,7 +149,7 @@ func TestApplyRunFilters_NoStaged(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := makeDownloadResult(t, tt.awInfo)
-			skip := applyRunFilters(result, runFilterOpts{noStaged: true}, false)
+			skip := applyRunFilters(context.Background(), result, runFilterOpts{noStaged: true}, false)
 			assert.Equal(t, tt.wantSkip, skip)
 		})
 	}
@@ -151,7 +195,7 @@ func TestApplyRunFilters_Firewall(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := makeDownloadResult(t, tt.awInfo)
-			skip := applyRunFilters(result, runFilterOpts{firewallOnly: tt.firewallOnly, noFirewall: tt.noFirewall}, false)
+			skip := applyRunFilters(context.Background(), result, runFilterOpts{firewallOnly: tt.firewallOnly, noFirewall: tt.noFirewall}, false)
 			assert.Equal(t, tt.wantSkip, skip)
 		})
 	}
@@ -162,7 +206,7 @@ func TestApplyRunFilters_Firewall(t *testing.T) {
 func TestApplyRunFilters_SafeOutputType(t *testing.T) {
 	t.Run("no agent_output.json skips run", func(t *testing.T) {
 		result := makeDownloadResult(t, "") // no aw_info.json either
-		skip := applyRunFilters(result, runFilterOpts{safeOutputType: "create-issue"}, false)
+		skip := applyRunFilters(context.Background(), result, runFilterOpts{safeOutputType: "create-issue"}, false)
 		assert.True(t, skip)
 	})
 
@@ -170,8 +214,8 @@ func TestApplyRunFilters_SafeOutputType(t *testing.T) {
 		tmpDir := t.TempDir()
 		agentOutput := `{"items":[{"type":"create-issue"}]}`
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent_output.json"), []byte(agentOutput), 0644))
-		result := DownloadResult{Run: WorkflowRun{DatabaseID: 1}, LogsPath: tmpDir}
-		skip := applyRunFilters(result, runFilterOpts{safeOutputType: "create-issue"}, false)
+		result := DownloadResult{RunAnalysis: RunAnalysis{Run: WorkflowRun{DatabaseID: 1}}, LogsPath: tmpDir}
+		skip := applyRunFilters(context.Background(), result, runFilterOpts{safeOutputType: "create-issue"}, false)
 		assert.False(t, skip)
 	})
 
@@ -179,8 +223,8 @@ func TestApplyRunFilters_SafeOutputType(t *testing.T) {
 		tmpDir := t.TempDir()
 		agentOutput := `{"items":[{"type":"add-comment"}]}`
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "agent_output.json"), []byte(agentOutput), 0644))
-		result := DownloadResult{Run: WorkflowRun{DatabaseID: 2}, LogsPath: tmpDir}
-		skip := applyRunFilters(result, runFilterOpts{safeOutputType: "create-issue"}, false)
+		result := DownloadResult{RunAnalysis: RunAnalysis{Run: WorkflowRun{DatabaseID: 2}}, LogsPath: tmpDir}
+		skip := applyRunFilters(context.Background(), result, runFilterOpts{safeOutputType: "create-issue"}, false)
 		assert.True(t, skip)
 	})
 }
@@ -190,9 +234,9 @@ func TestApplyRunFilters_FilteredIntegrity(t *testing.T) {
 		tmpDir := t.TempDir()
 		gatewayLog := `{"timestamp":"2025-01-01T00:00:00Z","type":"DIFC_FILTERED","server_id":"github","tool_name":"create_issue","reason":"integrity"}` + "\n"
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "gateway.jsonl"), []byte(gatewayLog), 0644))
-		result := DownloadResult{Run: WorkflowRun{DatabaseID: 5}, LogsPath: tmpDir}
+		result := DownloadResult{RunAnalysis: RunAnalysis{Run: WorkflowRun{DatabaseID: 5}}, LogsPath: tmpDir}
 
-		skip := applyRunFilters(result, runFilterOpts{filteredIntegrity: true}, false)
+		skip := applyRunFilters(context.Background(), result, runFilterOpts{filteredIntegrity: true}, false)
 
 		assert.False(t, skip)
 	})
@@ -200,7 +244,7 @@ func TestApplyRunFilters_FilteredIntegrity(t *testing.T) {
 	t.Run("missing gateway logs are skipped", func(t *testing.T) {
 		result := makeDownloadResult(t, "")
 
-		skip := applyRunFilters(result, runFilterOpts{filteredIntegrity: true}, false)
+		skip := applyRunFilters(context.Background(), result, runFilterOpts{filteredIntegrity: true}, false)
 
 		assert.True(t, skip)
 	})
@@ -210,21 +254,22 @@ func TestApplyRunFilters_FilteredIntegrity(t *testing.T) {
 // the ProcessedRun fields from a DownloadResult.
 func TestBuildProcessedRun(t *testing.T) {
 	t.Run("basic fields are propagated", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(int64, bool) (int, error) { return 0, nil })
+		stubFetchJobStatusesForProcessedRun(t, func(context.Context, int64, bool) (int, error) { return 0, nil })
 		now := time.Now()
 		tmpDir := t.TempDir()
 		awCtx := &AwContext{Repo: "owner/repo"}
-		result := DownloadResult{
+		result := DownloadResult{RunAnalysis: RunAnalysis{
 			Run: WorkflowRun{
 				DatabaseID: 1234,
 				StartedAt:  now.Add(-5 * time.Minute),
 				UpdatedAt:  now,
 			},
-			LogsPath:  tmpDir,
 			AwContext: awCtx,
+		},
+			LogsPath: tmpDir,
 		}
 
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(context.Background(), result, false, false)
 
 		assert.Equal(t, int64(1234), pr.Run.DatabaseID)
 		assert.Equal(t, tmpDir, pr.Run.LogsPath)
@@ -234,70 +279,80 @@ func TestBuildProcessedRun(t *testing.T) {
 	})
 
 	t.Run("duration and action minutes are computed", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(int64, bool) (int, error) { return 0, nil })
+		stubFetchJobStatusesForProcessedRun(t, func(context.Context, int64, bool) (int, error) { return 0, nil })
 		base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-		result := DownloadResult{
+		result := DownloadResult{RunAnalysis: RunAnalysis{
 			Run: WorkflowRun{
 				DatabaseID: 999,
 				StartedAt:  base,
 				UpdatedAt:  base.Add(90 * time.Second), // 1.5 minutes
 			},
+		},
 			LogsPath: t.TempDir(),
 		}
 
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(context.Background(), result, false, false)
 
 		assert.Equal(t, 90*time.Second, pr.Run.Duration)
 		assert.InDelta(t, 2.0, pr.Run.ActionMinutes, 0.001) // ceil(1.5) = 2
 	})
 
 	t.Run("zero timestamps leave duration unset", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(int64, bool) (int, error) { return 0, nil })
-		result := DownloadResult{
-			Run:      WorkflowRun{DatabaseID: 7},
+		stubFetchJobStatusesForProcessedRun(t, func(context.Context, int64, bool) (int, error) { return 0, nil })
+		result := DownloadResult{RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{DatabaseID: 7},
+		},
 			LogsPath: t.TempDir(),
 		}
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(context.Background(), result, false, false)
 		assert.Equal(t, time.Duration(0), pr.Run.Duration)
 		assert.InDelta(t, 0.0, pr.Run.ActionMinutes, 0.001)
 	})
 
 	t.Run("effective tokens are propagated", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(int64, bool) (int, error) { return 0, nil })
+		stubFetchJobStatusesForProcessedRun(t, func(context.Context, int64, bool) (int, error) { return 0, nil })
 		usage := &TokenUsageSummary{TotalEffectiveTokens: 5000}
-		result := DownloadResult{
+		result := DownloadResult{RunAnalysis: RunAnalysis{
 			Run:        WorkflowRun{DatabaseID: 3},
-			LogsPath:   t.TempDir(),
 			TokenUsage: usage,
+		},
+			LogsPath: t.TempDir(),
 		}
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(context.Background(), result, false, false)
 		assert.Equal(t, 5000, pr.Run.EffectiveTokens)
 	})
 
 	t.Run("zero effective tokens not propagated", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(int64, bool) (int, error) { return 0, nil })
+		stubFetchJobStatusesForProcessedRun(t, func(context.Context, int64, bool) (int, error) { return 0, nil })
 		usage := &TokenUsageSummary{TotalEffectiveTokens: 0}
-		result := DownloadResult{
+		result := DownloadResult{RunAnalysis: RunAnalysis{
 			Run:        WorkflowRun{DatabaseID: 4},
-			LogsPath:   t.TempDir(),
 			TokenUsage: usage,
+		},
+			LogsPath: t.TempDir(),
 		}
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(context.Background(), result, false, false)
 		assert.Equal(t, 0, pr.Run.EffectiveTokens)
 	})
 
 	t.Run("failed job count is added via test seam", func(t *testing.T) {
-		stubFetchJobStatusesForProcessedRun(t, func(runID int64, verbose bool) (int, error) {
+		type ctxKey string
+		const key ctxKey = "request-id"
+		ctx := context.WithValue(context.Background(), key, "abc123")
+
+		stubFetchJobStatusesForProcessedRun(t, func(fetchCtx context.Context, runID int64, verbose bool) (int, error) {
 			assert.Equal(t, int64(88), runID)
 			assert.False(t, verbose)
+			assert.Equal(t, "abc123", fetchCtx.Value(key))
 			return 2, nil
 		})
-		result := DownloadResult{
-			Run:      WorkflowRun{DatabaseID: 88},
+		result := DownloadResult{RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{DatabaseID: 88},
+		},
 			LogsPath: t.TempDir(),
 		}
 
-		pr := buildProcessedRun(result, false, false)
+		pr := buildProcessedRun(ctx, result, false, false)
 
 		assert.Equal(t, 2, pr.Run.ErrorCount)
 	})

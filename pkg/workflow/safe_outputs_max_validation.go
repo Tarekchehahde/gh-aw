@@ -5,10 +5,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
-var safeOutputsMaxValidationLog = newValidationLogger("safe_outputs_max")
+var safeOutputsMaxValidationLog = logger.New("workflow:safe_outputs_max_validation")
 
 // isInvalidMaxValue returns true if n is not a valid max field value.
 // Valid values are positive integers (n > 0) or -1 (unlimited).
@@ -187,6 +188,11 @@ func validateSafeOutputsMax(config *SafeOutputsConfig) error {
 	}
 	if config.MarkPullRequestAsReadyForReview != nil {
 		if err := checkMaxField("mark_pull_request_as_ready_for_review", config.MarkPullRequestAsReadyForReview.Max); err != nil {
+			return err
+		}
+	}
+	if config.ApproveWorkflowRun != nil {
+		if err := checkMaxField("approve_workflow_run", config.ApproveWorkflowRun.Max); err != nil {
 			return err
 		}
 	}

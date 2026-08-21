@@ -24,8 +24,8 @@ network:
 
 sandbox:
   agent:
+    runtime: cloud-hypervisor
     id: awf
-    sudo: false
 imports:
   - shared/mcp/tavily.md
   - shared/reporting.md
@@ -41,6 +41,13 @@ timeout-minutes: 10
 strict: true
 tools:
   cli-proxy: true
+evals:
+  - id: discussion-created
+    question: Did the agent create a discussion with research findings?
+  - id: topic-addressed
+    question: Does the agent output confirm that the requested research topic was addressed?
+  - id: findings-substantive
+    question: Does the agent output include more than one distinct finding or data point related to the research topic?
 
 ---
 

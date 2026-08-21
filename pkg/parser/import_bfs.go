@@ -123,26 +123,21 @@ func seedInitialImportQueue(importSpecs []ImportSpec, baseDir string, cache *Imp
 
 func seedSingleImportSpec(importSpec ImportSpec, baseDir string, cache *ImportCache, workflowFilePath string, yamlContent string, state *importBFSState) error {
 	importPath := importSpec.Path
-	if isRepositoryImport(importPath) {
-		parserLog.Printf("Detected repository import: %s", importPath)
-		state.acc.repositoryImports = append(state.acc.repositoryImports, importPath)
-		return nil
-	}
-	filePath, sectionName := splitImportPathAndSection(importPath)
+	filePath, sectionName := splitPathAndSection(importPath)
 	fullPath, err := resolveSeedImportPath(filePath, importPath, baseDir, cache, workflowFilePath, yamlContent)
+	if err != nil {
+		if isRepositoryImport(importPath) {
+			parserLog.Printf("Detected repository import: %s", importPath)
+			state.acc.repositoryImports = append(state.acc.repositoryImports, importPath)
+			return nil
+		}
+		return err
+	}
+	origin, err := detectRemoteImportOrigin(filePath)
 	if err != nil {
 		return err
 	}
-	origin := detectRemoteImportOrigin(filePath)
 	return enqueueImportPath(state, importPath, fullPath, sectionName, baseDir, importSpec.Inputs, origin)
-}
-
-func splitImportPathAndSection(importPath string) (string, string) {
-	if strings.Contains(importPath, "#") {
-		parts := strings.SplitN(importPath, "#", 2)
-		return parts[0], parts[1]
-	}
-	return importPath, ""
 }
 
 func resolveSeedImportPath(filePath, importPath, baseDir string, cache *ImportCache, workflowFilePath string, yamlContent string) (string, error) {
@@ -184,15 +179,18 @@ func validateNoLockYMLImport(fullPath, importPath, workflowFilePath, yamlContent
 	return fmt.Errorf("cannot import .lock.yml files: '%s'. Lock files are compiled outputs from gh-aw. Import the source .md file instead", importPath)
 }
 
-func detectRemoteImportOrigin(filePath string) *remoteImportOrigin {
+func detectRemoteImportOrigin(filePath string) (*remoteImportOrigin, error) {
 	if !IsWorkflowSpec(filePath) {
-		return nil
+		return nil, nil
 	}
-	origin := parseRemoteOrigin(filePath)
+	origin, err := parseRemoteOrigin(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workflowspec ref in %q: %w", filePath, err)
+	}
 	if origin != nil {
 		importLog.Printf("Tracking remote origin for workflowspec: %s/%s@%s", origin.Owner, origin.Repo, origin.Ref)
 	}
-	return origin
+	return origin, nil
 }
 
 func enqueueImportPath(state *importBFSState, importPath, fullPath, sectionName, baseDir string, inputs map[string]any, origin *remoteImportOrigin) error {
@@ -393,7 +391,7 @@ func nestedEntriesFromSpecs(specs []ImportSpec) []nestedImportEntry {
 
 func enqueueNestedImportEntry(entry nestedImportEntry, item importQueueItem, baseDir string, cache *ImportCache, workflowFilePath string, yamlContent string, state *importBFSState) error {
 	nestedImportPath := entry.path
-	nestedFilePath, nestedSectionName := splitImportPathAndSection(nestedImportPath)
+	nestedFilePath, nestedSectionName := splitPathAndSection(nestedImportPath)
 	resolvedPath, nestedRemoteOrigin, err := resolveNestedImportPathAndOrigin(item, nestedFilePath)
 	if err != nil {
 		return err
@@ -412,7 +410,10 @@ func resolveNestedImportPathAndOrigin(item importQueueItem, nestedFilePath strin
 		return resolveRemoteNestedPath(item, nestedFilePath)
 	}
 	if IsWorkflowSpec(nestedFilePath) {
-		nestedRemoteOrigin := parseRemoteOrigin(nestedFilePath)
+		nestedRemoteOrigin, err := parseRemoteOrigin(nestedFilePath)
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid workflowspec ref in %q: %w", nestedFilePath, err)
+		}
 		if nestedRemoteOrigin != nil {
 			importLog.Printf("Nested workflowspec import detected: %s (origin: %s/%s@%s)", nestedFilePath, nestedRemoteOrigin.Owner, nestedRemoteOrigin.Repo, nestedRemoteOrigin.Ref)
 		}
@@ -433,7 +434,10 @@ func resolveRemoteNestedPath(item importQueueItem, nestedFilePath string) (strin
 	basePath = path.Clean(basePath)
 	resolvedPath := fmt.Sprintf("%s/%s/%s/%s@%s",
 		item.remoteOrigin.Owner, item.remoteOrigin.Repo, basePath, cleanPath, item.remoteOrigin.Ref)
-	nestedRemoteOrigin := parseRemoteOrigin(resolvedPath)
+	nestedRemoteOrigin, err := parseRemoteOrigin(resolvedPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid workflowspec ref in %q: %w", resolvedPath, err)
+	}
 	importLog.Printf("Resolving nested import as remote workflowspec: %s -> %s (basePath=%s)", nestedFilePath, resolvedPath, basePath)
 	return resolvedPath, nestedRemoteOrigin, nil
 }

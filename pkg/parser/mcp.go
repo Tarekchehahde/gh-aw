@@ -44,6 +44,10 @@ type RegistryMCPServerConfig struct {
 	Registry  string   `json:"registry"`   // URI to installation location from registry
 	ProxyArgs []string `json:"proxy-args"` // custom proxy arguments for container-based tools
 	Allowed   []string `json:"allowed"`    // allowed tools
+
+	// Gateway startup behavior: when Required is explicitly false the server is optional
+	// and startup failures degrade to warnings. nil means the default (required).
+	Required *bool `json:"required,omitempty"`
 }
 
 // MCPServerInfo contains the inspection results for an MCP server
@@ -53,7 +57,14 @@ type MCPServerInfo struct {
 	Error     error
 	Tools     []*mcp.Tool
 	Resources []*mcp.Resource
-	Roots     []*mcp.Root
+	Prompts   []*mcp.Prompt
+	Roots     []*MCPRootInfo
+}
+
+// MCPRootInfo contains inspection-only root display data inferred from resources.
+type MCPRootInfo struct {
+	URI  string
+	Name string
 }
 
 // ExtractMCPConfigurations extracts MCP server configurations from workflow frontmatter

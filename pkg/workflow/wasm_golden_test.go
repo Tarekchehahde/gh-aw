@@ -20,6 +20,55 @@ var testContainerPinRE = regexp.MustCompile(`@sha256:[0-9a-f]{64}`)
 var testAWFImageTagDigestRE = regexp.MustCompile(`,[a-z-]+=sha256:[0-9a-f]{64}`)
 var testProjectUTCEnvLineRE = regexp.MustCompile(`(?m)^\s*GH_AW_PROJECT_UTC:.*(?:\r?\n|$)`)
 
+// testAWFConfigPayloadRE matches the entire AWF config JSON payload written to awf-config.json.
+// The JSON contains model aliases, domain allowlists, and a container image tag that all change
+// frequently as new models and domains are added. Normalizing the entire payload keeps golden
+// fixtures stable without masking structural changes to the surrounding shell command.
+var testAWFConfigPayloadRE = regexp.MustCompile(`(printf '%s\\n' ")(\{.*\})(" > "\$\{RUNNER_TEMP\}/gh-aw/awf-config\.json")`)
+var testDefaultAWFInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AWF_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultFirewallVersion)) + `"`)
+var testDefaultAWFGatewayInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AWMG_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultMCPGatewayVersion)) + `"`)
+var testDefaultAWFInstallVersionRE = regexp.MustCompile(`(install_awf_binary\.sh"\s+)` + regexp.QuoteMeta(string(constants.DefaultFirewallVersion)) + `\b`)
+var testDefaultAWFImageRE = regexp.MustCompile(`(ghcr\.io/github/gh-aw-firewall/(?:agent|api-proxy|cli-proxy|squid):)` + regexp.QuoteMeta(strings.TrimPrefix(string(constants.DefaultFirewallVersion), "v")) + `\b`)
+var testDefaultAWFSchemaURLRE = regexp.MustCompile(`(releases/download/)` + regexp.QuoteMeta(string(constants.DefaultFirewallVersion)) + `(/awf-config\.schema\.json)`)
+var testDefaultAWFImageTagRE = regexp.MustCompile(`("imageTag"\s*:\s*")(?:v)?` + regexp.QuoteMeta(strings.TrimPrefix(string(constants.DefaultFirewallVersion), "v")) + `"`)
+var testDefaultMCPGImageRE = regexp.MustCompile(`(ghcr\.io/github/gh-aw-mcpg:)` + regexp.QuoteMeta(string(constants.DefaultMCPGatewayVersion)) + `\b`)
+var testDefaultGitHubMCPServerImageRE = regexp.MustCompile(`(ghcr\.io/github/github-mcp-server:)` + regexp.QuoteMeta(string(constants.DefaultGitHubMCPServerVersion)) + `\b`)
+var testDefaultClaudeInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultClaudeCodeVersion)) + `"`)
+var testDefaultClaudeAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultClaudeCodeVersion)) + `"`)
+var testDefaultClaudeInstallVersionRE = regexp.MustCompile(`(@anthropic-ai/claude-code@)` + regexp.QuoteMeta(string(constants.DefaultClaudeCodeVersion)) + `\b`)
+var testDefaultCopilotInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCopilotVersion)) + `"`)
+var testDefaultCopilotAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCopilotVersion)) + `"`)
+var testDefaultCodexInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `"`)
+var testDefaultCodexAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `"`)
+var testDefaultCodexInstallVersionRE = regexp.MustCompile(`(@openai/codex@)` + regexp.QuoteMeta(string(constants.DefaultCodexVersion)) + `\b`)
+var testDefaultPiInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultPiVersion)) + `"`)
+var testDefaultPiAgentInfoVersionRE = regexp.MustCompile(`GH_AW_INFO_AGENT_VERSION: "` + regexp.QuoteMeta(string(constants.DefaultPiVersion)) + `"`)
+var testDefaultPiInstallVersionRE = regexp.MustCompile(`(@earendil-works/pi-coding-agent@)` + regexp.QuoteMeta(string(constants.DefaultPiVersion)) + `\b`)
+var testCheckoutPinRE = regexp.MustCompile(`actions/checkout@[0-9a-f]{40}\s+#\s+v\d+\.\d+\.\d+`)
+
+func normalizeDefaultRuntimeVersions(content string) string {
+	normalized := testDefaultAWFInfoVersionRE.ReplaceAllString(content, `GH_AW_INFO_AWF_VERSION: "vAWF_VERSION"`)
+	normalized = testDefaultAWFGatewayInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AWMG_VERSION: "vMCPG_VERSION"`)
+	normalized = testDefaultAWFInstallVersionRE.ReplaceAllString(normalized, `${1}vAWF_VERSION`)
+	normalized = testDefaultAWFImageRE.ReplaceAllString(normalized, `${1}AWF_VERSION`)
+	normalized = testDefaultAWFSchemaURLRE.ReplaceAllString(normalized, `${1}vAWF_VERSION$2`)
+	normalized = testDefaultAWFImageTagRE.ReplaceAllString(normalized, `${1}AWF_VERSION"`)
+	normalized = testDefaultClaudeInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "CLAUDE_VERSION"`)
+	normalized = testDefaultClaudeAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "CLAUDE_VERSION"`)
+	normalized = testDefaultClaudeInstallVersionRE.ReplaceAllString(normalized, `${1}CLAUDE_VERSION`)
+	normalized = testDefaultCopilotInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
+	normalized = testDefaultCopilotAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	normalized = testDefaultCodexInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "CODEX_VERSION"`)
+	normalized = testDefaultCodexAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "CODEX_VERSION"`)
+	normalized = testDefaultCodexInstallVersionRE.ReplaceAllString(normalized, `${1}CODEX_VERSION`)
+	normalized = testDefaultCopilotInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
+	normalized = testDefaultCopilotAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	normalized = testDefaultPiInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_VERSION: "PI_VERSION"`)
+	normalized = testDefaultPiAgentInfoVersionRE.ReplaceAllString(normalized, `GH_AW_INFO_AGENT_VERSION: "PI_VERSION"`)
+	normalized = testDefaultPiInstallVersionRE.ReplaceAllString(normalized, `${1}PI_VERSION`)
+	return testDefaultMCPGImageRE.ReplaceAllString(normalized, `${1}MCPG_VERSION`)
+}
+
 // normalizeOutput applies all stable-comparison normalizations to compiled workflow output
 // before golden comparison: heredoc delimiter normalization and container pin normalization.
 // Mirrors normalize() in scripts/test-wasm-golden.mjs.
@@ -27,15 +76,87 @@ func normalizeOutput(content string) string {
 	normalized := testContainerPinRE.ReplaceAllString(normalizeHeredocDelimiters(content), "")
 	// Keep golden fixtures stable across native-vs-wasm GH_AW_PROJECT_UTC emission differences.
 	normalized = testProjectUTCEnvLineRE.ReplaceAllString(normalized, "")
+	// Keep golden fixtures stable across claude default model fallback updates.
+	normalized = strings.ReplaceAll(normalized, fmt.Sprintf("|| '%s'", constants.SonnetDefaultModel), "|| 'default'")
 	// Keep golden fixtures stable across copilot default model fallback updates.
 	normalized = strings.ReplaceAll(normalized, fmt.Sprintf("|| '%s'", constants.CopilotBYOKDefaultModel), "|| 'default'")
+	// Keep golden fixtures stable across claude default model fallback updates.
+	normalized = strings.ReplaceAll(normalized, fmt.Sprintf("|| '%s'", constants.SonnetDefaultModel), "|| 'default'")
 	// Keep golden fixtures stable across codex default model fallback updates.
 	normalized = strings.ReplaceAll(normalized, fmt.Sprintf("|| '%s'", constants.CodexDefaultModel), "|| 'default'")
 	// Keep golden fixtures stable across temporary workspace-path allowlist shape changes.
 	for _, op := range []string{"Edit", "MultiEdit", "Read", "Write"} {
 		normalized = strings.ReplaceAll(normalized, op+"(/tmp/gh-aw/*)", op+"(/tmp/gh-aw/agent/*)")
 	}
+	normalized = normalizeDefaultRuntimeVersions(normalized)
+	normalized = testDefaultGitHubMCPServerImageRE.ReplaceAllString(normalized, `${1}GH_MCP_VERSION`)
+	normalized = testCheckoutPinRE.ReplaceAllString(normalized, "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1")
+	// Keep golden fixtures stable across AWF config payload changes (model aliases, domain
+	// allowlists, container image tags). The entire JSON body is replaced with a stable
+	// placeholder so that model/domain additions don't break golden comparisons.
+	normalized = testAWFConfigPayloadRE.ReplaceAllString(normalized, `${1}AWF_CONFIG_PAYLOAD${3}`)
 	return testAWFImageTagDigestRE.ReplaceAllString(normalized, "")
+}
+
+func TestNormalizeOutput_DefaultRuntimeVersions(t *testing.T) {
+	input := strings.Join([]string{
+		`GH_AW_INFO_AWF_VERSION: "` + string(constants.DefaultFirewallVersion) + `"`,
+		`GH_AW_INFO_AWMG_VERSION: "` + string(constants.DefaultMCPGatewayVersion) + `"`,
+		`run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" ` + string(constants.DefaultFirewallVersion) + ` --rootless`,
+		`run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:` + strings.TrimPrefix(string(constants.DefaultFirewallVersion), "v") + ` ghcr.io/github/gh-aw-firewall/api-proxy:` + strings.TrimPrefix(string(constants.DefaultFirewallVersion), "v") + ` ghcr.io/github/gh-aw-mcpg:` + string(constants.DefaultMCPGatewayVersion),
+		`{"schema":"https://github.com/github/gh-aw-firewall/releases/download/` + string(constants.DefaultFirewallVersion) + `/awf-config.schema.json","imageTag":"` + string(constants.DefaultFirewallVersion) + `"}`,
+		`GH_AW_MODEL_DETECTION_CLAUDE: ${{ vars.GH_AW_MODEL_DETECTION_CLAUDE || vars.GH_AW_DEFAULT_MODEL_CLAUDE || '` + constants.SonnetDefaultModel + `' }}`,
+		`GH_AW_INFO_VERSION: "` + string(constants.DefaultClaudeCodeVersion) + `"`,
+		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultClaudeCodeVersion) + `"`,
+		`run: npm install -g @anthropic-ai/claude-code@` + string(constants.DefaultClaudeCodeVersion),
+		`GH_AW_INFO_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
+		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
+		`GH_AW_INFO_VERSION: "` + string(constants.DefaultCodexVersion) + `"`,
+		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCodexVersion) + `"`,
+		`GH_AW_INFO_VERSION: "` + string(constants.DefaultPiVersion) + `"`,
+		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultPiVersion) + `"`,
+		`GH_AW_INFO_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
+		`GH_AW_INFO_AGENT_VERSION: "` + string(constants.DefaultCopilotVersion) + `"`,
+		`run: npm install --ignore-scripts -g @openai/codex@` + string(constants.DefaultCodexVersion),
+		`run: npm install --ignore-scripts -g @earendil-works/pi-coding-agent@` + string(constants.DefaultPiVersion),
+		`{"pinnedAwf":"v0.5.0","pinnedAwfImage":"ghcr.io/github/gh-aw-firewall/agent:0.5.0","pinnedMcpgImage":"ghcr.io/github/gh-aw-mcpg:v0.0.12"}`,
+	}, "\n")
+
+	normalized := normalizeOutput(input)
+
+	require.Contains(t, normalized, `GH_AW_INFO_AWF_VERSION: "vAWF_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AWMG_VERSION: "vMCPG_VERSION"`)
+	require.Contains(t, normalized, `install_awf_binary.sh" vAWF_VERSION --rootless`)
+	require.Contains(t, normalized, `ghcr.io/github/gh-aw-firewall/agent:AWF_VERSION`)
+	require.Contains(t, normalized, `ghcr.io/github/gh-aw-firewall/api-proxy:AWF_VERSION`)
+	require.Contains(t, normalized, `ghcr.io/github/gh-aw-mcpg:MCPG_VERSION`)
+	require.Contains(t, normalized, `releases/download/vAWF_VERSION/awf-config.schema.json`)
+	require.Contains(t, normalized, `"imageTag":"AWF_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_MODEL_DETECTION_CLAUDE: ${{ vars.GH_AW_MODEL_DETECTION_CLAUDE || vars.GH_AW_DEFAULT_MODEL_CLAUDE || 'default' }}`)
+	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "CLAUDE_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "CLAUDE_VERSION"`)
+	require.Contains(t, normalized, `@anthropic-ai/claude-code@CLAUDE_VERSION`)
+	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "CODEX_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "CODEX_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "PI_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "PI_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_VERSION: "COPILOT_VERSION"`)
+	require.Contains(t, normalized, `GH_AW_INFO_AGENT_VERSION: "COPILOT_VERSION"`)
+	require.Contains(t, normalized, `@openai/codex@CODEX_VERSION`)
+	require.Contains(t, normalized, `@earendil-works/pi-coding-agent@PI_VERSION`)
+	require.Contains(t, normalized, `"pinnedAwf":"v0.5.0"`)
+	require.Contains(t, normalized, `"pinnedAwfImage":"ghcr.io/github/gh-aw-firewall/agent:0.5.0"`)
+	require.Contains(t, normalized, `"pinnedMcpgImage":"ghcr.io/github/gh-aw-mcpg:v0.0.12"`)
+	require.NotContains(t, normalized, string(constants.DefaultFirewallVersion))
+	require.NotContains(t, normalized, string(constants.DefaultMCPGatewayVersion))
+	require.NotContains(t, normalized, constants.SonnetDefaultModel)
+	require.NotContains(t, normalized, string(constants.DefaultClaudeCodeVersion))
+	require.NotContains(t, normalized, string(constants.DefaultCopilotVersion))
+	require.NotContains(t, normalized, string(constants.DefaultCodexVersion))
+	require.NotContains(t, normalized, string(constants.DefaultPiVersion))
+	require.NotContains(t, normalized, string(constants.DefaultCopilotVersion))
 }
 
 // TestWasmGolden_CompileFixtures compiles each workflow fixture using the string API
@@ -167,7 +288,7 @@ env:
   ALPHA_WORKFLOW: alpha
 steps:
   - name: Deterministic uses step
-    uses: actions/cache/restore@v4
+    uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
     with:
       zeta-input: zeta
       alpha-input: alpha
@@ -346,6 +467,10 @@ Test the %s engine compilation path.
 
 			yamlOutput, err := compiler.CompileToYAML(wd, "workflow.md")
 			require.NoError(t, err, "%s engine compile failed", eng.name)
+
+			if eng.name == "pi" {
+				require.Contains(t, yamlOutput, "PI_OFFLINE: 1")
+			}
 
 			// Keep codex golden stable across branches where CODEX_API_KEY/OPENAI_API_KEY
 			// may or may not be explicitly excluded in gh-aw firewall args.

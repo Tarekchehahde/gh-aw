@@ -9,6 +9,13 @@ const ruleTester = new RuleTester({
   },
 });
 
+const esmRuleTester = new RuleTester({
+  languageOptions: {
+    ecmaVersion: 2022,
+    sourceType: "module",
+  },
+});
+
 describe("require-return-after-core-setfailed", () => {
   it("uses the correct docs URL", () => {
     expect(requireReturnAfterCoreSetFailedRule.meta.docs.url).toBe("https://github.com/github/gh-aw/tree/main/eslint-factory#require-return-after-core-setfailed");
@@ -26,6 +33,7 @@ describe("require-return-after-core-setfailed", () => {
         `switch (x) { case "a": core.setFailed("bad"); break; }`,
         // setFailed is the last statement in the block — no next statement to check
         `function f() { core.setFailed("bad"); }`,
+        `function f() { if (x) core.setFailed("bad"); }`,
         `function f() { if (x) { core.setFailed("bad"); } }`,
         // setFailed has a return inside the if-block; outer doMore() is not reached via setFailed path
         `function f() { if (x) { core.setFailed("bad"); return; } doMore(); }`,
@@ -46,18 +54,19 @@ describe("require-return-after-core-setfailed", () => {
       valid: [],
       invalid: [
         {
-          code: `function f() { core.setFailed("bad"); doMore(); }`,
-          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { core.setFailed("bad"); return; doMore(); }` }] }],
+          code: `function f() { core.setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { core.setFailed("bad"); return; doMore(); keepGoing(); }` }] }],
         },
         {
-          code: `function f() { if (x) { core.setFailed("bad"); doMore(); } }`,
-          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { if (x) { core.setFailed("bad"); return; doMore(); } }` }] }],
+          code: `function f() { if (x) { core.setFailed("bad"); doMore(); keepGoing(); } }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { if (x) { core.setFailed("bad"); return; doMore(); keepGoing(); } }` }] }],
         },
         {
           code: `function f() {
   if (x) {
     core.setFailed("bad"); // keep with setFailed
     doMore();
+    keepGoing();
   }
 }`,
           errors: [
@@ -71,12 +80,24 @@ describe("require-return-after-core-setfailed", () => {
     core.setFailed("bad"); // keep with setFailed
     return;
     doMore();
+    keepGoing();
   }
 }`,
                 },
               ],
             },
           ],
+        },
+        {
+          code: `function f() {
+  try {
+    ok();
+  } catch (e) {
+    core.setFailed("bad");
+    core.setOutput("locked", "false");
+  }
+}`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: undefined }],
         },
         {
           code: `function f() {
@@ -175,6 +196,34 @@ doMore();`,
     });
   });
 
+  it("invalid: braceless control bodies with continuation", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `function f() { if (bad) core.setFailed("x"); doMore(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { if (bad) { core.setFailed("x"); return; } doMore(); }` }] }],
+        },
+        {
+          code: `function f() { if (bad) return; else core["setFailed"]("x"); doMore(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { if (bad) return; else { core["setFailed"]("x"); return; } doMore(); }` }] }],
+        },
+        {
+          code: `const c = core; function f() { if (bad) c.setFailed("x"); doMore(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const c = core; function f() { if (bad) { c.setFailed("x"); return; } doMore(); }` }] }],
+        },
+        {
+          code: `const { setFailed } = core; function f() { for (const file of files) setFailed(file); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const { setFailed } = core; function f() { for (const file of files) { setFailed(file); return; } }` }] }],
+        },
+        {
+          code: `function f() { for (const file of files) if (!ok(file)) core.setFailed(file); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { for (const file of files) if (!ok(file)) { core.setFailed(file); return; } }` }] }],
+        },
+      ],
+    });
+  });
+
   it("valid: continue after setFailed is accepted — known limitation: does not stop post-loop execution", () => {
     ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
       valid: [
@@ -185,6 +234,335 @@ doMore();`,
         `for (const x of items) { core.setFailed(err); continue; }`,
       ],
       invalid: [],
+    });
+  });
+
+  it('valid: computed core["setFailed"] followed by return', () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [`function f() { core["setFailed"]("bad"); return; }`, `function f() { core["setFailed"]("bad"); throw new Error("bad"); }`, `function f() { core["setFailed"]("bad"); }`],
+      invalid: [],
+    });
+  });
+
+  it('invalid: computed core["setFailed"] without control transfer', () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `function f() { core["setFailed"]("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f() { core["setFailed"]("bad"); return; doMore(); keepGoing(); }` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: aliased core object with return", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        `const c = core; function f() { c.setFailed("bad"); return; }`,
+        `const c = core; function f() { c.setFailed("bad"); }`,
+        // computed form via alias
+        `const c = core; function f() { c["setFailed"]("bad"); return; }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: aliased core object without control transfer", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const c = core; function f() { c.setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const c = core; function f() { c.setFailed("bad"); return; doMore(); keepGoing(); }` }] }],
+        },
+        {
+          code: `const c = core; function f() { c["setFailed"]("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const c = core; function f() { c["setFailed"]("bad"); return; doMore(); keepGoing(); }` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: destructured setFailed from core with return", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        `const { setFailed } = core; function f() { setFailed("bad"); return; }`,
+        `const { setFailed } = core; function f() { setFailed("bad"); }`,
+        // renamed destructuring
+        `const { setFailed: sf } = core; function f() { sf("bad"); return; }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: destructured setFailed from core without control transfer", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { setFailed } = core; function f() { setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const { setFailed } = core; function f() { setFailed("bad"); return; doMore(); keepGoing(); }` }] }],
+        },
+        {
+          code: `const { setFailed: sf } = core; function f() { sf("bad"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `const { setFailed: sf } = core; function f() { sf("bad"); return; doMore(); keepGoing(); }` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: braceless if consequent with no continuation", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // No statement after the if — nothing to continue into
+        `function f() { if (bad) core.setFailed("x"); }`,
+        // Braced consequent with return, followed by doMore — already correctly valid
+        `function f() { if (bad) { core.setFailed("x"); return; } doMore(); }`,
+        // Braceless if at end of block — no continuation
+        `function f() { doSomething(); if (bad) core.setFailed("x"); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: locally-shadowed setFailed bindings are not flagged", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // Local function declaration shadows — not a core binding
+        `function setFailed(msg) {} function f() { setFailed("bad"); doMore(); }`,
+        // Local const not from core — not a core binding
+        `const setFailed = (msg) => {}; function f() { setFailed("bad"); doMore(); }`,
+        // Aliased object not from core
+        `const c = other; function f() { c.setFailed("bad"); doMore(); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: function parameter with core-alias name and no continuation is accepted", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // DI pattern — parameter named `core` with return
+        `function g(core) { core.setFailed("x"); return; }`,
+        // DI pattern — setFailed is the last statement, no next statement
+        `function g(core) { core.setFailed("x"); }`,
+        // DI pattern — coreObj alias as parameter
+        `function g(coreObj) { coreObj.setFailed("x"); return; }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: function parameter with core-alias name missing control transfer", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          // single trailing call → isBlockTerminalCallCleanup suppresses suggestion (same as existing tests)
+          code: `function g(core) { core.setFailed("x"); doMore(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: undefined }],
+        },
+        {
+          code: `function g(core) { core.setFailed("x"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function g(core) { core.setFailed("x"); return; doMore(); keepGoing(); }` }] }],
+        },
+        {
+          code: `function g(coreObj) { coreObj.setFailed("x"); doMore(); keepGoing(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function g(coreObj) { coreObj.setFailed("x"); return; doMore(); keepGoing(); }` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: function parameter not in CORE_ALIASES is not treated as core (shadow-exclusion)", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // `coreArg` is not in CORE_ALIASES — should not be treated as a core object
+        `function g(coreArg) { coreArg.setFailed("x"); doMore(); }`,
+        // Arbitrary parameter name
+        `function g(myCore) { myCore.setFailed("x"); doMore(); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: trailing hoisted function declaration is not a continuation (FP fix)", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // FunctionDeclaration is hoisted and has no sequential runtime effect
+        `core.setFailed("bad"); function helper() {}`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: JSDoc-annotated DI parameter with control transfer is accepted", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // Corpus case: coreArg annotated with typeof import('@actions/core'), throw follows
+        `/** @param {typeof import('@actions/core')} coreArg */
+async function validateContextVariables(coreArg, ctx) {
+  coreArg.setFailed("bad");
+  throw new Error("bad");
+}`,
+        // return follows setFailed
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setFailed("x"); return; }`,
+        // setFailed is the last statement in the block — nothing to continue into
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setFailed("x"); }`,
+        // coreLib as a differently-named parameter
+        `/** @param {typeof import('@actions/core')} coreLib */
+function f(coreLib) { coreLib.setFailed("x"); return; }`,
+        // double-quote variant of the JSDoc type annotation
+        `/** @param {typeof import("@actions/core")} coreArg */
+function f(coreArg) { coreArg.setFailed("x"); return; }`,
+        // un-annotated parameter with the same name must NOT be treated as core
+        // (the rule should not fire because coreArg is not recognised as core)
+        `function f(coreArg) { coreArg.setFailed("x"); doMore(); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: JSDoc-annotated DI parameter missing control transfer is flagged", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+async function f(coreArg, ctx) { coreArg.setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [
+            {
+              messageId: "missingReturnAfterSetFailed",
+              suggestions: [
+                {
+                  messageId: "addReturn",
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+async function f(coreArg, ctx) { coreArg.setFailed("bad"); return; doMore(); keepGoing(); }`,
+                },
+              ],
+            },
+          ],
+        },
+        {
+          code: `/** @param {typeof import('@actions/core')} coreLib */
+function g(coreLib) { coreLib.setFailed("x"); doMore(); keepGoing(); }`,
+          errors: [
+            {
+              messageId: "missingReturnAfterSetFailed",
+              suggestions: [
+                {
+                  messageId: "addReturn",
+                  output: `/** @param {typeof import('@actions/core')} coreLib */
+function g(coreLib) { coreLib.setFailed("x"); return; doMore(); keepGoing(); }`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: export async function with JSDoc-annotated DI parameter is accepted (ESM)", () => {
+    esmRuleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // export async function — JSDoc is before the ExportNamedDeclaration, not the inner FunctionDeclaration
+        `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setFailed("x"); return; }`,
+        `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setFailed("x"); throw new Error("x"); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: export async function with JSDoc-annotated DI parameter missing control transfer is flagged (ESM)", () => {
+    esmRuleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        // export async function — JSDoc is before the ExportNamedDeclaration
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [
+            {
+              messageId: "missingReturnAfterSetFailed",
+              suggestions: [
+                {
+                  messageId: "addReturn",
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setFailed("bad"); return; doMore(); keepGoing(); }`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: JSDoc-annotated DI param destructuring with control transfer is accepted", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // Destructured setFailed from JSDoc-annotated coreArg with throw
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setFailed } = coreArg; setFailed("x"); throw new Error("x"); }`,
+        // Destructured setFailed with return
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setFailed } = coreArg; setFailed("x"); return; }`,
+        // Destructured setFailed as last statement in block
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setFailed } = coreArg; setFailed("x"); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: JSDoc-annotated DI param destructuring missing control transfer is flagged", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setFailed } = coreArg; setFailed("bad"); doMore(); keepGoing(); }`,
+          errors: [
+            {
+              messageId: "missingReturnAfterSetFailed",
+              suggestions: [
+                {
+                  messageId: "addReturn",
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setFailed } = coreArg; setFailed("bad"); return; doMore(); keepGoing(); }`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: bare switch-case fall-through after setFailed is flagged (FN fix)", () => {
+    ruleTester.run("require-return-after-core-setfailed", requireReturnAfterCoreSetFailedRule, {
+      valid: [
+        // Terminating break prevents fall-through — must remain valid
+        `switch (x) { case 1: core.setFailed("bad"); break; case 2: doMore(); }`,
+        // Fall-through to a case that only contains hoisted declarations — no executable continuation
+        `switch (x) { case 1: core.setFailed("bad"); case 2: function helper() {} }`,
+      ],
+      invalid: [
+        {
+          code: `switch (x) { case 1: core.setFailed("bad"); case 2: doMore(); }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed" }],
+        },
+        {
+          code: `function f(x) { switch (x) { case 1: core.setFailed("bad"); case 2: doMore(); } }`,
+          errors: [{ messageId: "missingReturnAfterSetFailed", suggestions: [{ messageId: "addReturn", output: `function f(x) { switch (x) { case 1: core.setFailed("bad"); return; case 2: doMore(); } }` }] }],
+        },
+      ],
     });
   });
 });

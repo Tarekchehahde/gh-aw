@@ -20,6 +20,10 @@ on:
 
 `ready_for_review` starts review when drafts become reviewable. Centralized routing handles both PR comments and review comments via one entrypoint.
 
+When workflows are attached to repository rulesets as required checks, also include
+`opened`, `synchronize`, and `reopened` to ensure the check reruns on new commits
+and stays green as code changes.
+
 ## Safe Outputs
 
 - `create-pull-request-review-comment` — line-level feedback
@@ -28,6 +32,21 @@ on:
 - `update-pull-request-review` — amend an existing review
 
 Keep `max` caps conservative to avoid runaway reviews.
+
+## Default Review Events: No APPROVE
+
+**The GitHub Actions actor (`GITHUB_TOKEN`) cannot `APPROVE` a pull request. It can post `COMMENT` and `REQUEST_CHANGES` reviews.**
+
+By default, configure `submit-pull-request-review` with `allowed-events: [COMMENT, REQUEST_CHANGES]` to enforce this constraint:
+
+```yaml
+safe-outputs:
+  submit-pull-request-review:
+    max: 1
+    allowed-events: [COMMENT, REQUEST_CHANGES]
+```
+
+Do not instruct the agent to approve a PR unless the workflow uses a PAT or app token with explicit pull-request approval permissions. Using `APPROVE` with the default `GITHUB_TOKEN` will fail at runtime.
 
 ## Integrity and GitHub Tool Access
 
@@ -41,6 +60,12 @@ tools:
 - Prefer `pull_requests` for reviewer operations.
 - Add `issues` only when interacting with issue-style comment surfaces or cross-links.
 - Use the lowest `min-integrity` that supports the required actions.
+
+## Ruleset Compatibility
+
+- Keep workflow and job names stable so required-check rulesets keep matching after updates.
+- If imports are used, set `inlined-imports: true` to avoid runtime import failures in ruleset execution contexts.
+- For bot-based reviewers, prefer `allowed-events: [COMMENT, REQUEST_CHANGES]` unless you intentionally provide elevated approval credentials.
 
 ## Examples
 

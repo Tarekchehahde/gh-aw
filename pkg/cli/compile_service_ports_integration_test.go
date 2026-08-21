@@ -13,6 +13,7 @@ import (
 // TestCompileServicePortsWorkflow compiles the canonical test-service-ports.md workflow
 // and verifies that the generated lock file contains --allow-host-service-ports with the
 // correct ${{ job.services['<id>'].ports['<port>'] }} expressions for every service port.
+// The fixture opts into legacy-security because service-port passthrough requires host access.
 func TestCompileServicePortsWorkflow(t *testing.T) {
 	setup := setupIntegrationTest(t)
 	defer setup.cleanup()
@@ -99,6 +100,54 @@ This workflow has no services block and should not include --allow-host-service-
 	}
 }
 
+// TestCompileServicePorts_StrictModeWithServices verifies that a workflow with services
+// publishing ports is rejected unless it opts into the privileged
+// sandbox.agent.runtime: docker-sudo-iptables profile, which is the only runtime where
+// the agent can reach service containers.
+func TestCompileServicePorts_StrictModeWithServices(t *testing.T) {
+	setup := setupIntegrationTest(t)
+	defer setup.cleanup()
+
+	testWorkflow := `---
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+engine: copilot
+services:
+  redis:
+    image: redis:7
+    ports:
+      - 6379:6379
+---
+
+# Strict Services Workflow
+
+This workflow has services with published ports but keeps the default runtime, so it
+should fail to compile.
+`
+	testPath := filepath.Join(setup.workflowsDir, "strict-services.md")
+	if err := os.WriteFile(testPath, []byte(testWorkflow), 0644); err != nil {
+		t.Fatalf("Failed to write workflow: %v", err)
+	}
+
+	cmd := exec.Command(setup.binaryPath, "compile", testPath)
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+	if err == nil {
+		t.Fatalf("Compile should have failed for services with published ports on the default runtime\nOutput: %s", outputStr)
+	}
+
+	if !strings.Contains(outputStr, "docker-sudo-iptables") {
+		t.Errorf("Error output should mention the docker-sudo-iptables runtime requirement\nOutput: %s", outputStr)
+	}
+
+	lockFilePath := filepath.Join(setup.workflowsDir, "strict-services.lock.yml")
+	if _, err := os.Stat(lockFilePath); err == nil {
+		t.Errorf("Lock file should not be generated when compilation fails")
+	}
+}
+
 // TestCompileServicePorts_HyphenatedServiceID verifies that service IDs containing
 // hyphens are emitted with bracket notation (not dot notation) in the compiled lock file.
 func TestCompileServicePorts_HyphenatedServiceID(t *testing.T) {
@@ -111,6 +160,9 @@ on:
 permissions:
   contents: read
 engine: copilot
+sandbox:
+  agent:
+    runtime: docker-sudo-iptables
 services:
   my-postgres:
     image: postgres:15

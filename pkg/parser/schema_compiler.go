@@ -11,10 +11,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/syncutil"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -35,86 +35,75 @@ var awManifestSchema string
 // validateWithSchema validates frontmatter against a JSON schema
 // Cached compiled schemas to avoid recompiling on every validation
 var (
-	mainWorkflowSchemaOnce sync.Once
-	mcpConfigSchemaOnce    sync.Once
-	repoConfigSchemaOnce   sync.Once
-	awManifestSchemaOnce   sync.Once
-
-	compiledMainWorkflowSchema *jsonschema.Schema
-	compiledMcpConfigSchema    *jsonschema.Schema
-	compiledRepoConfigSchema   *jsonschema.Schema
-	compiledAwManifestSchema   *jsonschema.Schema
-
-	mainWorkflowSchemaError error
-	mcpConfigSchemaError    error
-	repoConfigSchemaError   error
-	awManifestSchemaError   error
+	mainWorkflowSchemaLoader syncutil.OnceLoader[*jsonschema.Schema]
+	mcpConfigSchemaLoader    syncutil.OnceLoader[*jsonschema.Schema]
+	repoConfigSchemaLoader   syncutil.OnceLoader[*jsonschema.Schema]
+	awManifestSchemaLoader   syncutil.OnceLoader[*jsonschema.Schema]
 
 	// Cached parsed schema documents (as any) for suggestion generation.
 	// Parsing the large JSON schema on every error call is expensive; these caches
 	// ensure the schema is parsed at most once per process lifetime.
-	parsedMainWorkflowSchemaDocOnce sync.Once
-	parsedMainWorkflowSchemaDocVal  any
-	parsedMainWorkflowSchemaDocErr  error
-
-	parsedMcpConfigSchemaDocOnce sync.Once
-	parsedMcpConfigSchemaDocVal  any
-	parsedMcpConfigSchemaDocErr  error
+	parsedMainWorkflowSchemaDocLoader syncutil.OnceLoader[map[string]any]
+	parsedMcpConfigSchemaDocLoader    syncutil.OnceLoader[map[string]any]
 )
 
 // getCompiledMainWorkflowSchema returns the compiled main workflow schema, compiling it once and caching
 func getCompiledMainWorkflowSchema() (*jsonschema.Schema, error) {
-	mainWorkflowSchemaOnce.Do(func() {
-		compiledMainWorkflowSchema, mainWorkflowSchemaError = compileSchema(mainWorkflowSchema, "http://contoso.com/main-workflow-schema.json")
+	return mainWorkflowSchemaLoader.Get(func() (*jsonschema.Schema, error) {
+		return compileSchema(mainWorkflowSchema, "http://contoso.com/main-workflow-schema.json")
 	})
-	return compiledMainWorkflowSchema, mainWorkflowSchemaError
 }
 
 // getCompiledMcpConfigSchema returns the compiled MCP config schema, compiling it once and caching
 func getCompiledMcpConfigSchema() (*jsonschema.Schema, error) {
-	mcpConfigSchemaOnce.Do(func() {
-		compiledMcpConfigSchema, mcpConfigSchemaError = compileSchema(mcpConfigSchema, "http://contoso.com/mcp-config-schema.json")
+	return mcpConfigSchemaLoader.Get(func() (*jsonschema.Schema, error) {
+		return compileSchema(mcpConfigSchema, "http://contoso.com/mcp-config-schema.json")
 	})
-	return compiledMcpConfigSchema, mcpConfigSchemaError
 }
 
 // GetCompiledRepoConfigSchema returns the compiled repo config schema, compiling it once and caching
 func GetCompiledRepoConfigSchema() (*jsonschema.Schema, error) {
-	repoConfigSchemaOnce.Do(func() {
-		compiledRepoConfigSchema, repoConfigSchemaError = compileSchema(RepoConfigSchema, "http://contoso.com/repo-config-schema.json")
+	return repoConfigSchemaLoader.Get(func() (*jsonschema.Schema, error) {
+		return compileSchema(RepoConfigSchema, "http://contoso.com/repo-config-schema.json")
 	})
-	return compiledRepoConfigSchema, repoConfigSchemaError
 }
 
 // getCompiledAwManifestSchema returns the compiled aw manifest schema, compiling it once and caching.
 func getCompiledAwManifestSchema() (*jsonschema.Schema, error) {
-	awManifestSchemaOnce.Do(func() {
-		compiledAwManifestSchema, awManifestSchemaError = compileSchema(awManifestSchema, "http://contoso.com/aw-manifest-schema.json")
+	return awManifestSchemaLoader.Get(func() (*jsonschema.Schema, error) {
+		return compileSchema(awManifestSchema, "http://contoso.com/aw-manifest-schema.json")
 	})
-	return compiledAwManifestSchema, awManifestSchemaError
 }
 
-// getParsedSchemaDoc returns the parsed (any) representation of a known schema JSON string.
+// getParsedSchemaDoc returns the parsed object representation of a known schema JSON string.
 // For the two well-known schemas (mainWorkflowSchema, mcpConfigSchema) the result is cached
 // so the expensive json.Unmarshal is only ever performed once per process lifetime.
 // Unknown schema strings fall back to an uncached parse.
-func getParsedSchemaDoc(schemaJSON string) (any, error) {
+func getParsedSchemaDoc(schemaJSON string) (map[string]any, error) {
 	switch schemaJSON {
 	case mainWorkflowSchema:
-		parsedMainWorkflowSchemaDocOnce.Do(func() {
-			parsedMainWorkflowSchemaDocErr = json.Unmarshal([]byte(mainWorkflowSchema), &parsedMainWorkflowSchemaDocVal)
+		return parsedMainWorkflowSchemaDocLoader.Get(func() (map[string]any, error) {
+			return unmarshalSchemaDoc(mainWorkflowSchema)
 		})
-		return parsedMainWorkflowSchemaDocVal, parsedMainWorkflowSchemaDocErr
 	case mcpConfigSchema:
-		parsedMcpConfigSchemaDocOnce.Do(func() {
-			parsedMcpConfigSchemaDocErr = json.Unmarshal([]byte(mcpConfigSchema), &parsedMcpConfigSchemaDocVal)
+		return parsedMcpConfigSchemaDocLoader.Get(func() (map[string]any, error) {
+			return unmarshalSchemaDoc(mcpConfigSchema)
 		})
-		return parsedMcpConfigSchemaDocVal, parsedMcpConfigSchemaDocErr
 	default:
-		var doc any
-		err := json.Unmarshal([]byte(schemaJSON), &doc)
-		return doc, err
+		return unmarshalSchemaDoc(schemaJSON)
 	}
+}
+
+// unmarshalSchemaDoc parses a JSON schema string into an object document.
+func unmarshalSchemaDoc(schemaJSON string) (map[string]any, error) {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(schemaJSON), &doc); err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, errors.New("schema root is not an object")
+	}
+	return doc, nil
 }
 
 // CompileSchema compiles a JSON schema from a JSON string.
@@ -153,6 +142,7 @@ func compileSchema(schemaJSON, schemaURL string) (*jsonschema.Schema, error) {
 // These are used for configuration, not for defining safe output operations.
 var safeOutputMetaFields = map[string]bool{
 	"allowed-domains": true,
+	"data":            true,
 	"staged":          true,
 	"env":             true,
 	"github-token":    true,
@@ -172,13 +162,9 @@ func GetSafeOutputTypeKeys() ([]string, error) {
 	schemaCompilerLog.Print("Extracting safe output type keys from main workflow schema")
 
 	// Use the cached parsed schema document to avoid re-parsing on every call.
-	rawDoc, err := getParsedSchemaDoc(mainWorkflowSchema)
+	schemaDoc, err := getParsedSchemaDoc(mainWorkflowSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse main workflow schema: %w", err)
-	}
-	schemaDoc, ok := rawDoc.(map[string]any)
-	if !ok {
-		return nil, errors.New("schema root is not an object")
 	}
 
 	// Navigate to properties.safe-outputs.properties

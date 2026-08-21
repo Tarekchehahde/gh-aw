@@ -22,11 +22,14 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/github/gh-aw/pkg/gitutil"
 	"github.com/github/gh-aw/pkg/stringutil"
@@ -37,6 +40,7 @@ import (
 )
 
 var compileOrchestrationLog = logger.New("cli:compile_pipeline")
+var runBatchYamllintOnFiles = RunYamllintOnFiles
 
 const fallbackCompilationErrorMessage = "compilation failed (no detailed error message available)"
 
@@ -49,6 +53,10 @@ func compileSpecificFiles(
 	validationResults *[]ValidationResult,
 ) ([]*workflow.WorkflowData, error) {
 	compileOrchestrationLog.Printf("Compiling %d specific workflow files", len(config.MarkdownFiles))
+
+	batchMode := !config.Verbose && len(config.MarkdownFiles) > 1
+	compiler.SetBatchMode(batchMode)
+	compiler.SetQuiet(batchMode)
 
 	// Enable validation automatically when force-refresh-action-pins is used
 	// to verify all resolved action SHAs are valid
@@ -63,13 +71,19 @@ func compileSpecificFiles(
 	var lockFilesForActionlint []string
 	var lockFilesForZizmor []string
 	var lockFilesForDirTools []string // lock files for directory-based tools (poutine, runner-guard)
+	var lockFilesForSyft []string     // lock files for syft container image SBOM scanning
+	var lockFilesForGrype []string    // lock files for grype container image vulnerability scanning
+	var lockFilesForGrant []string    // lock files for grant container image license scanning
+	var strictGrantErr error
+	var lockFilesForYamllint []string   // lock files for yamllint YAML linter
+	var lockFilesForShellcheck []string // lock files for shellcheck run step linting
 
 	// Compile each specified file
 	for _, markdownFile := range config.MarkdownFiles {
 		// Respect context cancellation between files (e.g. Ctrl+C)
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Operation cancelled"))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Operation cancelled"))
 			return workflowDataList, ctx.Err()
 		default:
 		}
@@ -80,8 +94,8 @@ func compileSpecificFiles(
 		result := ValidationResult{
 			Workflow: markdownFile,
 			Valid:    true,
-			Errors:   []CompileValidationError{},
-			Warnings: []CompileValidationError{},
+			Errors:   []ValidationIssue{},
+			Warnings: []ValidationIssue{},
 		}
 
 		// Resolve workflow ID or file path to actual file path
@@ -94,7 +108,7 @@ func compileSpecificFiles(
 			stats.Errors++
 			trackWorkflowFailure(stats, markdownFile, 1, []string{err.Error()})
 			result.Valid = false
-			result.Errors = append(result.Errors, CompileValidationError{
+			result.Errors = append(result.Errors, ValidationIssue{
 				Type:    "resolution_error",
 				Message: err.Error(),
 			})
@@ -132,6 +146,7 @@ func compileSpecificFiles(
 			trackWorkflowFailure(stats, resolvedFile, len(errMsgs), errMsgs)
 		} else {
 			compiledCount++
+			stats.Succeeded++
 			if fileResult.workflowData != nil {
 				workflowDataList = append(workflowDataList, fileResult.workflowData)
 			}
@@ -147,6 +162,21 @@ func compileSpecificFiles(
 					}
 					if config.Poutine || config.RunnerGuard {
 						lockFilesForDirTools = append(lockFilesForDirTools, fileResult.lockFile)
+					}
+					if config.Grype {
+						lockFilesForGrype = append(lockFilesForGrype, fileResult.lockFile)
+					}
+					if config.Grant {
+						lockFilesForGrant = append(lockFilesForGrant, fileResult.lockFile)
+					}
+					if config.Syft {
+						lockFilesForSyft = append(lockFilesForSyft, fileResult.lockFile)
+					}
+					if config.Yamllint {
+						lockFilesForYamllint = append(lockFilesForYamllint, fileResult.lockFile)
+					}
+					if config.shellcheckEnabled() {
+						lockFilesForShellcheck = append(lockFilesForShellcheck, fileResult.lockFile)
 					}
 				}
 			}
@@ -173,9 +203,9 @@ func compileSpecificFiles(
 			return workflowDataList, err
 		}
 		if err := RunZizmorOnFiles(lockFilesForZizmor, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
-			if config.Strict {
-				return workflowDataList, err
-			}
+			// Always fail on high/critical severity findings (zizmor returns errors for those
+			// regardless of strict mode). In strict mode, all findings are errors.
+			return workflowDataList, err
 		}
 	}
 
@@ -207,8 +237,83 @@ func compileSpecificFiles(
 		}
 	}
 
+	// Run syft SBOM scanner on container images referenced in the compiled lock files.
+	if config.Syft && !config.NoEmit && len(lockFilesForSyft) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunSyftOnLockFiles(lockFilesForSyft, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run grype vulnerability scanner on container images referenced in the compiled lock files.
+	if config.Grype && !config.NoEmit && len(lockFilesForGrype) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunGrypeOnLockFiles(lockFilesForGrype, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run grant license scanner on container images referenced in the compiled lock files.
+	if config.Grant && !config.NoEmit && len(lockFilesForGrant) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunGrantOnLockFiles(lockFilesForGrant, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				errorCount++
+				stats.Errors++
+				// Grant is a post-compilation tool, not a workflow; record it only in
+				// validationResults (for JSON output) without adding to FailureDetails.
+				*validationResults = append(*validationResults, ValidationResult{
+					Workflow: "grant",
+					Valid:    false,
+					Errors: []ValidationIssue{{
+						Type:    "grant_error",
+						Message: err.Error(),
+					}},
+				})
+				strictGrantErr = err
+			}
+		}
+	}
+
+	// Run yamllint on all collected lock files.
+	if config.Yamllint && !config.NoEmit && len(lockFilesForYamllint) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := runBatchYamllintOnFiles(lockFilesForYamllint, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run shellcheck on run step scripts in all collected lock files.
+	if config.shellcheckEnabled() && !config.NoEmit && len(lockFilesForShellcheck) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunShellcheckOnLockFiles(ctx, lockFilesForShellcheck, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
 	// Get warning count from compiler
 	stats.Warnings = compiler.GetWarningCount()
+
+	// Aggregate and display batch-mode notices (experimental features, Copilot tip)
+	displayBatchCompilationNotices(compiler, config)
 
 	// Display schedule warnings
 	displayScheduleWarnings(compiler, config.JSONOutput)
@@ -230,6 +335,9 @@ func compileSpecificFiles(
 	// Don't return the detailed error message here since it's already printed in the summary
 	// Returning a simple error prevents duplication in the output
 	if errorCount > 0 {
+		if strictGrantErr != nil {
+			return workflowDataList, strictGrantErr
+		}
 		return workflowDataList, errors.New("compilation failed")
 	}
 
@@ -260,7 +368,7 @@ func compileAllFilesInDirectory(
 
 	compileOrchestrationLog.Printf("Scanning for markdown files in %s", workflowsDir)
 	if config.Verbose {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Scanning for markdown files in "+workflowsDir))
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr("Scanning for markdown files in "+workflowsDir))
 	}
 
 	// Find and filter markdown files (shared helper keeps logic in one place)
@@ -279,13 +387,20 @@ func compileAllFilesInDirectory(
 
 	compileOrchestrationLog.Printf("Found %d markdown files to compile", len(mdFiles))
 	if config.Verbose {
-		fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d markdown files to compile", len(mdFiles))))
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr(fmt.Sprintf("Found %d markdown files to compile", len(mdFiles))))
 	}
+
+	batchMode := !config.Verbose && len(mdFiles) > 1
+	compiler.SetBatchMode(batchMode)
+	compiler.SetQuiet(batchMode)
 
 	// Handle purge logic: collect existing files before compilation
 	var purgeData *purgeTrackingData
 	if config.Purge {
-		purgeData = collectPurgeData(workflowsDir, mdFiles, config.Verbose)
+		purgeData, err = collectPurgeData(workflowsDir, mdFiles, config.Verbose)
+		if err != nil {
+			return nil, fmt.Errorf("failed to collect existing files for purge: %w", err)
+		}
 	}
 
 	// Enable validation automatically when force-refresh-action-pins is used
@@ -302,12 +417,18 @@ func compileAllFilesInDirectory(
 	var lockFilesForActionlint []string
 	var lockFilesForZizmor []string
 	var lockFilesForDirTools []string // lock files for directory-based tools (poutine, runner-guard)
+	var lockFilesForSyft []string     // lock files for syft container image SBOM scanning
+	var lockFilesForGrype []string    // lock files for grype container image vulnerability scanning
+	var lockFilesForGrant []string    // lock files for grant container image license scanning
+	var strictGrantErr error
+	var lockFilesForYamllint []string   // lock files for yamllint YAML linter
+	var lockFilesForShellcheck []string // lock files for shellcheck run step linting
 
 	for _, file := range mdFiles {
 		// Respect context cancellation between files (e.g. Ctrl+C)
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Operation cancelled"))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Operation cancelled"))
 			return workflowDataList, ctx.Err()
 		default:
 		}
@@ -340,6 +461,7 @@ func compileAllFilesInDirectory(
 			trackWorkflowFailure(stats, file, len(errMsgs), errMsgs)
 		} else {
 			successCount++
+			stats.Succeeded++
 			if fileResult.workflowData != nil {
 				workflowDataList = append(workflowDataList, fileResult.workflowData)
 			}
@@ -355,6 +477,21 @@ func compileAllFilesInDirectory(
 					}
 					if config.Poutine || config.RunnerGuard {
 						lockFilesForDirTools = append(lockFilesForDirTools, fileResult.lockFile)
+					}
+					if config.Syft {
+						lockFilesForSyft = append(lockFilesForSyft, fileResult.lockFile)
+					}
+					if config.Grype {
+						lockFilesForGrype = append(lockFilesForGrype, fileResult.lockFile)
+					}
+					if config.Grant {
+						lockFilesForGrant = append(lockFilesForGrant, fileResult.lockFile)
+					}
+					if config.Yamllint {
+						lockFilesForYamllint = append(lockFilesForYamllint, fileResult.lockFile)
+					}
+					if config.shellcheckEnabled() {
+						lockFilesForShellcheck = append(lockFilesForShellcheck, fileResult.lockFile)
 					}
 				}
 			}
@@ -381,9 +518,7 @@ func compileAllFilesInDirectory(
 			return workflowDataList, err
 		}
 		if err := RunZizmorOnFiles(lockFilesForZizmor, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
-			if config.Strict {
-				return workflowDataList, err
-			}
+			return workflowDataList, err
 		}
 	}
 
@@ -411,11 +546,85 @@ func compileAllFilesInDirectory(
 		}
 	}
 
+	// Run syft SBOM scanner on container images referenced in the compiled lock files.
+	if config.Syft && !config.NoEmit && len(lockFilesForSyft) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunSyftOnLockFiles(lockFilesForSyft, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run grype vulnerability scanner on container images referenced in the compiled lock files.
+	if config.Grype && !config.NoEmit && len(lockFilesForGrype) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunGrypeOnLockFiles(lockFilesForGrype, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run grant license scanner on container images referenced in the compiled lock files.
+	if config.Grant && !config.NoEmit && len(lockFilesForGrant) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunGrantOnLockFiles(lockFilesForGrant, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				errorCount++
+				stats.Errors++
+				// Grant is a post-compilation tool, not a workflow; record it only in
+				// validationResults (for JSON output) without adding to FailureDetails.
+				*validationResults = append(*validationResults, ValidationResult{
+					Workflow: "grant",
+					Valid:    false,
+					Errors: []ValidationIssue{{
+						Type:    "grant_error",
+						Message: err.Error(),
+					}},
+				})
+				strictGrantErr = err
+			}
+		}
+	}
+
+	// Run batch yamllint
+	if config.Yamllint && !config.NoEmit && len(lockFilesForYamllint) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := runBatchYamllintOnFiles(lockFilesForYamllint, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
+	// Run shellcheck on run step scripts in all collected lock files.
+	if config.shellcheckEnabled() && !config.NoEmit && len(lockFilesForShellcheck) > 0 {
+		if err := ctx.Err(); err != nil {
+			return workflowDataList, err
+		}
+		if err := RunShellcheckOnLockFiles(ctx, lockFilesForShellcheck, config.Verbose && !config.JSONOutput, config.Strict); err != nil {
+			if config.Strict {
+				return workflowDataList, err
+			}
+		}
+	}
+
 	// Emit recommendation when many slash commands are present without centralized strategy.
 	displayCentralizedSlashCommandRecommendation(compiler, workflowDataList, config.JSONOutput)
 
 	// Get warning count from compiler
 	stats.Warnings = compiler.GetWarningCount()
+
+	displayBatchCompilationNotices(compiler, config)
 
 	// Display schedule warnings
 	displayScheduleWarnings(compiler, config.JSONOutput)
@@ -424,7 +633,7 @@ func compileAllFilesInDirectory(
 	displaySafeUpdateWarnings(compiler, config.JSONOutput)
 
 	if config.Verbose {
-		fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("Successfully compiled %d out of %d workflow files", successCount, len(mdFiles))))
+		fmt.Fprintln(os.Stderr, console.FormatSuccessMessageStderr(fmt.Sprintf("Successfully compiled %d out of %d workflow files", successCount, len(mdFiles))))
 	}
 
 	// Handle purge logic if requested
@@ -449,10 +658,52 @@ func compileAllFilesInDirectory(
 
 	// Return error if any compilations failed
 	if errorCount > 0 {
+		if strictGrantErr != nil {
+			return workflowDataList, strictGrantErr
+		}
 		return workflowDataList, errors.New("compilation failed")
 	}
 
 	return workflowDataList, nil
+}
+
+func displayBatchCompilationNotices(compiler *workflow.Compiler, config CompileConfig) {
+	if config.JSONOutput || config.Verbose {
+		return
+	}
+
+	featureUsage := compiler.GetExperimentalFeatureUsage()
+	if len(featureUsage) > 0 {
+		type featureCount struct {
+			name  string
+			count int
+		}
+		features := make([]featureCount, 0, len(featureUsage))
+		for message, count := range featureUsage {
+			features = append(features, featureCount{
+				name:  strings.TrimPrefix(message, "Using experimental feature: "),
+				count: count,
+			})
+		}
+		slices.SortFunc(features, func(a, b featureCount) int {
+			if a.count != b.count {
+				return cmp.Compare(b.count, a.count)
+			}
+			return cmp.Compare(a.name, b.name)
+		})
+
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Experimental features in use:"))
+		for _, feature := range features {
+			fmt.Fprintln(os.Stderr, console.FormatListItemStderr(fmt.Sprintf("%s: %s", feature.name, formatWorkflowCount(feature.count))))
+		}
+	}
+
+	if compiler.CopilotRequestsTipNeeded() {
+		fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr(
+			"Copilot token-based inference may be available: add permissions.copilot-requests: write. "+
+				"See https://github.github.com/gh-aw/reference/billing/",
+		))
+	}
 }
 
 // purgeTrackingData holds data needed for purge operations
@@ -463,12 +714,25 @@ type purgeTrackingData struct {
 }
 
 // collectPurgeData collects existing files for purge operations
-func collectPurgeData(workflowsDir string, mdFiles []string, verbose bool) *purgeTrackingData {
+func collectPurgeData(workflowsDir string, mdFiles []string, verbose bool) (*purgeTrackingData, error) {
+	return collectPurgeDataWithPatterns(workflowsDir, mdFiles, verbose, "*.lock.yml", "*.invalid.yml")
+}
+
+// collectPurgeDataWithPatterns is the testable implementation of collectPurgeData.
+// lockPattern and invalidPattern are appended to workflowsDir for the glob calls.
+func collectPurgeDataWithPatterns(workflowsDir string, mdFiles []string, verbose bool, lockPattern, invalidPattern string) (*purgeTrackingData, error) {
 	data := &purgeTrackingData{}
 
 	// Find all existing files
-	data.existingLockFiles, _ = filepath.Glob(filepath.Join(workflowsDir, "*.lock.yml"))
-	data.existingInvalidFiles, _ = filepath.Glob(filepath.Join(workflowsDir, "*.invalid.yml"))
+	var err error
+	data.existingLockFiles, err = filepath.Glob(filepath.Join(workflowsDir, lockPattern))
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob existing .lock.yml files in %s: %w", workflowsDir, err)
+	}
+	data.existingInvalidFiles, err = filepath.Glob(filepath.Join(workflowsDir, invalidPattern))
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob existing .invalid.yml files in %s: %w", workflowsDir, err)
+	}
 
 	// Create expected files list
 	for _, mdFile := range mdFiles {
@@ -478,14 +742,14 @@ func collectPurgeData(workflowsDir string, mdFiles []string, verbose bool) *purg
 
 	if verbose {
 		if len(data.existingLockFiles) > 0 {
-			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d existing .lock.yml files", len(data.existingLockFiles))))
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr(fmt.Sprintf("Found %d existing .lock.yml files", len(data.existingLockFiles))))
 		}
 		if len(data.existingInvalidFiles) > 0 {
-			fmt.Fprintln(os.Stderr, console.FormatInfoMessage(fmt.Sprintf("Found %d existing .invalid.yml files", len(data.existingInvalidFiles))))
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr(fmt.Sprintf("Found %d existing .invalid.yml files", len(data.existingInvalidFiles))))
 		}
 	}
 
-	return data
+	return data, nil
 }
 
 // runPurgeOperations runs all purge operations
@@ -521,7 +785,7 @@ func runPostProcessing(
 				if config.Strict {
 					return err
 				}
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to reconcile compiler-managed Dependabot ignore entries: %v", err)))
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf("Failed to reconcile compiler-managed Dependabot ignore entries: %v", err)))
 			}
 		}
 	}
@@ -575,7 +839,7 @@ func runPostProcessingForDirectory(
 			if config.Strict {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to reconcile compiler-managed Dependabot ignore entries: %v", err)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf("Failed to reconcile compiler-managed Dependabot ignore entries: %v", err)))
 		}
 	}
 

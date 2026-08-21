@@ -20,7 +20,7 @@ const path = require("path");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { extractHashFromLockFile, extractBodyHashFromLockFile, computeFrontmatterHash, computeBodyHash, createGitHubFileReader } = require("./frontmatter_hash_pure.cjs");
 const { getFileContent } = require("./github_api_helpers.cjs");
-const { ERR_CONFIG } = require("./error_codes.cjs");
+const { ERR_CONFIG, SAFE_OUTPUT_E009, CONFIG_HASH_MISMATCH } = require("./error_codes.cjs");
 
 // Matches GitHub workflow ref paths of the form "owner/repo/...[@ref]"
 // and captures: [1] owner, [2] repo, [3] optional ref
@@ -294,6 +294,7 @@ async function main() {
       // caller repo) will receive a 404/401/403 from the callee's Contents API.  Record this so
       // that the final error message can give actionable remediation guidance instead of
       // directing the user to re-run `gh aw compile`.
+      /** @type {any} */
       let crossRepoAuthFailure = null;
       if (!lockFileContent && workflowRepo !== currentRepo && (errorStatus === 401 || errorStatus === 403 || errorStatus === 404)) {
         crossRepoAuthFailure = { status: errorStatus, repo: workflowRepo };
@@ -422,7 +423,7 @@ async function main() {
     await summary.write();
 
     core.setOutput("stale_lock_file_failed", "true");
-    core.setFailed(`${ERR_CONFIG}: ${warningMessage}`);
+    core.setFailed(`${ERR_CONFIG}: ${SAFE_OUTPUT_E009} ${CONFIG_HASH_MISMATCH}: ${warningMessage}`);
   } else if (hashComparison.match) {
     // Hashes match - lock file is up to date
     core.info("✅ Lock file is up to date (hashes match)");
@@ -449,7 +450,7 @@ async function main() {
     core.setOutput("stale_lock_file_failed", "true");
 
     // Fail the step to prevent workflow from running with outdated configuration
-    core.setFailed(`${ERR_CONFIG}: ${warningMessage}`);
+    core.setFailed(`${ERR_CONFIG}: ${SAFE_OUTPUT_E009} ${CONFIG_HASH_MISMATCH}: ${warningMessage}`);
   }
 }
 

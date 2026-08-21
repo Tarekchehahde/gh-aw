@@ -42,6 +42,7 @@
         { "$ref": "#/$defs/CloseIssueOutput" },
         { "$ref": "#/$defs/ClosePullRequestOutput" },
         { "$ref": "#/$defs/MarkPullRequestAsReadyForReviewOutput" },
+        { "$ref": "#/$defs/ApproveWorkflowRunOutput" },
         { "$ref": "#/$defs/MissingToolOutput" },
         { "$ref": "#/$defs/CreateCodeScanningAlertOutput" },
         { "$ref": "#/$defs/UpdateProjectOutput" },
@@ -595,6 +596,22 @@
       "required": ["type", "reason"],
       "additionalProperties": false
     },
+    "ApproveWorkflowRunOutput": {
+      "title": "Approve Workflow Run Output",
+      "description": "Output for approving a workflow run that is awaiting approval for a fork pull request",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "approve_workflow_run"
+        },
+        "run_id": {
+          "oneOf": [{ "type": "number" }, { "type": "string" }],
+          "description": "Positive integer workflow run ID to approve"
+        }
+      },
+      "required": ["type", "run_id"],
+      "additionalProperties": false
+    },
     "MissingToolOutput": {
       "title": "Missing Tool Output",
       "description": "Output for reporting missing tools or functionality",
@@ -846,6 +863,11 @@
           "type": "object",
           "description": "Input parameters for the workflow_dispatch event, matching the workflow's input schema",
           "additionalProperties": true
+        },
+        "ref": {
+          "type": "string",
+          "description": "Optional git ref or branch name to dispatch against (highest priority when provided). Requires safe-outputs.dispatch-workflow.allowed-refs configuration.",
+          "minLength": 1
         }
       },
       "required": ["type", "workflow_name"],

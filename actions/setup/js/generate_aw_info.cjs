@@ -9,6 +9,7 @@ const { validateContextVariables } = require("./validate_context_variables.cjs")
 const validateLockdownRequirements = require("./validate_lockdown_requirements.cjs");
 const { writeMergedModelsJSON } = require("./merge_frontmatter_models.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
+const { ERR_CONFIG, ERR_SYSTEM } = require("./error_codes.cjs");
 
 /**
  * Generate aw_info.json with workflow run metadata.
@@ -22,7 +23,7 @@ const { getErrorMessage } = require("./error_helpers.cjs");
  * API calls in this handler; no validateTargetRepo allowlist check is required here.
  *
  * @param {typeof import('@actions/core')} core - GitHub Actions core library
- * @param {object} ctx - GitHub Actions context object
+ * @param {any} ctx - GitHub Actions context object
  * @returns {Promise<void>}
  */
 async function main(core, ctx) {
@@ -52,16 +53,29 @@ async function main(core, ctx) {
   }
 
   // Build awInfo from env vars (compile-time) + context (runtime)
+  const model = process.env.GH_AW_INFO_MODEL || "";
+
+  // Reject model names that contain an unresolved GitHub Actions expression.
+  // This can happen when a vars.* expression was used for the model in the
+  // workflow frontmatter but the variable is not defined in the repository,
+  // causing GitHub Actions to pass the literal expression string at runtime.
+  if (/\$\{\{/.test(model)) {
+    const message = `${ERR_CONFIG}: GH_AW_INFO_MODEL contains an unresolved GitHub Actions expression: ${JSON.stringify(model)}`;
+    core.setFailed(message);
+    throw new Error(message);
+  }
+
   /** @type {Record<string, unknown>} */
   const awInfo = {
     engine_id: process.env.GH_AW_INFO_ENGINE_ID || "",
     engine_name: process.env.GH_AW_INFO_ENGINE_NAME || "",
-    model: process.env.GH_AW_INFO_MODEL || "",
+    model,
     version: process.env.GH_AW_INFO_VERSION || "",
     agent_version: process.env.GH_AW_INFO_AGENT_VERSION || "",
     workflow_name: process.env.GH_AW_INFO_WORKFLOW_NAME || "",
     experimental: process.env.GH_AW_INFO_EXPERIMENTAL === "true",
     supports_tools_allowlist: process.env.GH_AW_INFO_SUPPORTS_TOOLS_ALLOWLIST === "true",
+    cache_memory: process.env.GH_AW_INFO_CACHE_MEMORY === "true",
     run_id: ctx.runId,
     run_number: ctx.runNumber,
     run_attempt: process.env.GITHUB_RUN_ATTEMPT,
@@ -76,6 +90,7 @@ async function main(core, ctx) {
     firewall_enabled: process.env.GH_AW_INFO_FIREWALL_ENABLED === "true",
     awf_version: process.env.GH_AW_INFO_AWF_VERSION || "",
     awmg_version: process.env.GH_AW_INFO_AWMG_VERSION || "",
+    agent_runtime: process.env.GH_AW_INFO_AGENT_RUNTIME || "",
     steps: {
       firewall: process.env.GH_AW_INFO_FIREWALL_TYPE || "",
     },
@@ -117,11 +132,6 @@ async function main(core, ctx) {
   const workflowRunConclusion = ctx.payload?.workflow_run?.conclusion;
   if (workflowRunConclusion && typeof workflowRunConclusion === "string") {
     awInfo.workflow_run_conclusion = workflowRunConclusion;
-  }
-
-  const tokenWeights = parseTokenWeightsFromEnv(core);
-  if (tokenWeights) {
-    awInfo.token_weights = tokenWeights;
   }
 
   const features = parseFeaturesFromEnv(core);
@@ -170,36 +180,21 @@ async function main(core, ctx) {
   }
 
   // Write to /tmp/gh-aw directory to avoid inclusion in PR
-  fs.mkdirSync(TMP_GH_AW_PATH, { recursive: true });
+  try {
+    fs.mkdirSync(TMP_GH_AW_PATH, { recursive: true });
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to create directory ${TMP_GH_AW_PATH}: ${getErrorMessage(err)}`, { cause: err });
+  }
   writeMergedModelsJSON(core);
   const tmpPath = TMP_GH_AW_PATH + "/aw_info.json";
-  fs.writeFileSync(tmpPath, JSON.stringify(awInfo, null, 2));
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(awInfo, null, 2));
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to write file ${tmpPath}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   if (awInfo.staged) {
     logStagedPreviewInfo("Generating workflow info in staged mode — no changes applied");
-  }
-
-  /**
-   * Parse optional custom token weights from GH_AW_INFO_TOKEN_WEIGHTS.
-   * @param {typeof import('@actions/core')} core
-   * @returns {Record<string, unknown> | null}
-   */
-  function parseTokenWeightsFromEnv(core) {
-    const tokenWeightsEnv = process.env.GH_AW_INFO_TOKEN_WEIGHTS;
-    if (!tokenWeightsEnv) {
-      return null;
-    }
-    try {
-      const tokenWeights = JSON.parse(tokenWeightsEnv);
-      if (tokenWeights !== null && typeof tokenWeights === "object" && !Array.isArray(tokenWeights)) {
-        return tokenWeights;
-      }
-      core.warning(`GH_AW_INFO_TOKEN_WEIGHTS must be a JSON object, ignoring`);
-      return null;
-    } catch {
-      core.warning(`Failed to parse GH_AW_INFO_TOKEN_WEIGHTS: ${tokenWeightsEnv}`);
-      return null;
-    }
   }
 
   /**

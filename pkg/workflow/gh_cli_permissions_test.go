@@ -378,8 +378,8 @@ jobs:
 	compiler := NewCompiler()
 	err = compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "compiler should reject write gh commands in activation pre-steps")
-	assert.Contains(t, err.Error(), "gh pr comment", "error should mention the offending command")
-	assert.Contains(t, err.Error(), "write", "error should explain the write-permission restriction")
+	require.ErrorContains(t, err, "gh pr comment", "error should mention the offending command")
+	require.ErrorContains(t, err, "write", "error should explain the write-permission restriction")
 }
 
 // TestActivationJobPermissionsWithGhCachePreStep verifies actions: read is added when
@@ -543,9 +543,9 @@ Test agent pre-steps write command triggers error.
 	compiler := NewCompiler()
 	err := compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "compiler should error when agent pre-step uses a write gh command")
-	assert.Contains(t, err.Error(), "agent job uses write gh command(s)")
-	assert.Contains(t, err.Error(), "gh pr comment")
-	assert.Contains(t, err.Error(), "safe-outputs")
+	require.ErrorContains(t, err, "agent job uses write gh command(s)")
+	require.ErrorContains(t, err, "gh pr comment")
+	require.ErrorContains(t, err, "safe-outputs")
 }
 
 // TestAgentJobPreStepsInferReadPermission verifies that when an agent job pre-step
@@ -868,8 +868,8 @@ Test agent steps write command triggers error.
 	compiler := NewCompiler()
 	err := compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "compiler should error when agent steps use a write gh command")
-	assert.Contains(t, err.Error(), "agent job uses write gh command(s)")
-	assert.Contains(t, err.Error(), "gh issue create")
+	require.ErrorContains(t, err, "agent job uses write gh command(s)")
+	require.ErrorContains(t, err, "gh issue create")
 }
 
 // TestAgentJobWriteCommandInPostStepsErrors verifies that a write gh command in a top-level
@@ -896,19 +896,15 @@ Test agent post-steps write command triggers error.
 	compiler := NewCompiler()
 	err := compiler.CompileWorkflow(testFile)
 	require.Error(t, err, "compiler should error when agent post-steps use a write gh command")
-	assert.Contains(t, err.Error(), "agent job uses write gh command(s)")
-	assert.Contains(t, err.Error(), "gh pr close")
+	require.ErrorContains(t, err, "agent job uses write gh command(s)")
+	require.ErrorContains(t, err, "gh pr close")
 }
 
-// TestActivationJobStepsNotScanned verifies that jobs.activation.steps is NOT scanned for
-// gh CLI calls because the activation job is a built-in job and applyBuiltinJobPreSteps
-// only injects jobs.<name>.pre-steps — steps/post-steps are silently ignored.
-func TestActivationJobStepsNotScanned(t *testing.T) {
-	tmpDir := testutil.TempDir(t, "activation-steps-not-scanned")
+// TestActivationJobStepsScanned verifies that jobs.activation.steps is scanned for
+// gh CLI calls because activation steps are injected into the built-in activation job.
+func TestActivationJobStepsScanned(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "activation-steps-scanned")
 	testFile := filepath.Join(tmpDir, "workflow.md")
-	// Note: jobs.activation.steps contains a write command (gh label create).
-	// If it were scanned this would produce a compile error; the absence of an error
-	// confirms that the section is intentionally skipped.
 	testContent := `---
 on:
   pull_request:
@@ -924,20 +920,12 @@ jobs:
           gh label create "reviewed" --color "#0075ca"
 ---
 
-# Workflow whose activation steps are silently ignored (only pre-steps are applied)
+# Workflow whose activation steps are scanned for permissions
 `
 	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
 
 	compiler := NewCompiler()
-	// Should compile without error — the write command in jobs.activation.steps is not
-	// executed so it must not trigger a validation error.
-	require.NoError(t, compiler.CompileWorkflow(testFile))
-
-	// The compiled activation job must not contain the label-create step because
-	// jobs.activation.steps is not injected into built-in jobs.
-	lockContent, err := os.ReadFile(stringutil.MarkdownToLockFile(testFile))
-	require.NoError(t, err)
-	activationSection := extractJobSection(string(lockContent), string(constants.ActivationJobName))
-	assert.NotContains(t, activationSection, "gh label create",
-		"jobs.activation.steps should not be injected into the compiled activation job")
+	err := compiler.CompileWorkflow(testFile)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "gh label create")
 }

@@ -132,7 +132,7 @@ func resolveDirectiveWithVisited(
 	extractTools bool,
 	visited map[string]struct {
 	}) (includeDirectiveResolution, bool, error) {
-	filePath, sectionName := splitIncludePathAndSection(directive.Path)
+	filePath, sectionName := splitPathAndSection(directive.Path)
 	fullPath, err := ResolveIncludePath(filePath, baseDir, nil)
 	if err != nil {
 		includeLog.Printf("Failed to resolve include path '%s': %v", filePath, err)
@@ -158,14 +158,6 @@ func resolveDirectiveWithVisited(
 		sectionName: sectionName,
 		fullPath:    fullPath,
 	}, false, nil
-}
-
-func splitIncludePathAndSection(includePath string) (string, string) {
-	if strings.Contains(includePath, "#") {
-		parts := strings.SplitN(includePath, "#", 2)
-		return parts[0], parts[1]
-	}
-	return includePath, ""
 }
 
 // processIncludedFile processes a single included file, optionally extracting a section
@@ -253,25 +245,28 @@ func applyRelaxedIncludedFrontmatterValidation(filePath string, frontmatter map[
 func collectUnexpectedIncludedFrontmatterFields(frontmatter map[string]any) []string {
 	validFields := map[string]struct {
 	}{
-		"tools":          {},
-		"engine":         {},
-		"env":            {},
-		"network":        {},
-		"mcp-servers":    {},
-		"imports":        {},
-		"name":           {},
-		"description":    {},
-		"steps":          {},
-		"jobs":           {},
-		"safe-outputs":   {},
-		"mcp-scripts":    {},
-		"services":       {},
-		"runtimes":       {},
-		"permissions":    {},
-		"secret-masking": {},
-		"inputs":         {},
-		"import-schema":  {},
-		"features":       {},
+		"tools":           {},
+		"engine":          {},
+		"env":             {},
+		"network":         {},
+		"mcp-servers":     {},
+		"imports":         {},
+		"name":            {},
+		"description":     {},
+		"steps":           {},
+		"pre-steps":       {},
+		"pre-agent-steps": {},
+		"post-steps":      {},
+		"jobs":            {},
+		"safe-outputs":    {},
+		"mcp-scripts":     {},
+		"services":        {},
+		"runtimes":        {},
+		"permissions":     {},
+		"secret-masking":  {},
+		"inputs":          {},
+		"import-schema":   {},
+		"features":        {},
 	}
 	var unexpectedFields []string
 	for key := range frontmatter {

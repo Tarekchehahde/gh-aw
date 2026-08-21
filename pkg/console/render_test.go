@@ -52,6 +52,18 @@ func TestRenderStruct_SimpleStruct(t *testing.T) {
 	assert.NotContains(t, output, "should not appear", "output should not contain skipped field")
 }
 
+func TestRenderStruct_UnicodeFieldAlignment(t *testing.T) {
+	type unicodeFields struct {
+		Wide string `console:"header:名称"`
+		Long string `console:"header:Longest"`
+	}
+
+	output := RenderStruct(unicodeFields{Wide: "wide", Long: "long"})
+
+	assert.Contains(t, output, "  名称   : wide\n")
+	assert.Contains(t, output, "  Longest: long\n")
+}
+
 func TestRenderStruct_OmitEmpty(t *testing.T) {
 	data := TestMetrics{
 		TokenUsage: 1000,
@@ -560,6 +572,23 @@ func TestRenderSlice_EmbeddedStruct(t *testing.T) {
 	assert.Contains(t, output, "wf-2", "output should contain second workflow name")
 	assert.Contains(t, output, "claude", "output should contain second engine")
 	assert.Contains(t, output, "disabled", "output should contain second status")
+}
+
+func TestRenderSlice_SkippedEmbeddedStruct(t *testing.T) {
+	type Base struct {
+		Name string `console:"header:Name"`
+	}
+	type Extended struct {
+		Base   `console:"-"`
+		Status string `console:"header:Status"`
+	}
+
+	output := RenderStruct([]Extended{{Base: Base{Name: "wf-1"}, Status: "active"}})
+
+	assert.NotContains(t, output, "Name")
+	assert.NotContains(t, output, "wf-1")
+	assert.Contains(t, output, "Status")
+	assert.Contains(t, output, "active")
 }
 
 func TestRenderSlice_EmbeddedPointerStruct(t *testing.T) {

@@ -11,18 +11,28 @@ GitHub Agentic Workflows upload several artifacts during workflow execution. Thi
 
 | Artifact Name | Constant | Type | Description |
 |---------------|----------|------|-------------|
-| `agent` | `constants.AgentArtifactName` | Multi-file | Unified agent job outputs (logs, safe outputs, token usage summary) |
+| `agent` | `constants.AgentArtifactName`<br/>Source: `pkg/constants/job_constants.go` | Multi-file | Unified agent job outputs (logs, safe outputs, token usage summary) |
 | `activation` | `constants.ActivationArtifactName` | Multi-file | Activation job output (`aw_info.json`, `prompt.txt`, rate limits) |
-| `firewall-audit-logs` | `constants.FirewallAuditArtifactName` | Multi-file | AWF firewall audit/observability logs (token usage, network policy, audit trail) |
-| `detection` | `constants.DetectionArtifactName` | Single-file | Threat detection log (`detection.log`) |
+| `firewall-audit-logs` | `constants.FirewallAuditArtifactName`<br/>Source: `pkg/constants/constants.go` | Multi-file | AWF firewall audit/observability logs (token usage, network policy, audit trail) |
+| `detection` | `constants.DetectionArtifactName` | Conditional | Legacy inline engine (`features.gh-aw-detection: false`): single-file `detection.log`. The default external `gh-aw-detection` engine: multi-file `detection_result.json` + `step-summary.md`; `detection.log` is intentionally **not** uploaded (see below) |
 | `safe-output` | `constants.SafeOutputArtifactName` | Legacy/back-compat | Historical standalone safe output artifact (`safe_output.jsonl`); in current compiled workflows this content is included in the unified `agent` artifact instead |
 | `agent-output` | `constants.AgentOutputArtifactName` | Legacy/back-compat | Historical standalone agent output artifact (`agent_output.json`); in current compiled workflows this content is included in the unified `agent` artifact instead |
 | `aw-info` | — | Single-file | Engine configuration (`aw_info.json`) |
 | `prompt` | — | Single-file | Generated prompt (`prompt.txt`) |
 | `experiment` | `constants.ExperimentArtifactName` | Multi-file | A/B experiment state (`state.json`) uploaded by the activation job when experiments are declared in the frontmatter |
 | `usage` | `constants.UsageArtifactName` | Multi-file | Compact conclusion-job artifact with workflow-run metadata and token-usage files used by lightweight reporting and forecasting paths |
+| `evals` | `constants.EvalsArtifactName` | Single-file | BinEval evaluation results (`evals.jsonl`) uploaded by the evals job when `evals` are declared in the workflow frontmatter |
 | `safe-outputs-items` | `constants.SafeOutputItemsArtifactName` | Single-file | Safe output items manifest |
 | `code-scanning-sarif` | `constants.SarifArtifactName` | Single-file | SARIF file for code scanning results |
+
+> [!IMPORTANT]
+> Sync note: This table mirrors artifact-name constants in `pkg/constants/job_constants.go` and `pkg/constants/constants.go`. When those constant values change, update this page and the downstream artifact references in `docs/src/content/docs/reference/audit.md` and `docs/src/content/docs/reference/cost-management.md`.
+
+## Legacy artifact names
+
+:::caution[Deprecated]
+`safe-output` and `agent-output` became legacy in the gh-aw `v0.34.x` unified-agent-artifact rollout. New downstream consumers should migrate to the unified `agent` artifact now; `gh aw logs` and `gh aw audit` keep reading the legacy names only for back-compat with older runs. Removal is planned no earlier than gh-aw `v1.0`.
+:::
 
 ## Artifact Sets
 
@@ -38,6 +48,7 @@ The `gh aw logs` and `gh aw audit` commands support `--artifacts` to download on
 | `detection` | `detection` | Threat detection output |
 | `experiment` | `experiment` | A/B experiment state (only present when experiments are declared) |
 | `usage` | `usage` | Compact conclusion-job artifact for lightweight reporting and forecasting |
+| `evals` | `evals` | BinEval evaluation results (only present when `evals` are declared) |
 | `github-api` | `activation`, `agent` | GitHub API rate limit logs |
 
 ```bash
@@ -130,26 +141,19 @@ Use `releases/latest/download/` in place of a specific tag to track the most rec
 
 ## `agent`
 
-The unified `agent` artifact contains all agent job outputs.
-
-### Contents
+The unified `agent` artifact contains agent job outputs:
 
 - Agent execution logs
 - Safe output data (`agent_output.json`)
 - GitHub API rate limit logs (`github_rate_limits.jsonl`)
 - Token usage summary (`agent_usage.json`) — aggregated totals only; per-request data is in `firewall-audit-logs`
-- `otel.jsonl` — OTLP span mirror written by gh-aw's JavaScript span exporters (only present when `observability.otlp` is configured)
-- `copilot-otel.jsonl` — OTLP spans emitted by Copilot CLI (only present when `observability.otlp` is configured)
+- `otel.jsonl` — OTLP span mirror written by gh-aw's JavaScript span exporters when `observability.otlp` is configured
 
-For OTLP configuration, runtime environment variables, and
-span semantics, see the
-[OpenTelemetry guide](/gh-aw/guides/open-telemetry/).
+For OTLP configuration, runtime environment variables, and span semantics, see the [OpenTelemetry guide](/gh-aw/guides/open-telemetry/).
 
 ## `activation`
 
-The `activation` artifact contains activation job outputs.
-
-### Contents
+The `activation` artifact contains activation job outputs:
 
 - `aw_info.json` — Engine configuration and workflow metadata
 - `prompt.txt` — The generated prompt sent to the AI agent
@@ -157,19 +161,17 @@ The `activation` artifact contains activation job outputs.
 
 ## `detection`
 
-The `detection` artifact contains threat detection output.
+The `detection` artifact is conditional:
 
-### Contents
+- Inline engine (default): `detection.log`, the threat-detection analysis output. Legacy name: `threat-detection.log`.
+- External `gh-aw-detection` engine (the default, or `features.gh-aw-detection: true`): `detection_result.json` and `step-summary.md`.
 
-- `detection.log` — Threat detection analysis results
-
-Legacy name: `threat-detection.log` (still supported for backward compatibility).
+> [!IMPORTANT]
+> When the external `gh-aw-detection` engine is used (the default, or `features.gh-aw-detection: true`), `detection.log` is not uploaded: it can contain content derived from the untrusted agent transcript that was passed to the detection engine (including secrets the agent may have echoed), so uploading it as a downloadable artifact would be a secret-exfiltration path. On that path the `detection` artifact contains `detection_result.json` (the structured verdict) and `step-summary.md`.
 
 ## `experiment`
 
-The `experiment` artifact is uploaded by the **activation job** only when the workflow frontmatter declares one or more `experiments` entries. It is not present on runs without experiments.
-
-### Contents
+The `experiment` artifact is uploaded by the activation job only when the workflow frontmatter declares one or more `experiments` entries. It contains:
 
 - `state.json` — Cumulative per-variant invocation counters used to balance A/B assignments across runs
 
@@ -194,7 +196,7 @@ See [A/B Experiments](/gh-aw/experimental/experiments/) for how to declare exper
 
 ## `usage`
 
-The `usage` artifact is a compact artifact produced by the conclusion job. It carries workflow-run metadata and token-usage files used by lightweight reporting and forecasting paths, so downstream tools can read aggregated usage data without downloading the full `agent` artifact.
+The `usage` artifact is a compact conclusion-job artifact with workflow-run metadata and token-usage files for lightweight reporting and forecasting, so downstream tools can read aggregated usage data without downloading the full `agent` artifact.
 
 ### Accessing usage data
 
@@ -204,6 +206,29 @@ gh aw logs <run-id> --artifacts usage
 
 # Or with gh run download
 gh run download <run-id> -n usage
+```
+
+## `evals`
+
+The `evals` artifact is uploaded by the evals job only when the workflow frontmatter declares one or more `evals` entries. It is not present on runs without evals and contains:
+
+- `evals.jsonl` — Per-question BinEval evaluation results (YES/NO records) produced by running the declared evaluation questions against the agent output
+
+### Accessing evals data
+
+```bash
+# Download only the evals artifact
+gh aw logs <run-id> --artifacts evals
+
+# Or with gh run download
+gh run download <run-id> -n evals
+```
+
+The `gh aw audit` command exposes an `--evals` flag that skips runs without evals results and automatically downloads the evals artifact when `--artifacts` is narrowed:
+
+```bash
+# Audit only runs that contain evals results
+gh aw audit <run-id> --evals
 ```
 
 ## Naming Compatibility
@@ -216,9 +241,9 @@ Artifact names changed between upload-artifact v4 and v5. The `gh aw logs` and `
 | `safe_output.jsonl` | `safe-output` | `safe_output.jsonl` |
 | `agent_output.json` | `agent-output` | `agent_output.json` |
 | `prompt.txt` | `prompt` | `prompt.txt` |
-| `threat-detection.log` | `detection` | `detection.log` |
+| `threat-detection.log` | `detection` | `detection.log` (inline engine only) |
 
-Single-file artifacts are automatically flattened to root level regardless of their artifact directory name. Multi-file artifacts (`firewall-audit-logs`, `agent`, `activation`, `experiment`) retain their directory structure.
+Single-file artifacts are automatically flattened to root level regardless of their artifact directory name. Multi-file artifacts (`firewall-audit-logs`, `agent`, `activation`, `experiment`, and `detection` when the external `gh-aw-detection` engine is enabled) retain their directory structure.
 
 ## Workflow Call Prefixes
 
@@ -232,7 +257,4 @@ When workflows are invoked via `workflow_call`, GitHub Actions prepends a short 
 
 ## Related Documentation
 
-- [Audit Commands](/gh-aw/reference/audit/) — Download and analyze workflow run artifacts
-- [Cost Management](/gh-aw/reference/cost-management/) — Track token usage and inference spend
-- [Network](/gh-aw/reference/network/) — Firewall and domain allow/deny configuration
-- [Compilation Process](/gh-aw/reference/compilation-process/) — How workflows are compiled including artifact upload steps
+See [Audit Commands](/gh-aw/reference/audit/) for downloading and analyzing workflow run artifacts, [Cost Management](/gh-aw/reference/cost-management/) for token-usage and spend reporting, [Network](/gh-aw/reference/network/) for firewall configuration, and [Compilation Process](/gh-aw/reference/compilation-process/) for how workflows upload artifacts.

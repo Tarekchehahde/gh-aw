@@ -15,14 +15,12 @@ permissions:
 
   copilot-requests: write
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 network: defaults
 
 imports:
@@ -47,6 +45,11 @@ safe-outputs:
     auto-merge: true
 
 timeout-minutes: 10
+evals:
+  - id: dictation_prompt_generated
+    question: Did the agent generate an optimized prompt for voice dictation and speech-to-text workflows?
+  - id: prompt_update_created
+    question: Did the agent create a pull request containing the generated dictation prompt update?
 ---
 
 # Dictation Prompt Generator

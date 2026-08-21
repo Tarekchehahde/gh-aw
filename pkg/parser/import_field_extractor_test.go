@@ -245,6 +245,47 @@ imports:
 	assert.Equal(t, "shared/target.md", importsResult.MergedEnvSources["SHARED_VAR"], "MergedEnvSources should track the import path for SHARED_VAR")
 }
 
+func TestAmbientFoldersExtractedFromMdImport(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sharedDir := filepath.Join(tmpDir, "shared")
+	require.NoError(t, os.MkdirAll(sharedDir, 0755), "Failed to create shared dir")
+	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "first.md"), []byte(`---
+ambient-folders:
+  - .squad
+  - .github/agents
+---
+
+# First shared workflow
+`), 0644), "Failed to write first shared file")
+	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "second.md"), []byte(`---
+ambient-folders:
+  - .squad
+  - .config/agents
+---
+
+# Second shared workflow
+`), 0644), "Failed to write second shared file")
+
+	mainContent := `---
+name: Main Workflow
+on: issue_comment
+imports:
+  - shared/first.md
+  - shared/second.md
+---
+
+# Main Workflow
+`
+	result, err := ExtractFrontmatterFromContent(mainContent)
+	require.NoError(t, err, "ExtractFrontmatterFromContent should succeed")
+
+	importsResult, err := ProcessImportsFromFrontmatterWithSource(result.Frontmatter, tmpDir, nil, "", "")
+	require.NoError(t, err, "ProcessImportsFromFrontmatterWithSource should succeed")
+
+	assert.Equal(t, []string{".squad", ".github/agents", ".config/agents"}, importsResult.MergedAmbientFolders)
+}
+
 // TestEnvFieldConflictBetweenImports verifies that defining the same env var in two different
 // imports produces a compilation error.
 func TestEnvFieldConflictBetweenImports(t *testing.T) {
@@ -286,7 +327,7 @@ imports:
 
 	_, err = ProcessImportsFromFrontmatterWithSource(result.Frontmatter, tmpDir, nil, "", "")
 	require.Error(t, err, "Should error when two imports define the same env var")
-	assert.Contains(t, err.Error(), "SHARED_KEY", "Error should mention the conflicting variable name")
+	require.ErrorContains(t, err, "SHARED_KEY", "Error should mention the conflicting variable name")
 }
 
 // TestExtractAllImportFields_BuiltinCacheHit verifies that extractAllImportFields uses the
@@ -399,7 +440,7 @@ func TestValidateImportInputType_Number(t *testing.T) {
 
 		err := validateImportInputType("retries", "3", "number", paramDef, importPath)
 		require.Error(t, err, "string value should be rejected for number type")
-		assert.Contains(t, err.Error(), "must be a number", "error should explain expected type")
+		require.ErrorContains(t, err, "must be a number", "error should explain expected type")
 	})
 }
 
@@ -831,4 +872,84 @@ func TestAppendModelsField_ProvidersAndAliasesBothExtracted(t *testing.T) {
 	require.Len(t, acc.modelCosts, 1)
 	require.Len(t, acc.models, 1)
 	assert.Equal(t, []string{"gpt-5"}, acc.models[0]["agent"])
+}
+
+func TestAppendModelsField_ExtractsDefaultAICreditsPricingFirstWins(t *testing.T) {
+	acc := newImportAccumulator()
+	first := map[string]any{
+		"models": map[string]any{
+			"default-ai-credits-pricing": map[string]any{
+				"input":  5.0,
+				"output": 25.0,
+			},
+		},
+	}
+	second := map[string]any{
+		"models": map[string]any{
+			"default-ai-credits-pricing": map[string]any{
+				"input":  1.0,
+				"output": 2.0,
+			},
+		},
+	}
+
+	acc.appendModelsField(first, "import-first.md")
+	acc.appendModelsField(second, "import-second.md")
+
+	require.NotNil(t, acc.defaultAiCreditsPricing)
+	input, ok := acc.defaultAiCreditsPricing["input"].(float64)
+	require.True(t, ok)
+	output, ok := acc.defaultAiCreditsPricing["output"].(float64)
+	require.True(t, ok)
+	assert.InDelta(t, 5.0, input, 1e-9)
+	assert.InDelta(t, 25.0, output, 1e-9)
+}
+
+func TestAppendModelsField_InvalidDefaultAICreditsPricingWarns(t *testing.T) {
+	acc := newImportAccumulator()
+	fm := map[string]any{
+		"models": map[string]any{
+			"default-ai-credits-pricing": "not-an-object",
+		},
+	}
+
+	acc.appendModelsField(fm, "import-invalid.md")
+
+	assert.Nil(t, acc.defaultAiCreditsPricing)
+	require.NotEmpty(t, acc.warnings)
+	assert.Contains(t, strings.Join(acc.warnings, "\n"), "models.default-ai-credits-pricing must be an object")
+}
+
+func TestMergeExcludedEnv_SingleImport(t *testing.T) {
+	acc := newImportAccumulator()
+	fm := map[string]any{
+		"excluded-env": []any{"TOKEN_A", "TOKEN_B"},
+	}
+	acc.mergeExcludedEnv(fm)
+	assert.Equal(t, []string{"TOKEN_A", "TOKEN_B"}, acc.excludedEnv)
+}
+
+func TestMergeExcludedEnv_Deduplication(t *testing.T) {
+	acc := newImportAccumulator()
+	fm1 := map[string]any{"excluded-env": []any{"TOKEN_A", "TOKEN_B"}}
+	fm2 := map[string]any{"excluded-env": []any{"TOKEN_B", "TOKEN_C"}}
+	acc.mergeExcludedEnv(fm1)
+	acc.mergeExcludedEnv(fm2)
+	// TOKEN_B should appear only once
+	assert.Equal(t, []string{"TOKEN_A", "TOKEN_B", "TOKEN_C"}, acc.excludedEnv)
+}
+
+func TestMergeExcludedEnv_EmptyOrMissing(t *testing.T) {
+	acc := newImportAccumulator()
+	acc.mergeExcludedEnv(map[string]any{})
+	acc.mergeExcludedEnv(map[string]any{"excluded-env": []any{}})
+	assert.Empty(t, acc.excludedEnv)
+}
+
+func TestToImportsResult_MergedExcludedEnv(t *testing.T) {
+	acc := newImportAccumulator()
+	fm := map[string]any{"excluded-env": []any{"MY_TOKEN"}}
+	acc.mergeExcludedEnv(fm)
+	result := acc.toImportsResult(nil)
+	assert.Equal(t, []string{"MY_TOKEN"}, result.MergedExcludedEnv)
 }

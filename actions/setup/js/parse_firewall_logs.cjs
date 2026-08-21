@@ -7,6 +7,24 @@ const { sanitizeWorkflowName } = require("./sanitize_workflow_name.cjs");
 const { ERR_PARSE } = require("./error_codes.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 
+// Internal AWF sidecar container hostnames added to network.topologyAttach by
+// gh-aw itself. These are framework-managed and should be excluded from blocked
+// domain reporting in step summaries so they do not appear as actionable items.
+const AWF_INTERNAL_SIDECAR_HOSTS = new Set(["awmg-mcpg", "awmg-cli-proxy"]);
+
+/**
+ * Returns true when domainKey refers to a framework-internal sidecar container.
+ * domainKey may be "hostname:port" or bare "hostname".
+ * @param {string} domainKey
+ * @returns {boolean}
+ */
+function isInternalSidecarHost(domainKey) {
+  if (!domainKey || domainKey === "-") return false;
+  const lastColon = domainKey.lastIndexOf(":");
+  const host = lastColon > 0 ? domainKey.substring(0, lastColon) : domainKey;
+  return AWF_INTERNAL_SIDECAR_HOSTS.has(host);
+}
+
 /**
  * Parses firewall logs and creates a step summary
  * Firewall log format: timestamp client_ip:port domain dest_ip:port proto method status decision url user_agent
@@ -88,7 +106,7 @@ async function main() {
  * Parses a single firewall log line
  * Format: timestamp client_ip:port domain dest_ip:port proto method status decision url user_agent
  * @param {string} line - Log line to parse
- * @returns {object|null} Parsed entry or null if invalid
+ * @returns {any|null} Parsed entry or null if invalid
  */
 function parseFirewallLogLine(line) {
   const trimmed = line.trim();
@@ -190,19 +208,28 @@ function analyzeFirewallLogLines(lines) {
       allowedRequests++;
       allowedDomains.add(domainKey);
     } else {
-      blockedRequests++;
-      blockedDomains.add(domainKey);
+      // Skip internal sidecar hostnames (awmg-mcpg, awmg-cli-proxy) from the
+      // blocked domain set. These are framework-managed topology-attach containers
+      // and are not user-actionable external blocked domains.
+      if (!isInternalSidecarHost(domainKey)) {
+        blockedRequests++;
+        blockedDomains.add(domainKey);
+      }
     }
 
-    // Track request count per domain
-    if (!requestsByDomain.has(domainKey)) {
-      requestsByDomain.set(domainKey, { allowed: 0, blocked: 0 });
-    }
-    const domainStats = requestsByDomain.get(domainKey);
-    if (isAllowed) {
-      domainStats.allowed++;
-    } else {
-      domainStats.blocked++;
+    // Track request count per domain.
+    // Skip internal sidecar hostnames for blocked entries — they are already excluded from
+    // blockedRequests/blockedDomains above and must not appear in the summary domain table.
+    if (isAllowed || !isInternalSidecarHost(domainKey)) {
+      if (!requestsByDomain.has(domainKey)) {
+        requestsByDomain.set(domainKey, { allowed: 0, blocked: 0 });
+      }
+      const domainStats = requestsByDomain.get(domainKey);
+      if (isAllowed) {
+        domainStats.allowed++;
+      } else {
+        domainStats.blocked++;
+      }
     }
   }
 
@@ -212,7 +239,7 @@ function analyzeFirewallLogLines(lines) {
 /**
  * Generates markdown summary from firewall log analysis
  * Uses details/summary structure with basic stats in summary and domain table in details
- * @param {object} analysis - Analysis results
+ * @param {any} analysis - Analysis results
  * @returns {string} Markdown formatted summary
  */
 function generateFirewallSummary(analysis) {
@@ -266,6 +293,7 @@ if (typeof module !== "undefined" && module.exports) {
     isRequestAllowed,
     analyzeFirewallLogLines,
     generateFirewallSummary,
+    isInternalSidecarHost,
     main,
   };
 }

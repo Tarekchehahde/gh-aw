@@ -50,7 +50,9 @@ func TestLogsJSONOutputWithNoRuns(t *testing.T) {
 		if strings.Contains(errText, "failed to authenticate: no auth token found") ||
 			strings.Contains(errText, "GitHub CLI authentication required. Run 'gh auth login' first") ||
 			strings.Contains(errText, "could not find any workflows named nonexistent-workflow-12345") ||
-			strings.Contains(errText, "HTTP 403") {
+			strings.Contains(errText, "HTTP 403") ||
+			strings.Contains(errText, "failed to determine base repo") ||
+			strings.Contains(errText, "none of the git remotes configured") {
 			t.Skip("Skipping test: GitHub API behavior is not suitable for the no-runs scenario in this environment")
 		}
 		t.Fatalf("DownloadWorkflowLogs returned error: %v", err)
@@ -104,6 +106,7 @@ func TestLogsJSONOutputWithNoRuns(t *testing.T) {
 // TestLogsJSONRunDataFields verifies that run data includes key fields like
 // agent (engine_id), workflow_path, and workflow_name that should be resolved
 func TestLogsJSONRunDataFields(t *testing.T) {
+	t.Parallel()
 	tmpDir := testutil.TempDir(t, "test-logs-run-fields-*")
 
 	// Create a mock processed run with all fields populated
@@ -227,6 +230,7 @@ func TestLogsJSONRunDataFields(t *testing.T) {
 
 // TestLogsJSONOutputStructure verifies the complete JSON structure when there are no runs
 func TestLogsJSONOutputStructure(t *testing.T) {
+	t.Parallel()
 	tmpDir := testutil.TempDir(t, "test-logs-structure-*")
 
 	// Build logs data with empty runs
@@ -301,6 +305,7 @@ func TestLogsJSONOutputStructure(t *testing.T) {
 // TestSummaryFileWrittenWithNoRuns verifies that the summary.json file is created
 // even when there are no runs (important for campaign orchestrators)
 func TestSummaryFileWrittenWithNoRuns(t *testing.T) {
+	t.Parallel()
 	tmpDir := testutil.TempDir(t, "test-summary-*")
 
 	// Build logs data with empty runs

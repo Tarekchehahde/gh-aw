@@ -35,6 +35,9 @@ If no workflow names are specified, all workflows with a 'source' field are upda
 By default, the update performs a 3-way merge to preserve your local changes.
 Use --no-merge to override local changes with the upstream version.
 
+By default, update also bumps all referenced GitHub Actions to their latest major version.
+Use --no-release-bump to restrict auto-bumping to core actions/* actions only.
+
 For workflow updates, it fetches the latest version based on the current ref:
 - If the ref is a tag, it updates to the latest release (use --major for major version updates)
 - If the ref is a branch, it fetches the latest commit from that branch
@@ -75,14 +78,11 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 			noStopAfter, _ := cmd.Flags().GetBool("no-stop-after")
 			stopAfter, _ := cmd.Flags().GetString("stop-after")
 			noMergeFlag, _ := cmd.Flags().GetBool("no-merge")
-			disableReleaseBump, _ := cmd.Flags().GetBool("no-release-bump")
-			disableReleaseBumpLegacy, _ := cmd.Flags().GetBool("disable-release-bump")
-			disableReleaseBump = disableReleaseBump || disableReleaseBumpLegacy
+			disableReleaseBump := resolveDeprecatedBoolFlag(cmd, "no-release-bump", "disable-release-bump")
 			noCompile, _ := cmd.Flags().GetBool("no-compile")
 			noRedirect, _ := cmd.Flags().GetBool("no-redirect")
-			disableSecurityScanner, _ := cmd.Flags().GetBool("no-security-scanner")
-			disableSecurityScannerLegacy, _ := cmd.Flags().GetBool("disable-security-scanner")
-			disableSecurityScanner = disableSecurityScanner || disableSecurityScannerLegacy
+			disableSecurityScanner := resolveDeprecatedBoolFlag(cmd, "no-security-scanner", "disable-security-scanner")
+			approveFlag, _ := cmd.Flags().GetBool("approve")
 			createPRFlag, _ := cmd.Flags().GetBool("create-pull-request")
 			prFlagAlias, _ := cmd.Flags().GetBool("pr")
 			createPR := createPRFlag || prFlagAlias
@@ -136,6 +136,7 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 				NoRedirect:             noRedirect,
 				DisableSecurityScanner: disableSecurityScanner,
 				CoolDown:               coolDown,
+				Approve:                approveFlag,
 			}
 
 			if targetRepo != "" {
@@ -152,7 +153,7 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 
 			if createPR {
 				prBody := "This PR updates agentic workflows from their source repositories."
-				_, err := CreatePRWithChanges("update-workflows", "chore: update workflows",
+				_, err := CreatePRWithChanges(cmd.Context(), "update-workflows", "chore: update workflows",
 					"Update workflows from source", prBody, verbose)
 				return err
 			}
@@ -161,20 +162,19 @@ Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterpr
 	}
 
 	cmd.Flags().Bool("major", false, "Allow major version updates when updating tagged releases")
-	cmd.Flags().BoolP("force", "f", false, "Force update even if no changes are detected")
+	cmd.Flags().BoolP("force", "f", false, "Force update of workflow files even if no changes are detected")
 	addEngineFlag(cmd)
 	cmd.Flags().StringP("dir", "d", "", "Workflow directory (default: $GH_AW_WORKFLOWS_DIR or .github/workflows)")
 	cmd.Flags().Bool("no-stop-after", false, "Remove any stop-after field from the workflow")
 	cmd.Flags().String("stop-after", "", "Override stop-after value in the workflow (e.g., '+48h', '2025-12-31 23:59:59')")
-	cmd.Flags().Bool("no-merge", false, "Override local changes with upstream version instead of merging")
-	cmd.Flags().Bool("no-release-bump", false, "Disable automatic major version bumps for all actions (only core actions/* are force-updated)")
-	cmd.Flags().Bool("disable-release-bump", false, "Disable automatic major version bumps for all actions (only core actions/* are force-updated)")
+	cmd.Flags().Bool("no-merge", false, "Skip merging; override local changes with the upstream version")
+	cmd.Flags().Bool("no-release-bump", false, "Skip automatic major version bumps for non-core actions (only core actions/* are bumped)")
+	cmd.Flags().Bool("disable-release-bump", false, "Skip automatic major version bumps for non-core actions (only core actions/* are bumped)")
 	_ = cmd.Flags().MarkDeprecated("disable-release-bump", "use --no-release-bump instead")
-	cmd.Flags().Bool("no-security-scanner", false, "Skip security scanning of workflow markdown content")
-	cmd.Flags().Bool("disable-security-scanner", false, "Skip security scanning of workflow markdown content")
-	_ = cmd.Flags().MarkDeprecated("disable-security-scanner", "use --no-security-scanner instead")
+	addSecurityScannerFlag(cmd)
+	cmd.Flags().Bool("approve", false, "Approve all safe update changes. When strict mode is active (the default), the compiler emits warnings for new restricted secrets or unapproved action additions/removals not present in the existing gh-aw-manifest. Use this flag to approve and skip safe update enforcement")
 	cmd.Flags().Bool("no-compile", false, "Skip recompiling workflows during update (do not modify lock files)")
-	cmd.Flags().Bool("no-redirect", false, "Refuse updates when redirect frontmatter is present")
+	cmd.Flags().Bool("no-redirect", false, "Skip following redirects; refuse updates when redirect frontmatter is present")
 	cmd.Flags().String("org", "", "Preview or create workflow update pull requests across an organization")
 	cmd.Flags().StringSlice("repos", nil, "Limit --org mode to repositories matching one or more glob patterns")
 	addRepoFlag(cmd)
@@ -199,6 +199,7 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 	updateLog.Printf("Starting update process: workflows=%v, allowMajor=%v, force=%v, noMerge=%v, disableReleaseBump=%v, noCompile=%v, noRedirect=%v, coolDown=%v", opts.WorkflowNames, opts.AllowMajor, opts.Force, opts.NoMerge, opts.DisableReleaseBump, opts.NoCompile, opts.NoRedirect, opts.CoolDown)
 
 	var firstErr error
+	actionDeps := newCachedActionUpdateDeps(defaultActionUpdateDeps())
 
 	if err := UpdateWorkflows(ctx, opts); err != nil {
 		firstErr = fmt.Errorf("workflow update failed: %w", err)
@@ -208,17 +209,35 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 	// By default all actions are updated to the latest major version.
 	// Pass --no-release-bump to revert to only forcing updates for core (actions/*) actions.
 	updateLog.Printf("Updating GitHub Actions versions in actions-lock.json: allowMajor=%v, disableReleaseBump=%v", opts.AllowMajor, opts.DisableReleaseBump)
-	if err := UpdateActions(ctx, opts.AllowMajor, opts.Verbose, opts.DisableReleaseBump, opts.CoolDown); err != nil {
+	if err := updateActions(ctx, actionDeps, opts.AllowMajor, opts.Verbose, opts.DisableReleaseBump, opts.CoolDown); err != nil {
 		// Non-fatal: warn but don't fail the update
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update actions-lock.json: %v", err)))
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Could not update actions-lock.json: %v", err)))
 	}
 
 	// Update action references in user-provided steps within workflow .md files.
 	// By default all org/repo@version references are updated to the latest major version.
 	updateLog.Print("Updating action references in workflow .md files")
-	if err := UpdateActionsInWorkflowFiles(ctx, opts.WorkflowsDir, opts.EngineOverride, opts.Verbose, opts.DisableReleaseBump, opts.NoCompile, opts.CoolDown); err != nil {
-		// Non-fatal: warn but don't fail the update
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update action references in workflow files: %v", err)))
+	if err := updateActionsInWorkflowFiles(ctx, actionDeps, updateActionsOptions{
+		workflowsDir:       opts.WorkflowsDir,
+		engineOverride:     opts.EngineOverride,
+		verbose:            opts.Verbose,
+		disableReleaseBump: opts.DisableReleaseBump,
+		noCompile:          opts.NoCompile,
+		coolDown:           opts.CoolDown,
+		approve:            opts.Approve,
+	}); err != nil {
+		var compilationErr *updateCompilationError
+		if errors.As(err, &compilationErr) {
+			compileErr := fmt.Errorf("workflow compilation after action reference update failed: %w", err)
+			if firstErr == nil {
+				firstErr = compileErr
+			} else {
+				firstErr = errors.Join(firstErr, compileErr)
+			}
+		} else {
+			// Non-fatal: warn but don't fail the update
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Could not update action references in workflow files: %v", err)))
+		}
 	}
 
 	// Resolve and store SHA-256 digest pins for container images referenced in lock files.
@@ -226,10 +245,10 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 	// already reflect the current AWF version; stale pins from superseded versions are pruned
 	// and new versions are resolved in a single pass.
 	updateLog.Print("Updating container image digest pins")
-	newContainerPins, err := UpdateContainerPins(ctx, opts.WorkflowsDir, opts.Verbose)
+	newContainerPins, err := updateContainerPins(ctx, defaultContainerPinUpdateDeps(), opts.WorkflowsDir, opts.Verbose, containerPinUpdateOptions{refreshExisting: true})
 	if err != nil {
 		// Non-fatal: Docker may not be available in all environments.
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update container pins: %v", err)))
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Could not update container pins: %v", err)))
 	}
 
 	// Recompile all workflows when new container pins were added so that the
@@ -237,9 +256,24 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 	if newContainerPins && !opts.NoCompile {
 		updateLog.Print("Recompiling workflows to embed new container digest pins")
 		fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Recompiling workflows to embed container digest pins..."))
-		recompileErr := recompileAllWorkflows(ctx, opts.WorkflowsDir, opts.EngineOverride, opts.Verbose)
+		recompileErr := recompileAllWorkflows(ctx, opts.WorkflowsDir, opts.EngineOverride, opts.Verbose, opts.Approve)
 		if recompileErr != nil {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to recompile workflows after container pin update: %v", recompileErr)))
+			compileErr := fmt.Errorf("workflow compilation after container pin update failed: %w", recompileErr)
+			if firstErr == nil {
+				firstErr = compileErr
+			} else {
+				firstErr = errors.Join(firstErr, compileErr)
+			}
+		}
+	}
+
+	if firstErr == nil {
+		updateLog.Print("Validating action and container SHAs in actions-lock.json")
+		if err := validateUpdateSHAEntries(ctx, "."); err != nil {
+			return fmt.Errorf("update validation failed: %w", err)
+		}
+		if opts.Verbose {
+			fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Validated action and container SHAs in actions-lock.json"))
 		}
 	}
 
@@ -250,28 +284,11 @@ func RunUpdateWorkflows(ctx context.Context, opts UpdateWorkflowsOptions) error 
 // recompileAllWorkflows recompiles all .md workflow files in the given directory.
 // This is used after container pin updates to embed digest-pinned image references
 // in the generated lock files.
-func recompileAllWorkflows(ctx context.Context, workflowsDir, engineOverride string, verbose bool) error {
+func recompileAllWorkflows(ctx context.Context, workflowsDir, engineOverride string, verbose bool, approve bool) error {
 	if workflowsDir == "" {
 		workflowsDir = getWorkflowsDir()
 	}
-
-	entries, err := os.ReadDir(workflowsDir)
-	if err != nil {
-		return fmt.Errorf("failed to read workflows directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
-			continue
-		}
-		path := filepath.Join(workflowsDir, entry.Name())
-		if err := compileWorkflowWithRefresh(ctx, path, verbose, true, engineOverride, false); err != nil {
-			if verbose {
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Failed to recompile %s: %v", entry.Name(), err)))
-			}
-		}
-	}
-	return nil
+	return compileWorkflowsForUpdate(ctx, nil, workflowsDir, engineOverride, verbose, approve)
 }
 
 func runUpdateForTargetRepo(ctx context.Context, targetRepo string, opts UpdateWorkflowsOptions, createPR bool, verbose bool) error {
@@ -317,7 +334,7 @@ func runUpdateForTargetRepo(ctx context.Context, targetRepo string, opts UpdateW
 	}
 
 	if createPR {
-		releaseTag, releaseURL := getGhawReleaseInfo()
+		releaseTag, releaseURL := getGhawReleaseInfo(ctx)
 		xmlMarker := buildOrgXMLMarker(ghawUpdateMarkerPrefix, releaseTag)
 
 		// Close any stale update PRs in the target repo before creating the new one.
@@ -330,7 +347,7 @@ func runUpdateForTargetRepo(ctx context.Context, targetRepo string, opts UpdateW
 		prBody := "This PR updates agentic workflows from their source repositories." +
 			releaseLine + "\n" + xmlMarker
 
-		prURL, err := CreatePRWithChanges("update-workflows", "chore: update workflows",
+		prURL, err := CreatePRWithChanges(ctx, "update-workflows", "chore: update workflows",
 			"Update workflows from source", prBody, verbose)
 		if err != nil {
 			return err

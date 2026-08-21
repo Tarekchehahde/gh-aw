@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
@@ -38,6 +37,9 @@ import (
 var copilotExecLog = logger.New("workflow:copilot_engine_execution")
 
 const customEngineCommandScriptPath = "/tmp/gh-aw/engine-command.sh"
+
+// copilotExecutionStepName is the display name of the generated Copilot CLI execution step.
+const copilotExecutionStepName = "Execute GitHub Copilot CLI"
 
 // copilotSettingsPath is the shell expression that resolves to the Copilot CLI settings
 // file at runtime. The Copilot CLI resolves its config directory as ~/.copilot, which is
@@ -85,11 +87,13 @@ func buildCopilotSettingsSetup(settingsContent string, fixOwnershipForCustomComm
 		shellEscapeArg(settingsContent), copilotSettingsPath)
 }
 
-// buildCopilotSettingsCleanupTrap returns a shell trap command that removes the
-// temporary Copilot settings file at step exit. The trap body is single-quoted so
-// $HOME is expanded by the shell at trap-fire time rather than trap-definition time.
-func buildCopilotSettingsCleanupTrap() string {
-	return fmt.Sprintf("trap 'rm -f \"%s\"' EXIT\n", copilotSettingsPath)
+// buildCopilotSettingsCleanupAndExitCodeTrap adds Copilot settings cleanup to the
+// shared agent execution exit-code trap.
+//
+// The body is single-quoted so $HOME in copilotSettingsPath is expanded at trap-fire
+// time (matching buildCopilotSettingsCleanupTrap behavior).
+func buildCopilotSettingsCleanupAndExitCodeTrap() string {
+	return buildAgentExecutionExitCodeTrapWithCleanup(fmt.Sprintf(`rm -f "%s"`, copilotSettingsPath))
 }
 
 // buildCopilotMCPConfigExport returns shell commands that export Copilot-CLI-specific
@@ -115,6 +119,19 @@ const nodePathSetupCommand = `GH_AW_NPM_GLOBAL_ROOT="$(npm root -g 2>/dev/null |
 const nodeRuntimeResolutionCommand = `GH_AW_NODE_EXEC="${GH_AW_NODE_BIN:-}"; if [ -z "$GH_AW_NODE_EXEC" ] || [ ! -x "$GH_AW_NODE_EXEC" ]; then GH_AW_NODE_EXEC="$(command -v node 2>/dev/null || true)"; fi; if [ -z "$GH_AW_NODE_EXEC" ]; then echo "node runtime missing on this runner — check runtimes.node in workflow YAML" >&2; exit 127; fi; ` + nodePathSetupCommand + `; "$GH_AW_NODE_EXEC"`
 const nodePathSetupCommandForCopilotSDK = `GH_AW_WORKSPACE_NODE_MODULES="${GITHUB_WORKSPACE:-$PWD}/node_modules"; if [ -d "$GH_AW_WORKSPACE_NODE_MODULES" ]; then export NODE_PATH="${GH_AW_WORKSPACE_NODE_MODULES}${NODE_PATH:+:${NODE_PATH}}"; fi; ` + nodePathSetupCommand
 const nodeRuntimeResolutionCommandForCopilotSDK = `GH_AW_NODE_EXEC="${GH_AW_NODE_BIN:-}"; if [ -z "$GH_AW_NODE_EXEC" ] || [ ! -x "$GH_AW_NODE_EXEC" ]; then GH_AW_NODE_EXEC="$(command -v node 2>/dev/null || true)"; fi; if [ -z "$GH_AW_NODE_EXEC" ]; then echo "node runtime missing on this runner — check runtimes.node in workflow YAML" >&2; exit 127; fi; ` + nodePathSetupCommandForCopilotSDK + `; "$GH_AW_NODE_EXEC"`
+const copilotBinaryPathSetup = `GH_AW_COPILOT_SRC="$(command -v copilot 2>/dev/null || true)"
+if [ -z "$GH_AW_COPILOT_SRC" ] || [ ! -x "$GH_AW_COPILOT_SRC" ]; then
+  echo "GitHub Copilot CLI executable not found on PATH after installation" >&2
+  exit 127
+fi
+GH_AW_COPILOT_BIN="${RUNNER_TEMP}/gh-aw/bin/copilot"
+mkdir -p "${RUNNER_TEMP}/gh-aw/bin"
+if [ "$GH_AW_COPILOT_SRC" != "$GH_AW_COPILOT_BIN" ]; then
+  cp "$GH_AW_COPILOT_SRC" "$GH_AW_COPILOT_BIN"
+fi
+chmod 755 "$GH_AW_COPILOT_BIN"
+`
+const copilotSDKPythonPathExpression = "${{ github.workspace }}/.gh-aw/copilot-sdk/python"
 
 // copilotSDKDriverExecArgs returns the runtime command and driver path argument for the
 // given SDK driver filename.
@@ -124,11 +141,11 @@ const nodeRuntimeResolutionCommandForCopilotSDK = `GH_AW_NODE_EXEC="${GH_AW_NODE
 // SetupActionDestinationShell). For bare command names (no extension), the driver is treated
 // as an arbitrary executable in PATH: runtimeCmd is the command itself and driverArg is empty.
 //
-//   - .js/.cjs/.mjs → ("$GH_AW_NODE_EXEC", "driver.cjs")
-//   - .py           → ("python3",           "driver.py")
-//   - .ts/.mts      → ("ts-node",           "driver.ts")
-//   - .rb           → ("ruby",              "driver.rb")
-//   - (no ext)      → ("my-driver",         "")
+//   - .js/.cjs/.mjs → ("$GH_AW_NODE_EXEC",  "driver.cjs")
+//   - .py           → ("python3",             "driver.py")
+//   - .ts/.mts      → ("$GH_AW_NODE_EXEC",   "driver.ts")
+//   - .rb           → ("ruby",                "driver.rb")
+//   - (no ext)      → ("my-driver",           "")
 func copilotSDKDriverExecArgs(driverName string) (runtimeCmd, driverArg string) {
 	ext := strings.ToLower(filepath.Ext(driverName))
 	switch ext {
@@ -137,12 +154,40 @@ func copilotSDKDriverExecArgs(driverName string) (runtimeCmd, driverArg string) 
 	case ".py":
 		return "python3", driverName
 	case ".ts", ".mts":
-		return "ts-node", driverName
+		// Node 24 runs TypeScript natively; use the same node executor as .js drivers.
+		return `"$GH_AW_NODE_EXEC"`, driverName
 	case ".rb":
 		return "ruby", driverName
 	default:
 		// No extension — arbitrary command in PATH; use name directly as command.
 		return driverName, ""
+	}
+}
+
+// copilotSDKRuntimeID returns the runtime ID used by Copilot SDK driver execution.
+// It returns one of: python, typescript, ruby, or node (default/fallback).
+// engine.command takes precedence; otherwise runtime is inferred from engine.driver extension.
+func copilotSDKRuntimeID(workflowData *WorkflowData) string {
+	if workflowData == nil || workflowData.EngineConfig == nil {
+		return "node"
+	}
+	if runtimeID := copilotSDKInlineDriverRuntimeID(workflowData); runtimeID != "" {
+		return runtimeID
+	}
+	command := workflowData.EngineConfig.Command
+	if command != "" {
+		return detectRuntimeFromCopilotCommand(command)
+	}
+	ext := strings.ToLower(filepath.Ext(workflowData.EngineConfig.Driver))
+	switch ext {
+	case ".py":
+		return "python"
+	case ".ts", ".mts":
+		return "typescript"
+	case ".rb":
+		return "ruby"
+	default:
+		return "node"
 	}
 }
 
@@ -152,13 +197,11 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 
 	sandboxEnabled := isFirewallEnabled(workflowData)
 	llmProvider := e.ResolveLLMProvider(workflowData)
-	providerOverrideBYOK := llmProvider != LLMProviderGitHub && sandboxEnabled
-	isBYOKMode := providerOverrideBYOK || engineEnvHasKey(workflowData, constants.CopilotProviderBaseURL)
-	isDetectionJob := workflowData.SafeOutputs == nil
-	modelConfigured := workflowData.EngineConfig != nil && workflowData.EngineConfig.Model != ""
+	isBYOKMode := isCopilotBYOKMode(workflowData, sandboxEnabled)
+	modelConfigured := workflowData.Model != ""
 	copilotArgs := e.buildCopilotArgs(workflowData)
 	mkdirCommands := buildCopilotMkdirCommands(copilotArgs)
-	modelEnvVar := getCopilotModelEnvVar(isDetectionJob)
+	modelEnvVar := getCopilotModelEnvVar(workflowData)
 	timeoutValue := getCopilotTimeoutValue(workflowData)
 	commandName, customCommandScriptSetup := e.resolveCopilotCommand(workflowData, sandboxEnabled)
 	execPrefix := e.buildCopilotExecPrefix(workflowData, commandName)
@@ -166,7 +209,16 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 		workflowData, copilotArgs, execPrefix, customCommandScriptSetup, logFile, mkdirCommands, isBYOKMode,
 	)
 	env := e.buildCopilotStepEnv(
-		workflowData, llmProvider, modelEnvVar, timeoutValue, isBYOKMode, sandboxEnabled, modelConfigured, copilotSDKServerArgsJSON,
+		workflowData,
+		llmProvider,
+		modelEnvVar,
+		timeoutValue,
+		copilotStepEnvFlags{
+			byokMode:        isBYOKMode,
+			sandboxEnabled:  sandboxEnabled,
+			modelConfigured: modelConfigured,
+		},
+		copilotSDKServerArgsJSON,
 	)
 
 	return []GitHubActionStep{e.buildCopilotExecutionStep(workflowData, command, env, timeoutValue)}
@@ -175,7 +227,7 @@ func (e *CopilotEngine) GetExecutionSteps(workflowData *WorkflowData, logFile st
 // buildCopilotArgs builds the Copilot CLI argument list based on workflow configuration.
 func (e *CopilotEngine) buildCopilotArgs(workflowData *WorkflowData) []string {
 	sandboxEnabled := isFirewallEnabled(workflowData)
-	isDetectionJob := workflowData.SafeOutputs == nil
+	isDetectionJob := isDetectionRun(workflowData)
 	copilotArgs := e.buildCopilotBaseArgs(sandboxEnabled)
 
 	// Add --disable-builtin-mcps to disable built-in MCP servers
@@ -262,7 +314,11 @@ func buildCopilotMkdirCommands(copilotArgs []string) string {
 	return mkdirCommands.String()
 }
 
-func getCopilotModelEnvVar(isDetectionJob bool) string {
+func getCopilotModelEnvVar(workflowData *WorkflowData) string {
+	if workflowRunPhase(workflowData) == runPhaseEvals {
+		return constants.EnvVarModelEvalsCopilot
+	}
+	isDetectionJob := isDetectionRun(workflowData)
 	if isDetectionJob {
 		return constants.EnvVarModelDetectionCopilot
 	}
@@ -270,18 +326,7 @@ func getCopilotModelEnvVar(isDetectionJob bool) string {
 }
 
 func getCopilotTimeoutValue(workflowData *WorkflowData) string {
-	timeoutValue := strconv.Itoa(int(constants.DefaultAgenticWorkflowTimeout / time.Minute))
-	if workflowData.TimeoutMinutes == "" {
-		return timeoutValue
-	}
-	rawTimeoutValue := strings.TrimSpace(workflowData.TimeoutMinutes)
-	if after, ok := strings.CutPrefix(rawTimeoutValue, "timeout-minutes:"); ok {
-		rawTimeoutValue = strings.TrimSpace(after)
-	}
-	if rawTimeoutValue != "" {
-		return rawTimeoutValue
-	}
-	return timeoutValue
+	return resolveStepTimeoutValue(workflowData)
 }
 
 func (e *CopilotEngine) resolveCopilotCommand(workflowData *WorkflowData, sandboxEnabled bool) (string, string) {
@@ -290,12 +335,10 @@ func (e *CopilotEngine) resolveCopilotCommand(workflowData *WorkflowData, sandbo
 		return customEngineCommandScriptPath, buildEngineCommandScriptSetup(workflowData.EngineConfig.Command)
 	}
 	if sandboxEnabled {
-		if isArcDindTopology(workflowData) {
-			return constants.GhAwRootDirShell + "/bin/copilot", ""
-		}
-		// AWF - use the installed binary directly
-		// The binary is mounted into the AWF container from /usr/local/bin/copilot
-		return constants.CopilotBinaryPath, ""
+		// Every AWF runtime receives RUNNER_TEMP/gh-aw as a read-only mount. Standard,
+		// gVisor, and docker-sbx runs stage the activated binary in the execution step;
+		// ARC/DinD stages it during installation so the remote daemon can see it.
+		return `"` + constants.GhAwRootDirShell + `/bin/copilot"`, ""
 	}
 	// Non-sandbox mode: use standard copilot command
 	return "copilot", ""
@@ -320,15 +363,16 @@ func (e *CopilotEngine) buildCopilotExecPrefix(workflowData *WorkflowData, comma
 	if harnessScriptName == "" {
 		return commandName
 	}
+	harnessScriptPath := fmt.Sprintf(`"%s/%s"`, SetupActionDestinationShell, harnessScriptName)
 	runtimeResolutionCommand := nodeRuntimeResolutionCommand
 	if workflowData.EngineConfig != nil && workflowData.EngineConfig.CopilotSDK {
 		runtimeResolutionCommand = nodeRuntimeResolutionCommandForCopilotSDK
-		return e.buildCopilotSDKExecPrefix(workflowData, commandName, harnessScriptName, runtimeResolutionCommand)
+		return e.buildCopilotSDKExecPrefix(workflowData, commandName, harnessScriptPath, runtimeResolutionCommand)
 	}
-	return fmt.Sprintf(`%s %s/%s %s`, runtimeResolutionCommand, SetupActionDestinationShell, harnessScriptName, commandName)
+	return fmt.Sprintf(`%s %s %s`, runtimeResolutionCommand, harnessScriptPath, commandName)
 }
 
-func (e *CopilotEngine) buildCopilotSDKExecPrefix(workflowData *WorkflowData, commandName, harnessScriptName, runtimeResolutionCommand string) string {
+func (e *CopilotEngine) buildCopilotSDKExecPrefix(workflowData *WorkflowData, commandName, harnessScriptPath, runtimeResolutionCommand string) string {
 	sdkDriverScriptName := "copilot_sdk_driver.cjs"
 	customSDKDriverConfigured := workflowData.EngineConfig != nil && workflowData.EngineConfig.Driver != ""
 	if customSDKDriverConfigured {
@@ -340,7 +384,10 @@ func (e *CopilotEngine) buildCopilotSDKExecPrefix(workflowData *WorkflowData, co
 	// by extension; bare command names (no extension) are treated as arbitrary executables in PATH.
 	driverRuntimeCmd, driverArg := copilotSDKDriverExecArgs(sdkDriverScriptName)
 	if driverArg == "" {
-		return fmt.Sprintf(`%s %s/%s %s %s`, runtimeResolutionCommand, SetupActionDestinationShell, harnessScriptName, driverRuntimeCmd, commandName)
+		if customSDKDriverConfigured && strings.Contains(sdkDriverScriptName, "/") {
+			driverRuntimeCmd = `"${GITHUB_WORKSPACE}/` + sdkDriverScriptName + `"`
+		}
+		return fmt.Sprintf(`%s %s %s %s`, runtimeResolutionCommand, harnessScriptPath, driverRuntimeCmd, commandName)
 	}
 	driverPath := fmt.Sprintf(`"%s/%s"`, SetupActionDestinationShell, sdkDriverScriptName)
 	if customSDKDriverConfigured {
@@ -350,7 +397,7 @@ func (e *CopilotEngine) buildCopilotSDKExecPrefix(workflowData *WorkflowData, co
 		driverPath = `"${GITHUB_WORKSPACE}/` + sdkDriverScriptName + `"`
 	}
 	// Language script: harness runs <runtime> <setup-action-dir>/<harness> <runtime> <driver-path> <copilot-binary>
-	return fmt.Sprintf(`%s %s/%s %s %s %s`, runtimeResolutionCommand, SetupActionDestinationShell, harnessScriptName, driverRuntimeCmd, driverPath, commandName)
+	return fmt.Sprintf(`%s %s %s %s %s`, runtimeResolutionCommand, harnessScriptPath, driverRuntimeCmd, driverPath, commandName)
 }
 
 func (e *CopilotEngine) buildCopilotCommand(workflowData *WorkflowData, copilotArgs []string, execPrefix, customCommandScriptSetup, logFile, mkdirCommands string, isBYOKMode bool) (string, string) {
@@ -363,7 +410,7 @@ func (e *CopilotEngine) buildCopilotCommand(workflowData *WorkflowData, copilotA
 
 func (e *CopilotEngine) buildCopilotBaseCommand(workflowData *WorkflowData, copilotArgs []string, execPrefix string) (string, string) {
 	if workflowData.EngineConfig != nil && workflowData.EngineConfig.CopilotSDK {
-		return e.buildCopilotSDKCommand(execPrefix, copilotArgs)
+		return e.buildCopilotSDKCommand(workflowData, execPrefix, copilotArgs)
 	}
 	// On ARC/DinD, /tmp/gh-aw is not daemon-visible; prompts are copied to ${RUNNER_TEMP}/gh-aw/
 	promptFilePath := constants.AwPromptsFile
@@ -378,12 +425,17 @@ func (e *CopilotEngine) buildCopilotBaseCommand(workflowData *WorkflowData, copi
 	return fmt.Sprintf(`%s %s --prompt-file %s`, execPrefix, shellJoinArgs(copilotArgs), promptFilePath), ""
 }
 
-func (e *CopilotEngine) buildCopilotSDKCommand(execPrefix string, copilotArgs []string) (string, string) {
+func (e *CopilotEngine) buildCopilotSDKCommand(workflowData *WorkflowData, execPrefix string, copilotArgs []string) (string, string) {
 	// SDK driver mode: configuration is passed via environment variables so that
 	// copilot_sdk_driver.cjs is a self-contained program started by the harness like any other command.
 	// GH_AW_COPILOT_SDK_SERVER_ARGS carries the JSON-encoded CLI argument list for the headless
 	// Copilot CLI sidecar, and the driver appends --add-dir $GITHUB_WORKSPACE automatically.
-	serverArgs := append([]string{"--headless", "--no-auto-update", "--port", strconv.Itoa(constants.DefaultCopilotSDKPort)}, copilotArgs...)
+	serverArgsPrefix := []string{"--headless", "--no-auto-update"}
+	if isCloudHypervisorRuntime(workflowData) {
+		serverArgsPrefix = append(serverArgsPrefix, "--host", "0.0.0.0")
+	}
+	serverArgsPrefix = append(serverArgsPrefix, "--port", strconv.Itoa(constants.DefaultCopilotSDKPort))
+	serverArgs := append(serverArgsPrefix, copilotArgs...)
 	serverArgsJSON, err := json.Marshal(serverArgs)
 	if err != nil {
 		// This should never happen with a plain string slice, but fall back to an
@@ -432,16 +484,33 @@ func (e *CopilotEngine) buildCopilotAllowedDomains(workflowData *WorkflowData) s
 }
 
 func (e *CopilotEngine) buildCopilotAWFPathSetup(workflowData *WorkflowData, customCommandScriptSetup string) string {
-	pathSetup := "touch " + AgentStepSummaryPath + "\n" +
+	stepSummaryPath := copilotStepSummaryPath(workflowData)
+	pathSetup := "touch " + stepSummaryPath + "\n" +
 		"GH_AW_NODE_BIN=$(command -v node 2>/dev/null || true)\n" +
 		"export GH_AW_NODE_BIN\n" +
 		"export COPILOT_API_KEY=\"$" + constants.CopilotBYOKDummyAPIKeyEnvVar + "\""
+	usesInstalledCopilotBinary := workflowData.EngineConfig == nil || workflowData.EngineConfig.Command == ""
+	if usesInstalledCopilotBinary && !isArcDindTopology(workflowData) {
+		pathSetup = copilotBinaryPathSetup + "\n" + pathSetup
+	}
 	if customCommandScriptSetup != "" {
 		pathSetup = customCommandScriptSetup + "\n" + pathSetup
 	}
+	homeExport := ""
+	if isArcDindTopology(workflowData) {
+		homeExport = fmt.Sprintf("export HOME=%s\n", awfArcDindHomePathExpr)
+	}
 	// Write the Copilot settings file before AWF starts. The file is created on the host and mounted
 	// into the container, where the Copilot CLI reads it to disable the rubber-duck sub-agent.
-	return buildCopilotSettingsCleanupTrap() + buildCopilotSettingsSetup(buildCopilotSettingsContent(workflowData), customCommandScriptSetup != "") + buildCopilotMCPConfigExport(workflowData) + pathSetup
+	return homeExport + buildCopilotSettingsCleanupAndExitCodeTrap() + buildCopilotSettingsSetup(buildCopilotSettingsContent(workflowData), customCommandScriptSetup != "") + buildCopilotMCPConfigExport(workflowData) + pathSetup
+}
+
+func copilotStepSummaryPath(workflowData *WorkflowData) string {
+	if workflowData != nil && workflowData.IsDetectionRun &&
+		!isFeatureEnabled(constants.GHAWDetectionFeatureFlag, workflowData) {
+		return constants.ThreatDetectionStepSummaryPath
+	}
+	return AgentStepSummaryPath
 }
 
 func (e *CopilotEngine) buildCopilotDirectCommand(workflowData *WorkflowData, copilotCommand, customCommandScriptSetup, mkdirCommands, logFile string) string {
@@ -452,28 +521,41 @@ func (e *CopilotEngine) buildCopilotDirectCommand(workflowData *WorkflowData, co
 		preCommandSetup = customCommandScriptSetup + "\n" + preCommandSetup
 	}
 	// Write the Copilot settings file before the agent runs to disable the rubber-duck sub-agent.
-	preCommandSetup = buildCopilotSettingsCleanupTrap() + buildCopilotSettingsSetup(buildCopilotSettingsContent(workflowData), customCommandScriptSetup != "") + buildCopilotMCPConfigExport(workflowData) + preCommandSetup
+	preCommandSetup = buildCopilotSettingsCleanupAndExitCodeTrap() + buildCopilotSettingsSetup(buildCopilotSettingsContent(workflowData), customCommandScriptSetup != "") + buildCopilotMCPConfigExport(workflowData) + preCommandSetup
 	return fmt.Sprintf(`set -o pipefail
 printf '%%s' "$(date +%%s%%3N)" > %s
 touch %s
 (umask 177 && touch %s)
-%s%s 2>&1 | tee %s`, AgentCLIStartMsPath, AgentStepSummaryPath, logFile, preCommandSetup, copilotCommand, logFile)
+%s%s 2>&1 | tee %s`, AgentCLIStartMsPath, copilotStepSummaryPath(workflowData), logFile, preCommandSetup, copilotCommand, logFile)
 }
 
-func (e *CopilotEngine) buildCopilotStepEnv(workflowData *WorkflowData, llmProvider, modelEnvVar, timeoutValue string, isBYOKMode, sandboxEnabled, modelConfigured bool, copilotSDKServerArgsJSON string) map[string]string {
+type copilotStepEnvFlags struct {
+	byokMode        bool
+	sandboxEnabled  bool
+	modelConfigured bool
+}
+
+func (e *CopilotEngine) buildCopilotStepEnv(
+	workflowData *WorkflowData,
+	llmProvider LLMProvider,
+	modelEnvVar string,
+	timeoutValue string,
+	flags copilotStepEnvFlags,
+	copilotSDKServerArgsJSON string,
+) map[string]string {
 	useCopilotRequests := hasCopilotRequestsWritePermission(workflowData)
-	env := e.buildCopilotBaseStepEnv(workflowData, llmProvider, timeoutValue, isBYOKMode, useCopilotRequests)
-	e.addCopilotWorkflowStepEnv(env, workflowData, sandboxEnabled)
+	env := e.buildCopilotBaseStepEnv(workflowData, llmProvider, timeoutValue, flags.byokMode, useCopilotRequests)
+	e.addCopilotWorkflowStepEnv(env, workflowData, flags.sandboxEnabled)
 	e.addCopilotGitHubToolEnv(env, workflowData)
-	e.addCopilotModelEnv(env, workflowData, modelConfigured, modelEnvVar)
+	e.addCopilotModelEnv(env, workflowData, flags.modelConfigured, modelEnvVar)
 	e.addCopilotFinalStepEnv(env, workflowData)
-	e.addCopilotSandboxEnv(env, sandboxEnabled)
+	e.addCopilotSandboxEnv(env, flags.sandboxEnabled)
 	e.addCopilotSDKStepEnv(env, workflowData, copilotSDKServerArgsJSON)
 	return env
 }
 
-func (e *CopilotEngine) buildCopilotBaseStepEnv(workflowData *WorkflowData, llmProvider, timeoutValue string, isBYOKMode, useCopilotRequests bool) map[string]string {
-	env := map[string]string{"COPILOT_AGENT_RUNNER_TYPE": "STANDALONE", "GITHUB_STEP_SUMMARY": AgentStepSummaryPath, "GITHUB_HEAD_REF": "${{ github.head_ref }}", "GITHUB_REF_NAME": "${{ github.ref_name }}", "GITHUB_WORKSPACE": "${{ github.workspace }}", "RUNNER_TEMP": "${{ runner.temp }}", "GH_AW_TIMEOUT_MINUTES": timeoutValue, "GITHUB_SERVER_URL": "${{ github.server_url }}", "GITHUB_API_URL": "${{ github.api_url }}", "GH_AW_LLM_PROVIDER": llmProvider}
+func (e *CopilotEngine) buildCopilotBaseStepEnv(workflowData *WorkflowData, llmProvider LLMProvider, timeoutValue string, isBYOKMode, useCopilotRequests bool) map[string]string {
+	env := map[string]string{"COPILOT_AGENT_RUNNER_TYPE": "STANDALONE", "GITHUB_STEP_SUMMARY": copilotStepSummaryPath(workflowData), "GITHUB_HEAD_REF": "${{ github.head_ref }}", "GITHUB_REF_NAME": "${{ github.ref_name }}", "GITHUB_WORKSPACE": "${{ github.workspace }}", "RUNNER_TEMP": "${{ runner.temp }}", "GH_AW_TIMEOUT_MINUTES": timeoutValue, "GITHUB_SERVER_URL": "${{ github.server_url }}", "GITHUB_API_URL": "${{ github.api_url }}", "GH_AW_LLM_PROVIDER": string(llmProvider)}
 	// Auto-configure Copilot BYOK routing when engine.model-provider selects a non-GitHub provider.
 	// Explicit engine.env values still win later via maps.Copy.
 	if llmProvider != LLMProviderGitHub && isFirewallEnabled(workflowData) {
@@ -520,11 +602,7 @@ func (e *CopilotEngine) addCopilotWorkflowStepEnv(env map[string]string, workflo
 	env["GH_AW_PROMPT"] = constants.AwPromptsFile
 	// Tag the step as a GitHub AW agentic execution for discoverability by agents
 	env["GITHUB_AW"] = "true"
-	if workflowData.IsDetectionRun {
-		env["GH_AW_PHASE"] = "detection"
-	} else {
-		env["GH_AW_PHASE"] = "agent"
-	}
+	env["GH_AW_PHASE"] = workflowRunPhase(workflowData)
 	if IsRelease() {
 		env["GH_AW_VERSION"] = GetVersion()
 	} else {
@@ -566,8 +644,11 @@ func (e *CopilotEngine) addCopilotModelEnv(env map[string]string, workflowData *
 	// The model is always passed via the native COPILOT_MODEL env var, which the Copilot CLI reads directly.
 	// When model is not configured, map the GitHub org variable to COPILOT_MODEL so users can set a default.
 	if modelConfigured {
-		copilotExecLog.Printf("Setting %s env var for model: %s", constants.CopilotCLIModelEnvVar, workflowData.EngineConfig.Model)
-		env[constants.CopilotCLIModelEnvVar] = workflowData.EngineConfig.Model
+		if containsExpression(workflowData.Model) {
+			env[constants.EnvVarModelFallback] = compilerenv.BuildModelOverrideExpression(modelEnvVar, compilerenv.DefaultModelCopilot, constants.CopilotBYOKDefaultModel)
+		}
+		copilotExecLog.Printf("Setting %s env var for model: %s", constants.CopilotCLIModelEnvVar, workflowData.Model)
+		env[constants.CopilotCLIModelEnvVar] = workflowData.Model
 		return
 	}
 	env[constants.CopilotCLIModelEnvVar] = compilerenv.BuildModelOverrideExpression(modelEnvVar, compilerenv.DefaultModelCopilot, constants.CopilotBYOKDefaultModel)
@@ -608,11 +689,14 @@ func (e *CopilotEngine) addCopilotSDKStepEnv(env map[string]string, workflowData
 	env[constants.CopilotSDKDriverEnvVar] = "1"
 	env[constants.CopilotSDKServerArgsEnvVar] = copilotSDKServerArgsJSON
 	copilotExecLog.Printf("copilot-sdk driver mode: set %s and %s", constants.CopilotSDKDriverEnvVar, constants.CopilotSDKServerArgsEnvVar)
+	if currentPythonPath, exists := env["PYTHONPATH"]; copilotSDKRuntimeID(workflowData) == "python" && (!exists || currentPythonPath == "") {
+		env["PYTHONPATH"] = copilotSDKPythonPathExpression
+	}
 }
 
 func (e *CopilotEngine) buildCopilotExecutionStep(workflowData *WorkflowData, command string, env map[string]string, timeoutValue string) GitHubActionStep {
 	// Generate the step for Copilot CLI execution
-	stepLines := []string{"      - name: Execute GitHub Copilot CLI", "        id: agentic_execution"}
+	stepLines := []string{"      - name: " + copilotExecutionStepName, "        id: agentic_execution"}
 	// Add tool arguments comment before the run section
 	toolArgsComment := e.generateCopilotToolArgumentsComment(workflowData.Tools, workflowData.SafeOutputs, workflowData.MCPScripts, workflowData, "        ")
 	if toolArgsComment != "" {
@@ -641,6 +725,9 @@ func (e *CopilotEngine) buildCopilotExecutionStep(workflowData *WorkflowData, co
 //     DefaultCopilotVersion. This preserves existing behavior while avoiding drift if
 //     DefaultCopilotVersion is ever lowered below CopilotNoAskUserMinVersion.
 //   - "latest": always returns true (latest is always a new release).
+//   - Expression (e.g. "${{ inputs.engine-version }}"): returns true. The version resolves
+//     at runtime so we cannot gate at compile time; the installer already handles expression
+//     versions via ENGINE_VERSION env-var injection, ensuring the right binary is installed.
 //   - Any semver string ≥ CopilotNoAskUserMinVersion: returns true.
 //   - Any semver string < CopilotNoAskUserMinVersion: returns false.
 //   - Non-semver string (e.g. a branch name): returns false (conservative).
@@ -648,6 +735,12 @@ func copilotSupportsNoAskUser(engineConfig *EngineConfig) bool {
 	var versionStr string
 	if engineConfig != nil && engineConfig.Version != "" {
 		versionStr = engineConfig.Version
+	}
+	// Expression versions resolve at runtime; treat as supported so the generated execution
+	// flags match the installed binary for any version >= CopilotNoAskUserMinVersion.
+	if containsExpression(versionStr) {
+		copilotExecLog.Printf("copilotSupportsNoAskUser: expression version %q treated as supported", versionStr)
+		return true
 	}
 	return versionAtLeast(
 		versionStr,
@@ -672,16 +765,19 @@ func buildEngineCommandScriptSetup(command string) string {
 	// configuration authored in-repo; preserve shell semantics and forward driver args.
 	scriptContent := fmt.Sprintf("#!/usr/bin/env bash\nset +o histexpand\nset -eo pipefail\n%s \"$@\"\n", command)
 	heredocDelimiter := "GH_AW_ENGINE_COMMAND_EOF"
-	for strings.Contains(scriptContent, heredocDelimiter) {
+	for strings.Contains(scriptContent, heredocDelimiter) { //nolint:stringsconcatloop // trivial cold path, runs 0 times in normal operation
 		heredocDelimiter += "_X"
 	}
 
+	//nolint:generatedyamlheredoc // Legacy trusted engine-command rendering remains to be migrated to the JavaScript renderer.
 	return fmt.Sprintf(`mkdir -p /tmp/gh-aw
+GH_AW_PREV_UMASK="$(umask)"
 umask 0177
 cat > %s <<'%s'
 %s
 %s
-chmod 700 %s`, customEngineCommandScriptPath, heredocDelimiter, scriptContent, heredocDelimiter, customEngineCommandScriptPath)
+chmod 700 %s
+umask "$GH_AW_PREV_UMASK"`, customEngineCommandScriptPath, heredocDelimiter, scriptContent, heredocDelimiter, customEngineCommandScriptPath)
 }
 
 // generateCopilotSessionFileCopyStep generates a step to copy the entire Copilot

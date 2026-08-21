@@ -150,6 +150,20 @@ on:
   reaction: "rocket"
 ```
 
+The `types:` list accepts standard GitHub pull request activity types, including transition events such as `ready_for_review` and `converted_to_draft`.
+
+### Pull Request Target Triggers (`pull_request_target:`)
+
+Trigger on pull request events in the context of the base repository. Use this only when the workflow needs write-capable repository context, and avoid checking out untrusted fork code. See [Checkout](/gh-aw/reference/checkout/#pull_request_target-checkout) for the safe checkout pattern.
+
+```yaml wrap
+on:
+  pull_request_target:
+    types: [opened, ready_for_review]
+```
+
+`pull_request_target.types` accepts the same activity names as `pull_request`, including `ready_for_review`.
+
 #### Fork Filtering (`forks:`)
 
 Pull request workflows block forks by default for security. Use the `forks:` field to allow specific fork patterns:
@@ -162,6 +176,50 @@ on:
 ```
 
 Use `["owner/repo"]` for a specific repository, `["owner/*"]` for an entire org/user, or `["*"]` to allow all forks (use with caution). Omit `forks:` for the default behavior (same-repository PRs only). The compiler uses repository ID comparison so fork detection is unaffected by repository renames.
+
+#### Stacked PR Filtering (`max-stack:`)
+
+When using stacked pull requests (a chain of PRs each targeting the previous one), every PR in the stack normally triggers workflows. This multiplies CI cost for identical changes being reviewed at multiple layers. The `max-stack:` field lets you limit which stack layers run the workflow.
+
+By default (`max-stack: 1`), workflows run only on the **top-most PR** in the stack — the one currently under review. Lower-stack PRs are skipped automatically.
+
+This is supported for both `pull_request` and `pull_request_review` triggers.
+
+```yaml wrap
+on:
+  pull_request:
+    types: [opened, synchronize]
+    max-stack: 1   # default: run only on the top/latest PR in a stack
+```
+
+To run on the **top N** layers (for example, if you review multiple interdependent PRs at once):
+
+```yaml wrap
+on:
+  pull_request:
+    types: [opened, synchronize]
+    max-stack: 2   # run on the top 2 PRs in a stack
+```
+
+To **disable** stack protection and run on every PR in a stack:
+
+```yaml wrap
+on:
+  pull_request:
+    types: [opened, synchronize]
+    max-stack: -1  # run on all pull requests regardless of stack position
+```
+
+You can also apply the same filter to review events:
+
+```yaml wrap
+on:
+  pull_request_review:
+    types: [submitted]
+    max-stack: 2   # run only for reviews on the top 2 PRs in a stack
+```
+
+Non-stacked PRs and non-`pull_request`/`pull_request_review` events are unaffected by this setting.
 
 ### Comment Triggers
 
@@ -392,7 +450,7 @@ For conditions based on GitHub search results, use [`skip-if-match:`](#skip-if-m
 
 ### Filtering by Repository Access Roles (`on.roles:`, `on.skip-roles:`)
 
-Controls who can trigger agentic workflows using an **exact-match allowlist** — each role is matched literally against the actor's repository role with no privilege hierarchy. Defaults to `[admin, maintainer, write]`. Use `skip-roles:` to exempt team members from checks that should only apply to external contributors.
+Controls who can trigger agentic workflows using an **exact-match allowlist** against the actor's repository role. Defaults to `[admin, maintainer, write]`. Use `skip-roles:` to exempt team members from checks that should only apply to external contributors.
 
 ```yaml wrap
 on:
@@ -407,6 +465,10 @@ on:
 :::
 
 Available roles: `admin`, `maintainer`/`maintain`, `write`, `triage`, `read`, `all`. Workflows with unsafe triggers (`push`, `issues`, `pull_request`) automatically enforce permission checks. Failed checks cancel the workflow with a warning.
+
+#### Custom organization repository roles
+
+GitHub organizations can define [custom repository roles](https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/about-custom-repository-roles) with an inherited standard role (for example `write` or `maintain`). Actors whose access comes from a custom role (e.g. `Security Champions`) are authorized against that **inherited standard role** — the custom role name itself cannot appear in `on.roles:`. For example, a user with the custom role `Security Champions` (inherited role: `write`) will be authorized when the required roles include `write`, while a custom role inherited from `maintain` will still be rejected by `roles: [write]`.
 
 ### Filtering by Bot (`on.bots:`, `on.skip-bots:`)
 

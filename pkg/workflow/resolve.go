@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/stringutil"
 	"github.com/goccy/go-yaml"
 )
@@ -244,32 +246,117 @@ func GetAllWorkflows() ([]WorkflowNameMatch, error) {
 		base := filepath.Base(lockFile)
 		workflowID := strings.TrimSuffix(base, ".lock.yml")
 
-		// Read and parse the lock file to get display name
-		content, err := os.ReadFile(lockFile)
+		// Extract only the top-level `name:` field. Lock files are large generated
+		// GitHub Actions YAML (hundreds of KB each); fully parsing every file just to
+		// read one field is very slow (seconds across a repo with many workflows), so
+		// we scan for the first column-0 `name:` line and parse only that.
+		name, err := extractLockFileWorkflowName(lockFile)
 		if err != nil {
-			resolveLog.Printf("Failed to read lock file %s: %v", lockFile, err)
+			resolveLog.Printf("Failed to read workflow name from lock file %s: %v", lockFile, err)
 			continue
 		}
 
-		var wf struct {
-			Name string `yaml:"name"`
-		}
-
-		if err := yaml.Unmarshal(content, &wf); err != nil {
-			resolveLog.Printf("Failed to parse YAML from lock file %s: %v", lockFile, err)
-			continue
-		}
-
-		if wf.Name == "" {
+		if name == "" {
 			resolveLog.Printf("Workflow name field missing in lock file: %s", lockFile)
 			continue
 		}
 
 		workflows = append(workflows, WorkflowNameMatch{
 			WorkflowID:  workflowID,
-			DisplayName: wf.Name,
+			DisplayName: name,
 		})
 	}
 
 	return workflows, nil
+}
+
+// extractLockFileWorkflowName returns the top-level workflow `name:` value from a
+// generated lock file without parsing the entire (potentially very large) YAML
+// document. It scans line-by-line for the first column-0 `name:` key — which in
+// generated lock files is always the workflow name — and unmarshals just that single
+// line so YAML scalar semantics (quoting, escapes) are preserved. Scanning stops as
+// soon as the name is found.
+func extractLockFileWorkflowName(lockFile string) (string, error) {
+	f, err := os.Open(lockFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	// Lock file `name:` lines are short, but allow generous headroom for long names.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Only a column-0 (unindented, non-comment) `name:` key is the workflow name;
+		// nested `name:` keys under jobs/steps are always indented.
+		if !strings.HasPrefix(line, "name:") {
+			continue
+		}
+		var wf struct {
+			Name string `yaml:"name"`
+		}
+		if err := yaml.Unmarshal([]byte(line), &wf); err != nil {
+			return "", err
+		}
+		return wf.Name, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+// IsIntentionalFailure reports whether the workflow identified by workflowPath is tagged
+// with intentional-failure: true in its frontmatter.  workflowPath may be:
+//   - a .lock.yml path   (e.g. ".github/workflows/daily-credit-limit-test.lock.yml")
+//   - a .md path         (e.g. ".github/workflows/daily-credit-limit-test.md")
+//   - a bare workflow ID (e.g. "daily-credit-limit-test")
+//
+// Returns false whenever the file cannot be read or parsed (fail-open: unknown workflows
+// are not excluded from health rollups).
+func IsIntentionalFailure(workflowPath string) bool {
+	if workflowPath == "" {
+		return false
+	}
+
+	// Derive the markdown file path.
+	var mdPath string
+	switch {
+	case strings.HasSuffix(workflowPath, ".lock.yml"):
+		mdPath = strings.TrimSuffix(workflowPath, ".lock.yml") + ".md"
+	case strings.HasSuffix(workflowPath, ".md"):
+		mdPath = workflowPath
+	default:
+		// Treat as a bare workflow ID.
+		normalizedName := stringutil.NormalizeWorkflowName(workflowPath)
+		mdPath = filepath.Join(constants.GetWorkflowDir(), normalizedName+".md")
+	}
+
+	content, err := os.ReadFile(mdPath)
+	if err != nil {
+		// File not available locally (e.g. running against a remote repo).
+		return false
+	}
+
+	result, err := parser.ExtractFrontmatterFromContent(string(content))
+	if err != nil || result == nil {
+		return false
+	}
+
+	featuresRaw, ok := result.Frontmatter["features"]
+	if !ok {
+		return false
+	}
+	features, ok := featuresRaw.(map[string]any)
+	if !ok {
+		return false
+	}
+	val, ok := features["intentional-failure"]
+	if !ok {
+		return false
+	}
+
+	b, ok := val.(bool)
+	return ok && b
 }

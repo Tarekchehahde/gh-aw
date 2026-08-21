@@ -51,12 +51,14 @@ describe("generate_aw_info.cjs", () => {
     process.env.GH_AW_INFO_WORKFLOW_NAME = "my-workflow";
     process.env.GH_AW_INFO_EXPERIMENTAL = "false";
     process.env.GH_AW_INFO_SUPPORTS_TOOLS_ALLOWLIST = "true";
+    delete process.env.GH_AW_INFO_CACHE_MEMORY;
     process.env.GH_AW_INFO_STAGED = "false";
     process.env.GH_AW_INFO_ALLOWED_DOMAINS = "[]";
     process.env.GH_AW_INFO_FIREWALL_ENABLED = "false";
     process.env.GH_AW_INFO_AWF_VERSION = "";
     process.env.GH_AW_INFO_AWMG_VERSION = "";
     process.env.GH_AW_INFO_FIREWALL_TYPE = "";
+    process.env.GH_AW_INFO_AGENT_RUNTIME = "";
     process.env.GH_AW_INFO_FRONTMATTER_SOURCE = "";
     process.env.GH_AW_INFO_FRONTMATTER_EMOJI = "";
     process.env.GH_AW_INFO_BODY_MODIFIED = "";
@@ -91,6 +93,7 @@ describe("generate_aw_info.cjs", () => {
     expect(awInfo.workflow_name).toBe("my-workflow");
     expect(awInfo.experimental).toBe(false);
     expect(awInfo.supports_tools_allowlist).toBe(true);
+    expect(awInfo.cache_memory).toBe(false);
     expect(awInfo.run_id).toBe(12345);
     expect(awInfo.run_number).toBe(42);
     expect(awInfo.sha).toBe("abc123def456");
@@ -158,16 +161,6 @@ describe("generate_aw_info.cjs", () => {
     expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Failed to parse GH_AW_INFO_SKILLS"));
   });
 
-  it("should persist custom token weights in aw_info.json", async () => {
-    process.env.GH_AW_INFO_TOKEN_WEIGHTS = JSON.stringify({
-      token_class_weights: { output: 8.0 },
-      multipliers: { "my-custom-model": 2.5 },
-    });
-    await main(mockCore, mockContext);
-    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
-    expect(awInfo.token_weights.multipliers["my-custom-model"]).toBe(2.5);
-  });
-
   it("should include frontmatter source/emoji and body_modified when configured", async () => {
     process.env.GH_AW_INFO_FRONTMATTER_SOURCE = "github/gh-aw/.github/workflows/example.md@main";
     process.env.GH_AW_INFO_FRONTMATTER_EMOJI = "🧪";
@@ -201,6 +194,14 @@ describe("generate_aw_info.cjs", () => {
 
     const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
     expect(awInfo.cli_version).toBeUndefined();
+  });
+
+  it("should set cache_memory to true when GH_AW_INFO_CACHE_MEMORY is true", async () => {
+    process.env.GH_AW_INFO_CACHE_MEMORY = "true";
+    await main(mockCore, mockContext);
+
+    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+    expect(awInfo.cache_memory).toBe(true);
   });
 
   it("should parse allowed domains from JSON env var", async () => {
@@ -238,6 +239,72 @@ describe("generate_aw_info.cjs", () => {
     expect(awInfo.firewall_enabled).toBe(true);
     expect(awInfo.awf_version).toBe("v0.23.0");
     expect(awInfo.steps.firewall).toBe("squid");
+  });
+
+  it("should set agent_runtime from env var", async () => {
+    process.env.GH_AW_INFO_AGENT_RUNTIME = "gvisor";
+    await main(mockCore, mockContext);
+
+    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+    expect(awInfo.agent_runtime).toBe("gvisor");
+  });
+
+  it("should default agent_runtime to empty string when not set", async () => {
+    await main(mockCore, mockContext);
+
+    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+    expect(awInfo.agent_runtime).toBe("");
+  });
+
+  it("should fail when model name contains an unresolved GitHub Actions expression", async () => {
+    process.env.GH_AW_INFO_MODEL = "${{ vars.COPILOT_MODEL }}";
+
+    await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+    expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("ERR_CONFIG"));
+    expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("unresolved GitHub Actions expression"));
+    expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining(JSON.stringify("${{ vars.COPILOT_MODEL }}")));
+  });
+
+  it("should fail when model name contains a partial unresolved expression", async () => {
+    process.env.GH_AW_INFO_MODEL = "${{ vars.MODEL || 'gpt-4' }}";
+
+    await expect(main(mockCore, mockContext)).rejects.toThrow("ERR_CONFIG");
+    expect(mockCore.setFailed).toHaveBeenCalledWith(expect.stringContaining("ERR_CONFIG"));
+  });
+
+  it("should not fail when model name does not contain unresolved expressions", async () => {
+    const cases = [
+      { label: "plain string", model: "gpt-4o" },
+      { label: "empty string", model: "" },
+    ];
+
+    for (const { label, model } of cases) {
+      process.env.GH_AW_INFO_MODEL = model;
+
+      try {
+        await main(mockCore, mockContext);
+
+        expect(mockCore.setFailed).not.toHaveBeenCalled();
+        const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+        expect(awInfo.model).toBe(model);
+      } catch (error) {
+        throw new Error(`${label} case failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  });
+
+  it("should not fail when model is a resolved experiment variant string", async () => {
+    // Workflows using experiment variants set model to a GitHub Actions expression in frontmatter
+    // (e.g. model: "${{ needs.activation.outputs.model_size }}").  GitHub Actions evaluates
+    // that expression before passing the value as an environment variable, so by the time
+    // generate_aw_info.cjs runs, GH_AW_INFO_MODEL holds the resolved variant string.
+    process.env.GH_AW_INFO_MODEL = "claude-haiku-4.5";
+
+    await main(mockCore, mockContext);
+
+    expect(mockCore.setFailed).not.toHaveBeenCalled();
+    const awInfo = JSON.parse(fs.readFileSync(awInfoPath, "utf8"));
+    expect(awInfo.model).toBe("claude-haiku-4.5");
   });
 
   it("should fail when a numeric context field contains non-numeric data", async () => {

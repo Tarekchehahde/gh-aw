@@ -12,6 +12,7 @@ global.core = mockCore;
 const SAMPLE_VALIDATION_CONFIG = {
   create_issue: {
     defaultMax: 1,
+    dataEnabled: true,
     fields: {
       title: { required: true, type: "string", sanitize: true, maxLength: 128 },
       body: { required: true, type: "string", sanitize: true, maxLength: 65000, minLength: 20 },
@@ -22,9 +23,11 @@ const SAMPLE_VALIDATION_CONFIG = {
   },
   add_comment: {
     defaultMax: 1,
+    dataEnabled: true,
     fields: {
       body: { required: true, type: "string", sanitize: true, maxLength: 65000 },
       item_number: { issueOrPRNumber: true },
+      comment_id: { optionalPositiveInteger: true },
     },
   },
   create_pull_request: {
@@ -109,6 +112,24 @@ const SAMPLE_VALIDATION_CONFIG = {
       event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
       pull_request_number: { issueOrPRNumber: true },
       repo: { type: "string", maxLength: 256 },
+    },
+  },
+  upload_asset: {
+    defaultMax: 10,
+    fields: {
+      path: { required: true, type: "string" },
+    },
+  },
+  close_issue: {
+    defaultMax: 1,
+    fields: {
+      issue_number: { optionalPositiveInteger: true },
+    },
+  },
+  push_to_pull_request_branch: {
+    defaultMax: 1,
+    fields: {
+      message: { required: true, type: "string", sanitize: true, maxLength: 65000 },
     },
   },
   set_issue_type: {
@@ -408,6 +429,96 @@ describe("safe_output_type_validator", () => {
       expect(result.isValid).toBe(true);
       // The sanitizeContent function converts @mentions to backticked format
       expect(result.normalizedItem.title).toContain("`@mention`");
+    });
+
+    it("should append structured data as fenced JSON to body fields", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem(
+        {
+          type: "add_comment",
+          body: "Review complete.",
+          data: {
+            verdict: "APPROVE",
+            marker: "<!-- [PIPELINE-VERDICT] APPROVE -->",
+            criteria_passed: 5,
+          },
+        },
+        "add_comment",
+        1
+      );
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.body).toContain("Review complete.");
+      expect(result.normalizedItem.body).toContain("Structured data:");
+      expect(result.normalizedItem.body).toContain("```json");
+      expect(result.normalizedItem.body).toContain('"verdict": "APPROVE"');
+      expect(result.normalizedItem.body).toContain('"marker": "<!-- [PIPELINE-VERDICT] APPROVE -->"');
+      expect(result.normalizedItem.data).toEqual({
+        verdict: "APPROVE",
+        marker: "<!-- [PIPELINE-VERDICT] APPROVE -->",
+        criteria_passed: 5,
+      });
+    });
+
+    it("should reject data values that are not objects", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "add_comment", body: "Review complete.", data: ["APPROVE"] }, "add_comment", 1);
+
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("'data' must be an object");
+    });
+
+    it("should reject data when not enabled", async () => {
+      const { validateItem, resetValidationConfigCache } = await import("./safe_output_type_validator.cjs");
+      const configWithoutData = JSON.parse(JSON.stringify(SAMPLE_VALIDATION_CONFIG));
+      delete configWithoutData.add_comment.dataEnabled;
+      process.env.GH_AW_VALIDATION_CONFIG = JSON.stringify(configWithoutData);
+      resetValidationConfigCache();
+
+      const result = validateItem({ type: "add_comment", body: "Review complete.", data: { verdict: "APPROVE" } }, "add_comment", 1);
+      expect(result.isValid).toBe(false);
+      expect(result.error).toContain("'data' is not enabled");
+    });
+
+    it("should enforce data schema when configured", async () => {
+      const { validateItem, resetValidationConfigCache } = await import("./safe_output_type_validator.cjs");
+      const configWithDataSchema = JSON.parse(JSON.stringify(SAMPLE_VALIDATION_CONFIG));
+      configWithDataSchema.add_comment.dataSchema = {
+        type: "object",
+        properties: {
+          verdict: { type: "string", enum: ["APPROVE", "REJECT"] },
+          criteria_passed: { type: "number" },
+        },
+        required: ["verdict"],
+        additionalProperties: false,
+      };
+      process.env.GH_AW_VALIDATION_CONFIG = JSON.stringify(configWithDataSchema);
+      resetValidationConfigCache();
+
+      const invalid = validateItem({ type: "add_comment", body: "Review complete.", data: { verdict: "APPROVE", criteria_passed: 5, extra: "x" } }, "add_comment", 1);
+      expect(invalid.isValid).toBe(false);
+      expect(invalid.error).toContain("'data'.extra");
+
+      const valid = validateItem({ type: "add_comment", body: "Review complete.", data: { verdict: "APPROVE", criteria_passed: 5 } }, "add_comment", 1);
+      expect(valid.isValid).toBe(true);
+    });
+
+    it("should enforce runtime data schema supplied as JSON string", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const invalid = validateItem({ type: "add_comment", body: "Review complete.", data: { verdict: "APPROVE", extra: "x" } }, "add_comment", 1, {
+        dataEnabled: true,
+        dataSchema: JSON.stringify({
+          type: "object",
+          properties: { verdict: { type: "string" } },
+          required: ["verdict"],
+          additionalProperties: false,
+        }),
+      });
+      expect(invalid.isValid).toBe(false);
+      expect(invalid.error).toContain("'data'.extra");
     });
 
     it("should normalize a backticked issue reference when enabled", async () => {
@@ -1205,6 +1316,42 @@ describe("safe_output_type_validator", () => {
       expect(result.normalizedItem.labels).toEqual(["reliability", "telemetry"]);
     });
 
+    it("should normalize JSON-array labels string to array", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "create_issue", title: "Test", body: "Detailed issue body text.", labels: '["cookie"]' }, "create_issue", 1);
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.labels).toEqual(["cookie"]);
+    });
+
+    it("should normalize multi-label JSON-array string to array", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "create_issue", title: "Test", body: "Detailed issue body text.", labels: '["bug", "enhancement"]' }, "create_issue", 1);
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.labels).toEqual(["bug", "enhancement"]);
+    });
+
+    it("should filter non-string entries from JSON-array labels string", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "create_issue", title: "Test", body: "Detailed issue body text.", labels: '["bug", 123, "enhancement"]' }, "create_issue", 1);
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.labels).toEqual(["bug", "enhancement"]);
+    });
+
+    it("should fall back to comma-separated parsing for malformed JSON label string", async () => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem({ type: "create_issue", title: "Test", body: "Detailed issue body text.", labels: "[bug, enhancement" }, "create_issue", 1);
+
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem.labels).toEqual(["[bug", "enhancement"]);
+    });
+
     it("should reject array with non-string items", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
@@ -1215,8 +1362,8 @@ describe("safe_output_type_validator", () => {
     });
   });
 
-  describe("undeclared field passthrough", () => {
-    it("should preserve base_commit on normalizedItem", async () => {
+  describe("undeclared fields", () => {
+    it("should preserve the normalized type and declared fields", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
       const item = {
@@ -1224,43 +1371,51 @@ describe("safe_output_type_validator", () => {
         title: "Fix bug",
         body: "Fixes the thing",
         branch: "fix/bug",
-        base_commit: "abc123deadbeef",
       };
 
       const result = validateItem(item, "create_pull_request", 1);
       expect(result.isValid).toBe(true);
-      expect(result.normalizedItem.base_commit).toBe("abc123deadbeef");
+      expect(result.normalizedItem).toEqual(item);
     });
 
-    it("should preserve diff_size on normalizedItem", async () => {
+    it("should preserve declared add_comment.comment_id as a positive integer", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
-      const item = {
-        type: "create_pull_request",
-        title: "Fix bug",
-        body: "Fixes the thing",
-        branch: "fix/bug",
-        diff_size: 1,
-      };
-
-      const result = validateItem(item, "create_pull_request", 1);
+      const result = validateItem({ type: "add_comment", body: "Test comment", comment_id: "123" }, "add_comment", 1);
       expect(result.isValid).toBe(true);
-      expect(result.normalizedItem.diff_size).toBe(1);
+      expect(result.normalizedItem).toEqual({ type: "add_comment", body: "Test comment", comment_id: 123 });
     });
 
-    it("should preserve undeclared fields", async () => {
+    it.each([
+      { itemType: "update_pull_request", item: { type: "update_pull_request", title: "Updated title", base: "release", state: "closed" }, fieldName: "base" },
+      { itemType: "update_pull_request", item: { type: "update_pull_request", title: "Updated title", base: "release", state: "closed" }, fieldName: "state" },
+      { itemType: "upload_asset", item: { type: "upload_asset", path: "image.png", targetFileName: "../../.git/config" }, fieldName: "targetFileName" },
+      { itemType: "create_issue", item: { type: "create_issue", title: "Test", body: "Detailed issue body text.", assignees: ["octocat"] }, fieldName: "assignees" },
+      { itemType: "create_discussion", item: { type: "create_discussion", title: "Test", body: "This discussion body is intentionally long enough for validation.", labels: ["security"] }, fieldName: "labels" },
+      { itemType: "close_issue", item: { type: "close_issue", issue_number: 1, state_reason: "not_planned" }, fieldName: "state_reason" },
+      { itemType: "push_to_pull_request_branch", item: { type: "push_to_pull_request_branch", message: "Apply changes", diff_size: 0 }, fieldName: "diff_size" },
+      { itemType: "create_pull_request", item: { type: "create_pull_request", title: "Fix bug", body: "Fixes the thing", branch: "fix/bug", base_commit: "abc123deadbeef" }, fieldName: "base_commit" },
+    ])("should strip undeclared $itemType.$fieldName", async ({ itemType, item, fieldName }) => {
+      const { validateItem } = await import("./safe_output_type_validator.cjs");
+
+      const result = validateItem(item, itemType, 1);
+      expect(result.isValid).toBe(true);
+      expect(result.normalizedItem).not.toHaveProperty(fieldName);
+    });
+
+    it("should preserve enabled structured data", async () => {
       const { validateItem } = await import("./safe_output_type_validator.cjs");
 
       const item = {
         type: "create_issue",
         title: "Test",
         body: "Detailed issue body text.",
-        metadata: { project: "test" },
+        data: { project: "test" },
       };
 
-      const result = validateItem(item, "create_issue", 1);
+      const result = validateItem(item, "create_issue", 1, { dataEnabled: true });
       expect(result.isValid).toBe(true);
-      expect(result.normalizedItem.metadata).toEqual({ project: "test" });
+      expect(result.normalizedItem.data).toEqual({ project: "test" });
     });
   });
 });

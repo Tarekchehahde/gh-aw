@@ -156,6 +156,17 @@ func (c *ActionCache) PruneOrphanedEntries(referencedKeys map[string]struct{}) i
 // in knownImages. It returns the number of entries that were removed.
 // This is used to keep actions-lock.json consistent with the set of images
 // actually referenced by the compiled lock files.
+//
+// gh-aw-firewall (AWF) images are intentionally exempt from pruning: these are the
+// most security-load-bearing images (they confine the agent sandbox), and bumping
+// constants.DefaultFirewallVersion in this repo routinely leaves the *previous*
+// default version unreferenced by any local lock file. Pruning that entry would
+// silently drop it from the embedded pin catalog (pkg/actionpins/data/action_pins.json,
+// synced via "make sync-action-pins") the next time this binary is built, breaking
+// digest pinning for any consumer workflow that explicitly pins to that now-previous
+// version (see gh-aw#51248, a repeat of gh-aw#38561 / #43307 / #44040). Keeping
+// historical firewall pins around is cheap (a few KB per version) and ensures the
+// pin, once resolved, is never lost again.
 func (c *ActionCache) PruneStaleContainerPins(knownImages map[string]struct {
 }) int {
 	if c.ContainerPins == nil {
@@ -163,12 +174,17 @@ func (c *ActionCache) PruneStaleContainerPins(knownImages map[string]struct {
 	}
 	pruned := 0
 	for image := range c.ContainerPins {
-		if !setutil.Contains(knownImages, image) {
-			delete(c.ContainerPins, image)
-			c.dirty = true
-			pruned++
-			actionCacheLog.Printf("Pruned stale container pin for image=%s", image)
+		if setutil.Contains(knownImages, image) {
+			continue
 		}
+		if strings.HasPrefix(image, constants.DefaultFirewallRegistry+"/") {
+			actionCacheLog.Printf("Skipping prune of gh-aw-firewall container pin for image=%s (historical pins are retained)", image)
+			continue
+		}
+		delete(c.ContainerPins, image)
+		c.dirty = true
+		pruned++
+		actionCacheLog.Printf("Pruned stale container pin for image=%s", image)
 	}
 	return pruned
 }
@@ -429,7 +445,11 @@ func (c *ActionCache) FindAnyEntryForRepo(repo string) (string, ActionCacheEntry
 // Set stores a new cache entry, preserving any already-cached inputs when the SHA
 // is unchanged. If the SHA changes (e.g. a moving tag points to a new commit),
 // cached inputs are cleared to stay consistent with the newly-pinned commit.
-func (c *ActionCache) Set(repo, version, sha string) {
+func (c *ActionCache) Set(repo, version, sha string) bool {
+	if sha == "" {
+		actionCacheLog.Printf("refusing to store action pin entry with empty SHA for %s@%s; entry skipped", repo, version)
+		return false
+	}
 	key := formatActionCacheKey(repo, version)
 
 	// Check if there are existing entries with the same repo+SHA but different version
@@ -473,6 +493,7 @@ func (c *ActionCache) Set(repo, version, sha string) {
 		ActionDescription: description,
 	}
 	c.dirty = true // Mark cache as modified
+	return true
 }
 
 // GetInputs retrieves the cached action inputs for the given repo and version.
@@ -489,17 +510,19 @@ func (c *ActionCache) GetInputs(repo, version string) (map[string]*ActionYAMLInp
 }
 
 // SetInputs stores the action inputs in the cache entry for the given repo and version.
-// If no cache entry exists for the key, a new entry is created with an empty SHA so that
-// inputs fetched from the network are persisted even before the SHA is resolved.
+// If no cache entry with a non-empty SHA exists for the key, the call is a no-op.
+// Inputs are only stored for entries that already have a resolved SHA, preventing
+// placeholder entries with empty SHAs from being written to the on-disk cache.
 func (c *ActionCache) SetInputs(repo, version string, inputs map[string]*ActionYAMLInput) {
+	if inputs == nil {
+		actionCacheLog.Printf("Nil inputs for %s@%s, skipping cache update", repo, version)
+		return
+	}
 	key := formatActionCacheKey(repo, version)
 	entry, exists := c.Entries[key]
-	if !exists {
-		actionCacheLog.Printf("No cache entry for key=%s, creating new entry to store inputs", key)
-		entry = ActionCacheEntry{
-			Repo:    repo,
-			Version: version,
-		}
+	if !exists || entry.SHA == "" {
+		actionCacheLog.Printf("No existing cache entry with SHA for key=%s, skipping inputs update", key)
+		return
 	}
 	entry.Inputs = inputs
 	c.Entries[key] = entry
@@ -519,7 +542,9 @@ func (c *ActionCache) GetActionDescription(repo, version string) (string, bool) 
 }
 
 // SetActionDescription stores the action description in the cache entry for the given repo and version.
-// If no cache entry exists for the key, a new entry is created.
+// If no cache entry with a non-empty SHA exists for the key, the call is a no-op.
+// Descriptions are only stored for entries that already have a resolved SHA, preventing
+// placeholder entries with empty SHAs from being written to the on-disk cache.
 // Empty descriptions are not stored; actions without a description string are treated the same as
 // actions whose description has not yet been fetched, so we avoid caching an empty string that
 // would prevent a later fetch from populating the field.
@@ -533,11 +558,9 @@ func (c *ActionCache) SetActionDescription(repo, version, description string) {
 	}
 	key := formatActionCacheKey(repo, version)
 	entry, exists := c.Entries[key]
-	if !exists {
-		entry = ActionCacheEntry{
-			Repo:    repo,
-			Version: version,
-		}
+	if !exists || entry.SHA == "" {
+		actionCacheLog.Printf("No existing cache entry with SHA for key=%s, skipping description update", key)
+		return
 	}
 	entry.ActionDescription = description
 	c.Entries[key] = entry
@@ -557,15 +580,18 @@ func (c *ActionCache) GetReleasedAt(repo, version string) (time.Time, bool) {
 }
 
 // SetReleasedAt stores the release publication date for the given repo and version.
-// If no cache entry exists for the key, a new entry is created.
+// If no cache entry with a non-empty SHA exists for the key, the call is a no-op.
+// Release dates are only stored for entries that already have a resolved SHA, preventing
+// placeholder entries with empty SHAs from being written to the on-disk cache.
+// This matters most when checking cooldown for a new target version that is not yet pinned:
+// without this guard, storing the release date would create a shell entry whose empty SHA
+// would later fail the actions-lock.json validation.
 func (c *ActionCache) SetReleasedAt(repo, version string, t time.Time) {
 	key := formatActionCacheKey(repo, version)
 	entry, exists := c.Entries[key]
-	if !exists {
-		entry = ActionCacheEntry{
-			Repo:    repo,
-			Version: version,
-		}
+	if !exists || entry.SHA == "" {
+		actionCacheLog.Printf("No existing cache entry with SHA for key=%s, skipping release date update", key)
+		return
 	}
 	entry.ReleasedAt = &t
 	c.Entries[key] = entry

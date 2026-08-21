@@ -4,9 +4,11 @@ description: Guide for reducing token consumption in agentic workflows — DataO
 
 # Token Consumption Optimization
 
+If a task can be solved using deterministic tools, use deterministic tools. Only use agents when necessary, as they incur higher cost. Agentic workflows allow you to run deterministic tools first and gate agent execution using conditions, enabling workflows that avoid triggering agents most of the time and only use them when needed.
+
 ## Quick-Reference Checklist
 
-Apply these in order — each check can halve costs:
+Apply these in order, measuring cost and quality after each change:
 
 - [ ] **Cheap triage first**: classify duplicates, stale items, low-value events, and known cases before escalating
 - [ ] **Frontier model as planner**: use frontier models for planning, synthesis, ambiguous decisions, and final judgment — not bulk extraction
@@ -14,17 +16,23 @@ Apply these in order — each check can halve costs:
 - [ ] **gh-proxy**: Set `tools.github.mode: gh-proxy` — skips Docker MCP server startup and extra tool definitions
 - [ ] **cli-proxy**: Mount additional MCP servers as CLIs via `cli-proxy: true` — agent pipes output through `jq` before it enters context
 - [ ] **Sub-agents**: Delegate repetitive per-item tasks to `model: small` sub-agents (~10–20× cheaper)
-- [ ] **Sub-skills**: Keep the main prompt as a short execution plan; move detailed playbooks/output layouts into `## skill:` blocks the agent invokes only when needed
+- [ ] **Sub-skills (inline `## skill:` blocks)**: Keep the main prompt as a short execution plan; move detailed playbooks, output templates, and formatting rules into `## skill:` blocks — the runtime extracts these before the first model call, so they are available on demand without entering the initial request context
 - [ ] **Prompt size**: Strip redundant instructions, examples, and pleasantries from the prompt body
 - [ ] **Dynamic context**: Inject only required fields — `${{ github.event.issue.number }}` not the full event payload
 - [ ] **Pull context on demand**: query logs/data only after a hypothesis forms; avoid preloading large raw dumps into the initial prompt
+- [ ] **Bound file reads**: for files > 20 KB, use `bash`/`grep`/`glob`/`view_range` instead of full-file MCP reads — late-session token spikes most often trace to unguarded `get_file_contents` calls on large workflow or skill markdown
 - [ ] **Prompt caching**: Put stable instructions before dynamic content to maximize cache hits
 - [ ] **Context hygiene**: keep the orchestrator context compact; prefer short worker summaries over raw output
+- [ ] **Harness-wide diagnosis**: classify failures across context, tools, generation, orchestration, memory, and output processing before changing configuration
+- [ ] **Execution experience**: retain compact diagnoses and outcomes, then reuse recurring patterns instead of restarting optimization from scratch
+- [ ] **Correctness first**: compare quality before cost; use AIC or token count only to choose among equally successful variants
 - [ ] **Cadence**: If the result is not time-sensitive, schedule less often (`hourly` → `daily`, `daily` → `weekly`)
 - [ ] **Batching**: Prefer scheduled batch processing over reactive events when delayed processing is acceptable
+- [ ] **Bounded subsets**: For large repetitive backlogs, process only a budget-safe subset per run and use a cache cursor or deterministic heuristic to rotate fairly through the remaining work
 - [ ] **Telemetry**: Configure `observability.otlp` so token usage and run phases are measurable outside individual run logs
 - [ ] **AgenticOps**: Add `copilot-token-audit` / `copilot-token-optimizer` workflows so the repository keeps finding waste automatically
 - [ ] **Measure first**: Back every change with an `experiments:` field and `metric: "aic"` before promoting
+- [ ] **Budget increase last**: Increase `max-ai-credits` only after all applicable optimizations above have been exhausted and measured
 
 ---
 
@@ -127,8 +135,6 @@ Create a concise weekly PR summary discussion.
 - Store files under `/tmp/gh-aw/`
 - Document file locations and schema in the prompt body so the agent doesn't need to explore
 
-See also: [DataOps pattern docs](https://github.com/github/gh-aw/blob/main/docs/src/content/docs/patterns/data-ops.md)
-
 ---
 
 ## Technique 2 — Use `gh-proxy` and `cli-proxy` Instead of the MCP Server
@@ -181,40 +187,11 @@ sub-agents:   → small model per item (cheap, parallelizable)
 main agent:   → synthesizes compact sub-agent results (one high-quality pass)
 ```
 
-### Example
+### Example (skeleton — see [subagents.md](subagents.md) for full syntax)
+
+A shell step splits issues into per-item files; the main prompt dispatches a `model: small` sub-agent per file and synthesizes the compact results:
 
 ```markdown
----
-engine: copilot
-tools:
-  cli-proxy: true
-  github:
-    mode: gh-proxy
-  bash: ["*"]
-
-steps:
-  - name: Split issues into per-item files
-    run: |
-      mkdir -p /tmp/gh-aw/issues
-      gh issue list --repo "${{ github.repository }}" \
-        --state open --limit 50 \
-        --json number,title,body,labels \
-        | jq -c '.[]' \
-        | while IFS= read -r issue; do
-            num=$(echo "$issue" | jq -r '.number')
-            echo "$issue" > /tmp/gh-aw/issues/issue-${num}.json
-          done
----
-
-## Step 1 — classify each issue
-
-For every `/tmp/gh-aw/issues/issue-*.json`, use the `classifier` agent.
-Write output to `/tmp/gh-aw/issues/cat-<number>.json`.
-
-## Step 2 — synthesize
-
-Read all `cat-*.json` files and create a triage report grouped by category.
-
 ## agent: `classifier`
 ---
 description: Classifies a GitHub issue into a single category
@@ -233,7 +210,7 @@ Nothing else.
 - Put verbose instructions (report layout, rubric details, formatting constraints) into `## skill:` blocks.
 - Invoke skills only when needed (e.g., producing final output), so early turns stay lean.
 
-This delays expensive instruction payloads until the final phase, lowering ambient context.
+This delays expensive instruction payloads until the final phase, lowering ambient context. See [subagents.md](subagents.md) for full syntax.
 
 **Sub-agent model aliases:**
 
@@ -245,7 +222,54 @@ This delays expensive instruction payloads until the final phase, lowering ambie
 
 Always use aliases, not model IDs — aliases resolve to the best available model per provider.
 
-See also: [Inline Sub-Agents](subagents.md)
+---
+
+## Technique 3b — Inline Skills for Delayed Instruction Loading
+
+Large output templates, formatting rubrics, and phase-specific playbooks are often included verbatim in the workflow prompt body even though they are only needed when the agent is about to produce output. Moving them into `## skill:` blocks keeps the initial request lean while still making the content available on demand.
+
+The gh-aw runtime extracts `## skill:` blocks from the prompt before the first model call and stores them at engine-specific skill locations. The agent retrieves a skill only when it explicitly needs that guidance — the content does not appear in the ambient context of early turns.
+
+### When to use inline skills
+
+Use `## skill:` blocks for content that:
+
+- is only needed in the final output phase (issue body templates, report formats, discussion templates)
+- describes a specific sub-task rubric (scoring criteria, formatting rules, classification guides)
+- is verbose (> ~500 characters) and not required to understand the task
+
+Keep in the main prompt body anything the agent needs from the very first turn: task goal, inputs, decision criteria, tool guidance.
+
+### Pattern
+
+````markdown
+---
+engine: copilot
+---
+
+Analyze the run logs. For each finding that meets threshold, create a GitHub issue using the `report-issue-template` skill. Record each created issue in `known-issues.json`.
+
+## skill: `report-issue-template`
+---
+description: Issue title, body structure, and known-issues recording format.
+---
+
+**Title**: `[my-workflow] <finding-title>`
+
+**Body**:
+
+```markdown
+### Finding: <title>
+
+**Severity**: ...
+
+...full template...
+```
+````
+
+### Technique scope
+
+Prefer inline skills over separate `.github/aw/*.md` shared files when the content is only relevant to one workflow. Use a shared import (see [reuse.md](reuse.md)) when the same template is used by multiple workflows.
 
 ---
 
@@ -298,7 +322,7 @@ Fetch open issues from ${{ github.repository }} using the GitHub tools.
 1. Compare variants using `gh aw audit <control-run-id> <optimized-run-id>`
 2. Inspect `aic`, `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`
 3. Validate output quality and decision accuracy against the control run
-4. If the optimized variant wins on cost **and** quality, rewrite the baseline prompt and remove the `experiments:` field
+4. If the optimized variant wins on cost **and** quality, rewrite the baseline prompt and remove the `experiments:` field. See [experiments.md](experiments.md) for A/B testing details.
 
 **Key experiment dimensions for token optimization:**
 
@@ -309,8 +333,6 @@ Fetch open issues from ${{ github.repository }} using the GitHub tools.
 | Model tier | Run separate workflows for each engine |
 | Sub-agent usage | `single-agent` / `with-subagents` |
 | Tool mode | `mcp-local` / `gh-proxy` |
-
-See also: [A/B Testing Experiments](experiments.md)
 
 ---
 
@@ -328,59 +350,23 @@ The cheapest run is the one you don't execute. If a workflow doesn't need near-r
 
 Reactive triggers (`issues:`, `pull_request:`, comment commands) suit immediate feedback. Otherwise prefer `schedule: daily on weekdays` and batch work. Typical batch-friendly tasks: triage summaries, stale backlog review, token audits, security digests. Combine with `cache-memory` or `repo-memory` to track processed items.
 
----
+### Bound repetitive work to a manageable subset
 
-## Technique 7 — Measure Continuously with OpenTelemetry and AgenticOps
+Do not require one run to finish an unbounded backlog such as hundreds of lint violations. Set a per-run item, time, turn, or AI-credit budget and stop after a useful subset. Persist a compact cursor or processed-item set in `cache-memory` when stable state is available; otherwise use a deterministic heuristic such as file-path buckets, issue-number modulo, or oldest-first ordering. Rotate buckets round-robin across runs so every item eventually receives attention without repeatedly selecting the easiest items.
 
-Export telemetry automatically and add workflows that keep finding token waste over time.
-
-### Enable OTLP export
-
-Add workflow-level OpenTelemetry export so each run emits token and phase data to your observability backend:
-
-```yaml
-observability:
-  otlp:
-    endpoint: ${{ secrets.GH_AW_OTEL_ENDPOINT }}
-    headers: ${{ secrets.GH_AW_OTEL_HEADERS }}
-```
-
-Setup, agent, and conclusion spans carry token usage attributes. See [Frontmatter syntax](syntax-agentic.md#agentic-workflow-specific-fields).
-
-### Add AgenticOps token workflows
-
-- `copilot-token-audit` — scheduled audit of token usage across workflows
-- `copilot-token-optimizer` — scheduled follow-up that identifies one expensive workflow and proposes concrete savings
-
-Loop: export OTEL → summarize usage → open optimization issues → re-measure. See `.github/workflows/` for examples.
+Keep each batch idempotent, skip items already fixed, and report the processed subset plus remaining work. Prefer smaller complete batches over a broad set of partial fixes that may exhaust the budget.
 
 ---
 
-## Technique 8 — Enable Prompt Caching
+## Techniques 7–8 — Observability and Harness Learning
 
-Prompt caching is automatic via the AWF gateway. Cached input tokens are weighted at `0.1` versus `1.0` for uncached input — repeated context (system prompt, shared preamble) costs ~10× less when cached.
-
-To maximize cache hits:
-
-- **Keep stable content at the top of the prompt** — instructions that don't change between runs (role, output format, schema) before dynamic content (issue body, event context).
-- **Use `cache-memory`** for workflows that re-read the same large knowledge base across runs; avoids duplicate context every turn.
-- **Minimize dynamic context** — inject only the fields the agent needs: `${{ github.event.issue.number }}` instead of the full event payload.
+See [token-optimization-observability.md](token-optimization-observability.md) for OpenTelemetry export, AgenticOps token workflows, and learning from harness execution experience.
 
 ---
 
-## Technique 9 — Cap Spend with AI-Credit Guardrails
+## Techniques 9–11 — Caching, AI-Credit Guardrails, and Bounded File Reads
 
-Two top-level frontmatter fields enforce AI Credit budgets directly, independent of the techniques above. Both accept an integer or a `K`/`M` short-form string (e.g. `100M`, `500K`). Typical workflow range: `100` to `2500`.
-
-- **`max-ai-credits:`** — Per-run AI credit budget enforced by the AWF firewall/API proxy (default `1000`). The agent is steered to stay within budget; set a negative value to disable enforcement and steering.
-- **`max-daily-ai-credits:`** — Per-user 24-hour guardrail. At activation, gh-aw sums the triggering user's AI credits across their runs of this workflow over the last 24 hours and blocks execution once the total exceeds the threshold. Enabled by default with a system default threshold; set `-1` to disable, or an explicit value to override the default.
-
-```yaml
-max-ai-credits: 100M        # per-run cap (short-form string)
-max-daily-ai-credits: 500M  # per-user 24h cap; -1 disables
-```
-
-For custom or private models, the top-level **`models:`** frontmatter field supplies pricing in the same structure as `models.json` (keyed `providers.<provider>.models.<model>.cost` with `input`/`output`/`cache_read`/`cache_write` per-token costs). Entries are merged with the built-in `models.json` at runtime — they override matching models and fill gaps for unknown ones — so AI Credit accounting stays accurate for models gh-aw does not price by default.
+See [token-optimization-caching-budgets.md](token-optimization-caching-budgets.md) for prompt-caching mechanics, `max-ai-credits`/`max-daily-ai-credits` guardrails, custom model pricing, and the 20 KB bounded-file-read rule.
 
 ---
 
@@ -388,6 +374,8 @@ For custom or private models, the top-level **`models:`** frontmatter field supp
 
 | Topic | File |
 |---|---|
+| OpenTelemetry export, AgenticOps, harness-experience learning | [token-optimization-observability.md](token-optimization-observability.md) |
+| Prompt caching, AI-credit guardrails, bounded file reads | [token-optimization-caching-budgets.md](token-optimization-caching-budgets.md) |
 | Inline sub-agents syntax | [subagents.md](subagents.md) |
 | A/B experiments | [experiments.md](experiments.md) |
 | Persistent memory | [memory.md](memory.md) |

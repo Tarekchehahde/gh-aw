@@ -43,7 +43,7 @@ func runUpgradeForOrg(ctx context.Context, org string, repoGlobs []string, opts 
 		},
 		ReportFn: renderOrgUpgradeReport,
 		ApplyFn: func(ctx context.Context, preview orgRepoPreview, v bool) error {
-			return runUpgradeForTargetRepoFn(ctx, preview.Repo, opts, v)
+			return runUpgradeForTargetRepoFn(ctx, preview.Repo, opts, true, v)
 		},
 		IssueFn: func(ctx context.Context, preview orgRepoPreview, v bool) error {
 			return createIssueForUpgradeOrgRepoFn(ctx, preview.Repo, v)
@@ -209,10 +209,10 @@ func normalizeDisplayVersion(version string) string {
 
 // runUpgradeForTargetRepo checks out repo to a temporary directory, runs the
 // upgrade command inside it, and opens a pull request with the resulting changes.
-func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 	gitRoot, err := gitutil.FindGitRoot()
 	if err != nil {
-		return fmt.Errorf("--org requires running inside a git repository: %w", err)
+		return fmt.Errorf("--repo/--org requires running inside a git repository: %w", err)
 	}
 
 	updatesDir, err := ensureUpdateTargetRepoGitignore(gitRoot)
@@ -252,8 +252,10 @@ func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptio
 		return fmt.Errorf("failed to change directory to checkout %s: %w", checkoutDir, err)
 	}
 
-	if err := PreflightCheckForCreatePR(verbose); err != nil {
-		return err
+	if createPR {
+		if err := PreflightCheckForCreatePR(verbose); err != nil {
+			return err
+		}
 	}
 
 	// Override fields that must be adjusted for a remote-repo upgrade.
@@ -266,6 +268,10 @@ func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptio
 
 	if err := runUpgradeCommand(opts); err != nil {
 		return err
+	}
+
+	if !createPR {
+		return nil
 	}
 
 	// Skip PR creation when the upgrade produced no changes (e.g. repo is already up to date).
@@ -281,7 +287,7 @@ func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptio
 		return nil
 	}
 
-	releaseTag, releaseURL := getGhawReleaseInfo()
+	releaseTag, releaseURL := getGhawReleaseInfo(ctx)
 	xmlMarker := buildOrgXMLMarker(ghawUpgradeMarkerPrefix, releaseTag)
 
 	// Close any stale upgrade PRs in the target repo before creating the new one.
@@ -295,7 +301,7 @@ func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptio
 		"updating GitHub Actions versions, and recompiling all workflows." +
 		releaseLine + "\n" + xmlMarker
 
-	prURL, err := CreatePRWithChanges("upgrade-agentic-workflows", "chore: upgrade agentic workflows",
+	prURL, err := CreatePRWithChanges(ctx, "upgrade-agentic-workflows", "chore: upgrade agentic workflows",
 		"Upgrade agentic workflows", prBody, verbose)
 	if err != nil {
 		return err
@@ -312,6 +318,9 @@ func runUpgradeForTargetRepo(ctx context.Context, repo string, opts upgradeOptio
 // This is the same discovery strategy used by the update command so both
 // commands operate on the same set of repositories.
 func searchOrgLockWorkflowRepos(ctx context.Context, org string, verbose bool) ([]string, error) {
+	if !isValidOrgSlug(org) {
+		return nil, invalidOrgSlugError(org)
+	}
 	query := fmt.Sprintf(`org:%s path:.github/workflows filename:.lock.yml`, org)
 	return searchOrgReposByQuery(ctx, query, verbose)
 }
@@ -323,7 +332,7 @@ func searchOrgLockWorkflowRepos(ctx context.Context, org string, verbose bool) (
 func createIssueForUpgradeOrgRepo(ctx context.Context, repo string, verbose bool) error {
 	title := "[aw] Upgrade available"
 
-	releaseTag, releaseURL := getGhawReleaseInfo()
+	releaseTag, releaseURL := getGhawReleaseInfo(ctx)
 	xmlMarker := buildOrgXMLMarker(ghawUpgradeMarkerPrefix, releaseTag)
 
 	// Close stale upgrade issues before creating the new one.

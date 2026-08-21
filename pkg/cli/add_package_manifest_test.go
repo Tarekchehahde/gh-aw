@@ -35,11 +35,11 @@ func TestResolveRepositoryPackage(t *testing.T) {
 		getRepositoryPackageLatestRelease = originalLatestRelease
 	})
 	SetVersionInfo("v1.2.3")
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 
-	getRepositoryPackageLatestRelease = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageLatestRelease = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "", errors.New("no releases found")
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -80,7 +80,7 @@ files:
 		assert.Equal(t, "🤖", pkg.Emoji)
 		assert.Equal(t, "MIT", pkg.License)
 		assert.Equal(t, "README.md", pkg.DocsPath)
-		assert.Equal(t, []string{"workflows/review.md", ".github/workflows/nightly-review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md", ".github/workflows/nightly-review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 		require.NotEmpty(t, pkg.Warnings)
 		assert.Contains(t, strings.Join(pkg.Warnings, "\n"), "Ignoring files entry")
 	})
@@ -92,12 +92,42 @@ files:
 			getRepositoryPackageDefaultBranch = previousDefaultBranch
 			getRepositoryPackageLatestRelease = previousLatestRelease
 		})
-		getRepositoryPackageLatestRelease = func(repoSlug, host string) (string, error) {
+
+		t.Run("uses resources mappings", func(t *testing.T) {
+			downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+				switch path {
+				case "packages/repo-assist/aw.yml":
+					return []byte(`name: Repo Assist
+resources:
+  - source: templates/bug.yml
+    destination: .github/ISSUE_TEMPLATE/bug.yml
+  - source: policy/controls.json
+    destination: .github/aw/policy/controls.json
+`), nil
+				case "packages/repo-assist/README.md":
+					return []byte("# Repo Assist\n"), nil
+				default:
+					return nil, createRepositoryPackageNotFoundError(path)
+				}
+			}
+			listPackageWorkflowFilesForHost = func(_ context.Context, owner, repo, ref, workflowPath, host string) ([]string, error) {
+				return nil, createRepositoryPackageNotFoundError(workflowPath)
+			}
+
+			pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo", PackagePath: "packages/repo-assist"}, "")
+			require.NoError(t, err)
+			require.Len(t, pkg.ResourceFiles, 2)
+			assert.Equal(t, "packages/repo-assist/templates/bug.yml", pkg.ResourceFiles[0].SourcePath)
+			assert.Equal(t, ".github/ISSUE_TEMPLATE/bug.yml", pkg.ResourceFiles[0].DestinationPath)
+			assert.Equal(t, "packages/repo-assist/policy/controls.json", pkg.ResourceFiles[1].SourcePath)
+			assert.Equal(t, ".github/aw/policy/controls.json", pkg.ResourceFiles[1].DestinationPath)
+		})
+		getRepositoryPackageLatestRelease = func(_ context.Context, repoSlug, host string) (string, error) {
 			assert.Equal(t, "owner/repo", repoSlug)
 			assert.Equal(t, "github.com", host)
 			return "", errors.New("no releases found")
 		}
-		getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 			assert.Equal(t, "owner/repo", repoSlug)
 			assert.Equal(t, "github.com", host)
 			return "master", nil
@@ -127,7 +157,7 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "github.com")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("uses latest release for github/gh-aw when version is omitted", func(t *testing.T) {
@@ -137,12 +167,12 @@ files:
 			getRepositoryPackageDefaultBranch = previousDefaultBranch
 			getRepositoryPackageLatestRelease = previousLatestRelease
 		})
-		getRepositoryPackageLatestRelease = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageLatestRelease = func(_ context.Context, repoSlug, host string) (string, error) {
 			assert.Equal(t, "github/gh-aw", repoSlug)
 			assert.Equal(t, "github.com", host)
 			return "v1.2.3", nil
 		}
-		getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 			t.Fatalf("default branch lookup should not be called when latest release is available")
 			return "", nil
 		}
@@ -172,7 +202,7 @@ files:
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "github/gh-aw"}, "github.com")
 		require.NoError(t, err)
 		assert.Equal(t, "v1.2.3", pkg.ResolvedRef)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("falls back to default branch for github/gh-aw when latest release lookup fails", func(t *testing.T) {
@@ -182,12 +212,12 @@ files:
 			getRepositoryPackageDefaultBranch = previousDefaultBranch
 			getRepositoryPackageLatestRelease = previousLatestRelease
 		})
-		getRepositoryPackageLatestRelease = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageLatestRelease = func(_ context.Context, repoSlug, host string) (string, error) {
 			assert.Equal(t, "github/gh-aw", repoSlug)
 			assert.Equal(t, "github.com", host)
 			return "", errors.New("release lookup failed")
 		}
-		getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 			assert.Equal(t, "github/gh-aw", repoSlug)
 			assert.Equal(t, "github.com", host)
 			return "main", nil
@@ -218,7 +248,7 @@ files:
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "github/gh-aw"}, "github.com")
 		require.NoError(t, err)
 		assert.Equal(t, "main", pkg.ResolvedRef)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("uses slash branch ref from manifest route", func(t *testing.T) {
@@ -226,7 +256,7 @@ files:
 		t.Cleanup(func() {
 			getRepositoryPackageDefaultBranch = previousDefaultBranch
 		})
-		getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+		getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 			t.Fatalf("default branch lookup should not be called when version is provided")
 			return "", nil
 		}
@@ -252,7 +282,7 @@ files:
 			Version:     "feature/github-agentic-workflow",
 		}, "github.com")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"agentic-workflows/workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"agentic-workflows/workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("falls back to scanning supported workflow directories", func(t *testing.T) {
@@ -281,7 +311,7 @@ files:
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
 		assert.Equal(t, "README.md", pkg.DocsPath)
-		assert.Equal(t, []string{"workflows/review.md", ".github/workflows/nightly-review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md", ".github/workflows/nightly-review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("passes explicit host to scanning fallback", func(t *testing.T) {
@@ -311,7 +341,7 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "github.com")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("rejects manifest without name field", func(t *testing.T) {
@@ -328,7 +358,7 @@ files:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `name must be a non-empty string`)
+		require.ErrorContains(t, err, `name must be a non-empty string`)
 	})
 
 	t.Run("requires aw manifest when only legacy alias exists", func(t *testing.T) {
@@ -348,7 +378,7 @@ files:
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
 		assert.Equal(t, []string{"aw.yml"}, requestedPaths)
-		assert.Contains(t, err.Error(), `no aw.yml manifest found`)
+		require.ErrorContains(t, err, `no aw.yml manifest found`)
 	})
 
 	t.Run("accepts manifest-version and compatible min-version", func(t *testing.T) {
@@ -374,7 +404,38 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
+	})
+
+	t.Run("accepts git describe compiler version for matching min-version", func(t *testing.T) {
+		SetVersionInfo("v1.0.0-27-g117acb7f9c")
+		t.Cleanup(func() {
+			SetVersionInfo("v1.2.3")
+		})
+
+		downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+			switch path {
+			case "aw.yml":
+				return []byte(`manifest-version: "1"
+min-version: v1.0.0
+name: Repo Assist
+files:
+  - workflows/review.md
+`), nil
+			case "README.md":
+				return []byte("# Repo Assist\n"), nil
+			default:
+				return nil, createRepositoryPackageNotFoundError(path)
+			}
+		}
+		listPackageWorkflowFilesForHost = func(_ context.Context, owner, repo, ref, workflowPath, host string) ([]string, error) {
+			t.Fatalf("unexpected scan of %s", workflowPath)
+			return nil, nil
+		}
+
+		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("accepts manifest without manifest-version", func(t *testing.T) {
@@ -398,7 +459,7 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("rejects unsupported manifest-version", func(t *testing.T) {
@@ -413,7 +474,7 @@ name: Repo Assist
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `manifest-version`)
+		require.ErrorContains(t, err, `manifest-version`)
 	})
 
 	t.Run("accepts branding field", func(t *testing.T) {
@@ -443,6 +504,74 @@ files:
 		assert.Equal(t, "Repo Assist", pkg.Name)
 	})
 
+	t.Run("accepts bootstrap action metadata", func(t *testing.T) {
+		downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+			switch path {
+			case "aw.yml":
+				return []byte(`name: Repo Assist
+config:
+  - type: require-owner-type
+    owner: repo
+    value: org
+  - type: repo-variable
+    name: CENTRAL_AGENTIC_OPS_MODE
+    prompt: Rollout mode
+    default: preview
+    enum: [preview, review, live]
+  - type: handoff
+    message: Run gh aw run readiness.
+`), nil
+			case "README.md":
+				return []byte("# Repo Assist\n"), nil
+			default:
+				return nil, createRepositoryPackageNotFoundError(path)
+			}
+		}
+		listPackageWorkflowFilesForHost = func(_ context.Context, owner, repo, ref, workflowPath, host string) ([]string, error) {
+			switch workflowPath {
+			case "workflows":
+				return []string{"workflows/review.md"}, nil
+			case ".github/workflows":
+				return nil, createRepositoryPackageNotFoundError(workflowPath)
+			default:
+				return nil, fmt.Errorf("unexpected workflow path %s", workflowPath)
+			}
+		}
+
+		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
+		require.NoError(t, err)
+		require.NotNil(t, pkg.Bootstrap)
+		require.Len(t, pkg.Bootstrap.Config, 3)
+		assert.Equal(t, "require-owner-type", pkg.Bootstrap.Config[0].Type)
+		assert.Equal(t, "repo-variable", pkg.Bootstrap.Config[1].Type)
+		assert.Equal(t, []string{"preview", "review", "live"}, pkg.Bootstrap.Config[1].Enum)
+		assert.Equal(t, "handoff", pkg.Bootstrap.Config[2].Type)
+		assert.Contains(t, pkg.Warnings, "Using experimental feature: config")
+	})
+
+	t.Run("rejects old bootstrap key with schema error", func(t *testing.T) {
+		downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+			switch path {
+			case "aw.yml":
+				return []byte(`name: Repo Assist
+bootstrap:
+  config:
+    - type: repo-variable
+      name: MY_VAR
+      prompt: Enter a value
+`), nil
+			case "README.md":
+				return []byte("# Repo Assist\n"), nil
+			default:
+				return nil, createRepositoryPackageNotFoundError(path)
+			}
+		}
+
+		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
+		require.Error(t, err, "old bootstrap key must produce an error, not be silently ignored")
+		require.ErrorContains(t, err, "bootstrap")
+	})
+
 	t.Run("rejects unsupported branding icon", func(t *testing.T) {
 		downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
 			if path == "aw.yml" {
@@ -457,7 +586,7 @@ branding:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `icon`)
+		require.ErrorContains(t, err, `icon`)
 	})
 
 	t.Run("rejects docs field", func(t *testing.T) {
@@ -472,7 +601,7 @@ docs: docs/overview.md
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `docs`)
+		require.ErrorContains(t, err, `docs`)
 	})
 
 	t.Run("rejects non-string emoji field", func(t *testing.T) {
@@ -488,7 +617,7 @@ emoji:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `emoji`)
+		require.ErrorContains(t, err, `emoji`)
 	})
 
 	t.Run("rejects non-string license field", func(t *testing.T) {
@@ -504,7 +633,7 @@ license:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `license`)
+		require.ErrorContains(t, err, `license`)
 	})
 
 	t.Run("rejects incompatible min-version", func(t *testing.T) {
@@ -519,7 +648,7 @@ name: Repo Assist
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `requires gh-aw`)
+		require.ErrorContains(t, err, `requires gh-aw`)
 	})
 
 	t.Run("requires package README", func(t *testing.T) {
@@ -538,8 +667,7 @@ files:
 		}
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `missing required README.md`)
+		require.EqualError(t, err, "repository \"owner/repo\" is not a valid Agentic Workflow package: missing required README.md at \"README.md\". Add a README.md describing the package. Example:\n# My Package\n\nDescribe what this package does")
 	})
 
 	t.Run("reports nested package path when README is missing", func(t *testing.T) {
@@ -559,8 +687,8 @@ files:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo", PackagePath: "packages/repo-assist"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `owner/repo/packages/repo-assist`)
-		assert.Contains(t, err.Error(), `packages/repo-assist/README.md`)
+		require.ErrorContains(t, err, `owner/repo/packages/repo-assist`)
+		require.ErrorContains(t, err, `packages/repo-assist/README.md`)
 	})
 
 	t.Run("rejects unknown manifest fields", func(t *testing.T) {
@@ -575,7 +703,7 @@ unknown-field: true
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `unknown-field`)
+		require.ErrorContains(t, err, `unknown-field`)
 	})
 
 	t.Run("resolves nested package manifests", func(t *testing.T) {
@@ -601,7 +729,7 @@ files:
 		require.NoError(t, err)
 		assert.Equal(t, "packages/repo-assist/aw.yml", pkg.ManifestPath)
 		assert.Equal(t, "packages/repo-assist/README.md", pkg.DocsPath)
-		assert.Equal(t, []string{"packages/repo-assist/workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"packages/repo-assist/workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 
 	t.Run("nested bundle github workflows paths are repo-root-relative", func(t *testing.T) {
@@ -633,7 +761,7 @@ files:
 		assert.Equal(t, []string{
 			"dependabot/workflows/review.md",
 			".github/workflows/dependabot-orchestrator.md",
-		}, pkg.InstallationSource)
+		}, packageInstallableSourcePaths(pkg.InstallationSource))
 	})
 }
 
@@ -652,7 +780,7 @@ func TestResolveWorkflows_RepositoryPackage(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -710,7 +838,7 @@ func TestResolveWorkflows_RepositoryPackageRejectsPrivateTrue(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -746,7 +874,7 @@ func TestResolveWorkflows_RepositoryPackageRejectsPrivateTrue(t *testing.T) {
 
 	_, err := ResolveWorkflows(context.Background(), []string{"owner/repo"}, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `workflow "workflows/review.md" sets private: true`)
+	require.ErrorContains(t, err, `workflow "workflows/review.md" sets private: true`)
 }
 
 func TestResolveWorkflows_NestedRepositoryPackage(t *testing.T) {
@@ -764,7 +892,7 @@ func TestResolveWorkflows_NestedRepositoryPackage(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -824,7 +952,7 @@ func TestResolveWorkflows_NestedRepositoryPackage_GithubWorkflowsPathIsRepoRoot(
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -883,7 +1011,7 @@ func TestResolveWorkflows_NestedRepositoryPackage_AutoScan(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -936,7 +1064,7 @@ func TestResolveWorkflows_FallsBackToWorkflowWhenNestedManifestMissing(t *testin
 		downloadPackageFileFromGitHubForHost = originalDownload
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 
@@ -959,6 +1087,7 @@ func TestResolveWorkflows_FallsBackToWorkflowWhenNestedManifestMissing(t *testin
 }
 
 func TestParseRepositoryPackageSpec(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		spec            string
@@ -1046,7 +1175,7 @@ func TestParseRepositoryPackageSpec(t *testing.T) {
 			assert.Equal(t, tt.wantOK, ok)
 			if tt.wantErr != "" {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
+				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
@@ -1063,6 +1192,7 @@ func TestParseRepositoryPackageSpec(t *testing.T) {
 }
 
 func TestIsSupportedPackageInstallablePath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
@@ -1103,24 +1233,27 @@ func TestIsSupportedPackageInstallablePath(t *testing.T) {
 }
 
 func TestExtractManifestIncludes(t *testing.T) {
-	includes, warnings := extractManifestIncludes([]any{
+	t.Parallel()
+	includes, warnings, err := extractManifestIncludes([]any{
 		"workflows/review.md",
 		"agentic-workflows/review.md",
 		"skills/code-review",
 		"agents/reviewer.md",
 		".github/workflows/ci.yml",
 	}, "aw.yml")
+	require.NoError(t, err)
 	assert.Equal(t, []string{
 		"workflows/review.md",
 		"agentic-workflows/review.md",
 		"skills/code-review",
 		"agents/reviewer.md",
 		".github/workflows/ci.yml",
-	}, includes)
+	}, manifestIncludeSources(includes))
 	assert.Empty(t, warnings)
 }
 
 func TestCodemodManifestFilesToIncludes(t *testing.T) {
+	t.Parallel()
 	converted := codemodManifestFilesToIncludes([]string{
 		"workflows/review.md",
 		".github/workflows/ci.yml",
@@ -1147,7 +1280,7 @@ func TestResolveRepositoryPackage_ActionWorkflowYML(t *testing.T) {
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
 	SetVersionInfo("v1.2.3")
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -1179,7 +1312,7 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/triage.md", ".github/workflows/ci.yml"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/triage.md", ".github/workflows/ci.yml"}, packageInstallableSourcePaths(pkg.InstallationSource))
 		assert.Contains(t, strings.Join(pkg.Warnings, "\n"), "Field 'files'")
 	})
 
@@ -1206,7 +1339,7 @@ files:
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
 		// Only the .md file should be accepted; the yml under workflows/ is rejected
-		assert.Equal(t, []string{"workflows/triage.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/triage.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 		require.NotEmpty(t, pkg.Warnings)
 		assert.Contains(t, strings.Join(pkg.Warnings, "\n"), "Ignoring files entry")
 	})
@@ -1233,7 +1366,7 @@ files:
 
 		_, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate workflow filename")
+		require.ErrorContains(t, err, "duplicate workflow filename")
 	})
 }
 
@@ -1252,7 +1385,7 @@ func TestResolveWorkflows_ActionWorkflowYML(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
@@ -1318,6 +1451,7 @@ files:
 }
 
 func TestIsSupportedSkillDirPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
@@ -1348,6 +1482,7 @@ func TestIsSupportedSkillDirPath(t *testing.T) {
 }
 
 func TestIsSupportedAgentFilePath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
@@ -1379,6 +1514,7 @@ func TestIsSupportedAgentFilePath(t *testing.T) {
 }
 
 func TestExtractManifestSkillDirs(t *testing.T) {
+	t.Parallel()
 	t.Run("valid entries are accepted", func(t *testing.T) {
 		dirs, warnings := extractManifestSkillDirs([]any{"skills/review", "skills/triage"}, "aw.yml")
 		assert.Equal(t, []string{"skills/review", "skills/triage"}, dirs)
@@ -1407,6 +1543,7 @@ func TestExtractManifestSkillDirs(t *testing.T) {
 }
 
 func TestExtractManifestAgentFiles(t *testing.T) {
+	t.Parallel()
 	t.Run("valid entries are accepted", func(t *testing.T) {
 		files, warnings := extractManifestAgentFiles([]any{"agents/review.md", "agents/triage.md"}, "aw.yml")
 		assert.Equal(t, []string{"agents/review.md", "agents/triage.md"}, files)
@@ -1453,7 +1590,7 @@ func TestResolveRepositoryPackage_SkillsAndAgents(t *testing.T) {
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
 	SetVersionInfo("v1.2.3")
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 
@@ -1494,7 +1631,7 @@ files:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 		require.Len(t, pkg.SkillFiles, 2)
 		assert.Equal(t, "skills/code-review/SKILL.md", pkg.SkillFiles[0].SourcePath)
 		assert.Equal(t, "code-review", pkg.SkillFiles[0].SkillName)
@@ -1539,7 +1676,7 @@ includes:
 
 		pkg, err := resolveRepositoryPackage(t.Context(), &RepoSpec{RepoSlug: "owner/repo"}, "")
 		require.NoError(t, err)
-		assert.Equal(t, []string{"workflows/review.md"}, pkg.InstallationSource)
+		assert.Equal(t, []string{"workflows/review.md"}, packageInstallableSourcePaths(pkg.InstallationSource))
 		require.Len(t, pkg.SkillFiles, 2)
 		assert.Equal(t, []string{".github/agents/triage.md"}, pkg.AgentFiles)
 	})
@@ -1876,7 +2013,7 @@ func TestResolveWorkflows_SkillsAndAgents(t *testing.T) {
 		listPackageDirSubdirsForHost = originalDirSubdirs
 		getRepositoryPackageDefaultBranch = originalDefaultBranch
 	})
-	getRepositoryPackageDefaultBranch = func(repoSlug, host string) (string, error) {
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
 		return "main", nil
 	}
 
@@ -1956,6 +2093,7 @@ files:
 }
 
 func TestIsGhAwRepository(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		repoSlug string
@@ -1974,4 +2112,170 @@ func TestIsGhAwRepository(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// bootstrapTestHelpers sets up the common mock functions used by bootstrap profile
+// propagation tests and registers their cleanup.
+func bootstrapTestHelpers(t *testing.T) {
+	t.Helper()
+	originalFetchFn := fetchWorkflowFromSourceWithContextFn
+	originalDownload := downloadPackageFileFromGitHubForHost
+	originalList := listPackageWorkflowFilesForHost
+	originalDirFiles := listPackageDirFilesForHost
+	originalDirSubdirs := listPackageDirSubdirsForHost
+	originalDefaultBranch := getRepositoryPackageDefaultBranch
+	t.Cleanup(func() {
+		fetchWorkflowFromSourceWithContextFn = originalFetchFn
+		downloadPackageFileFromGitHubForHost = originalDownload
+		listPackageWorkflowFilesForHost = originalList
+		listPackageDirFilesForHost = originalDirFiles
+		listPackageDirSubdirsForHost = originalDirSubdirs
+		getRepositoryPackageDefaultBranch = originalDefaultBranch
+	})
+
+	getRepositoryPackageDefaultBranch = func(_ context.Context, repoSlug, host string) (string, error) {
+		return "main", nil
+	}
+	listPackageDirFilesForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
+		return nil, createRepositoryPackageNotFoundError(dirPath)
+	}
+	listPackageDirSubdirsForHost = func(_ context.Context, owner, repo, ref, dirPath, host string) ([]string, error) {
+		return nil, createRepositoryPackageNotFoundError(dirPath)
+	}
+	listPackageWorkflowFilesForHost = func(_ context.Context, owner, repo, ref, workflowPath, host string) ([]string, error) {
+		t.Fatalf("unexpected scan of %s", workflowPath)
+		return nil, nil
+	}
+	fetchWorkflowFromSourceWithContextFn = func(_ context.Context, spec *WorkflowSpec, _ bool) (*FetchedWorkflow, error) {
+		return &FetchedWorkflow{
+			Content:    []byte("---\nname: Test\non: push\n---\n"),
+			CommitSHA:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			IsLocal:    false,
+			SourcePath: spec.WorkflowPath,
+		}, nil
+	}
+}
+
+func TestResolveWorkflows_BootstrapProfile_SinglePackage(t *testing.T) {
+	bootstrapTestHelpers(t)
+
+	downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+		switch path {
+		case "aw.yml":
+			return []byte(`name: My Package
+files:
+  - workflows/review.md
+config:
+  - type: repo-variable
+    name: MY_VAR
+    prompt: Enter a value
+`), nil
+		case "README.md":
+			return []byte("# My Package\n"), nil
+		}
+		return nil, createRepositoryPackageNotFoundError(path)
+	}
+
+	resolved, err := ResolveWorkflows(context.Background(), []string{"owner/repo"}, false)
+	require.NoError(t, err)
+	require.Len(t, resolved.Workflows, 1)
+
+	require.NotNil(t, resolved.BootstrapProfile, "BootstrapProfile should be populated from the package config")
+	assert.Equal(t, "owner/repo", resolved.BootstrapProfile.PackageID)
+	require.Len(t, resolved.BootstrapProfile.Profile.Config, 1)
+	assert.Equal(t, "repo-variable", resolved.BootstrapProfile.Profile.Config[0].Type)
+	assert.Equal(t, "MY_VAR", resolved.BootstrapProfile.Profile.Config[0].Name)
+}
+
+func TestResolveWorkflows_BootstrapProfile_MultiplePackagesWarnsAndSuppresses(t *testing.T) {
+	bootstrapTestHelpers(t)
+
+	// Two separate repository packages, each declaring a config section.
+	downloadPackageFileFromGitHubForHost = func(_ context.Context, owner, repo, path, ref, host string) ([]byte, error) {
+		var pkgName, varName string
+		switch repo {
+		case "pkg-a":
+			pkgName, varName = "Package A", "VAR_A"
+		case "pkg-b":
+			pkgName, varName = "Package B", "VAR_B"
+		default:
+			return nil, createRepositoryPackageNotFoundError(path)
+		}
+		switch path {
+		case "aw.yml":
+			return fmt.Appendf(nil, `name: %s
+files:
+  - workflows/review.md
+config:
+  - type: repo-variable
+    name: %s
+    prompt: Enter a value
+`, pkgName, varName), nil
+		case "README.md":
+			return []byte("# " + pkgName + "\n"), nil
+		}
+		return nil, createRepositoryPackageNotFoundError(path)
+	}
+
+	resolved, err := ResolveWorkflows(context.Background(), []string{"owner/pkg-a", "owner/pkg-b"}, false)
+	require.NoError(t, err)
+
+	assert.Nil(t, resolved.BootstrapProfile, "BootstrapProfile should be nil when multiple packages declare config")
+
+	// Verify the multi-profile warning is present (other deprecation/experimental warnings may also be present)
+	found := false
+	for _, w := range resolved.Warnings {
+		if strings.Contains(w, "multiple bootstrap profiles found") {
+			assert.Contains(t, w, "owner/pkg-a")
+			assert.Contains(t, w, "owner/pkg-b")
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected a warning about multiple bootstrap profiles, got: %v", resolved.Warnings)
+}
+
+func TestPrintBootstrapConfigTODO(t *testing.T) {
+	t.Parallel()
+	t.Run("noop when profile is nil", func(t *testing.T) {
+		var buf strings.Builder
+		printBootstrapConfigTODO(&buf, nil)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("prints checklist items to provided writer", func(t *testing.T) {
+		profile := &resolvedBootstrapProfile{
+			PackageID: "owner/repo",
+			Profile: &repositoryPackageBootstrap{
+				Config: []repositoryPackageBootstrapAction{
+					{Type: "require-owner-type", Value: "org"},
+					{Type: "repo-variable", Name: "MY_VAR", Prompt: "Enter a value"},
+					{Type: "repo-secret", Name: "MY_SECRET", Prompt: "Enter secret"},
+					{Type: "copilot-auth", Secret: "COPILOT_TOKEN"},
+					{Type: "commit-and-push", Message: "Bootstrap repository changes"},
+					{Type: "handoff", Message: "Run the bootstrap wizard."},
+				},
+			},
+		}
+		var buf strings.Builder
+		printBootstrapConfigTODO(&buf, profile)
+		out := buf.String()
+		assert.Contains(t, out, "owner/repo")
+		assert.Contains(t, out, "☐ Verify repository owner type: org")
+		assert.Contains(t, out, "☐ Set repository variable: MY_VAR")
+		assert.Contains(t, out, "☐ Set repository secret: MY_SECRET")
+		assert.Contains(t, out, "☐ Set Copilot PAT secret: COPILOT_TOKEN")
+		assert.Contains(t, out, "☐ Commit and push local changes — Bootstrap repository changes")
+		assert.Contains(t, out, "Run the bootstrap wizard.")
+		assert.NotContains(t, out, "gh aw bootstrap")
+	})
+}
+
+// manifestIncludeSources returns the source path of each manifest include entry.
+func manifestIncludeSources(includes []repositoryPackageInclude) []string {
+	sources := make([]string, 0, len(includes))
+	for _, include := range includes {
+		sources = append(sources, include.Source)
+	}
+	return sources
 }

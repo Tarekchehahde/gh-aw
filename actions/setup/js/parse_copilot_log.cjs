@@ -143,7 +143,7 @@ function parseCopilotLog(logContent) {
 
   // Generate conversation markdown using shared function
   const conversationResult = generateConversationMarkdown(canonicalLogEntries, {
-    formatToolCallback: (toolUse, toolResult) => formatToolUse(toolUse, toolResult, { includeDetailedParameters: true }),
+    formatToolCallback: (toolUse, toolResult) => formatToolUse(toolUse, toolResult, { includeDetailedParameters: false }),
     formatInitCallback: initEntry =>
       formatInitializationSummary(initEntry, {
         includeSlashCommands: false,
@@ -229,10 +229,12 @@ function parsePrettyPrintFormat(logContent) {
   const MODEL_BREAKDOWN_RE = /^Breakdown by AI model:/;
   const MODEL_LINE_RE = /^ +(\S+)\s+([\d.]+k?)\s+in,\s+([\d.]+k?)\s+out(?:,\s+([\d.]+k?)\s+cached)?/;
   // Recognise both legacy ("Total usage est:" / "API time spent:" / …) and the
-  // newer Copilot CLI footer ("Changes  +N -N", "Duration  Ns", "Tokens  ↑N ↓N (cached)").
-  // The newer footer omits a colon and uses arrow glyphs, so we extend the regex rather than
-  // relying on the legacy "Total …:" prefix alone.
-  const USAGE_LINES_RE = /^(?:Total usage est:|API time spent:|Total session time:|Total code changes:|Changes\s+[+-]?\d|Duration\s+\d|Tokens\s+[↑↓])/;
+  // newer Copilot CLI footer ("Changes  +N -N", "Duration  Ns", "Tokens  ↑N ↓N (cached)",
+  // "Resume  copilot --resume=…"). The newer footer omits a colon and uses arrow glyphs, so we
+  // extend the regex rather than relying on the legacy "Total …:" prefix alone. The "Resume"
+  // hint is matched against the exact CLI command syntax to avoid false-positives on prose
+  // that happens to start with "Resume  ".
+  const USAGE_LINES_RE = /^(?:Total usage est:|API time spent:|Total session time:|Total code changes:|Changes\s+[+-]?\d|Duration\s+\d|Tokens\s+[↑↓]|Resume\s{2,}copilot\s+--resume=)/;
 
   const parseTokenCount = s => {
     const n = parseFloat(s);
@@ -510,7 +512,9 @@ function parseDebugLogFormat(logContent) {
 
   // Extract model information from the start
   let model = "unknown";
+  /** @type {any} */
   let sessionId = null;
+  /** @type {any} */
   let modelInfo = null;
   let tools = [];
   const modelMatch = logContent.match(/Starting Copilot CLI: ([\d.]+)/);
@@ -727,6 +731,7 @@ function parseDebugLogFormat(logContent) {
                           let toolName = toolCall.function.name;
                           const originalToolName = toolName; // Keep original for error matching
                           const toolId = toolCall.id || `tool_${Date.now()}_${Math.random()}`;
+                          /** @type {any} */
                           let args = {};
 
                           // Parse tool name (handle github- prefix and bash)
@@ -873,6 +878,7 @@ function parseDebugLogFormat(logContent) {
                   let toolName = toolCall.function.name;
                   const originalToolName = toolName;
                   const toolId = toolCall.id || `tool_${Date.now()}_${Math.random()}`;
+                  /** @type {any} */
                   let args = {};
 
                   if (toolName.startsWith("github-")) {

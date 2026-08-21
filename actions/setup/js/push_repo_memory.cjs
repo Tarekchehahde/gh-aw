@@ -6,7 +6,10 @@ const path = require("path");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { globPatternToRegex } = require("./glob_pattern_helpers.cjs");
-const { execGitSync, getGitAuthEnv } = require("./git_helpers.cjs");
+const { getGitAuthEnv } = require("./git_auth_helpers.cjs");
+const { execGitSync } = require("./git_helpers.cjs");
+const { getStagedPatchDiffSizeBytes } = require("./git_patch_utils.cjs");
+const { formatJSONFiles, runCustomMemoryValidation } = require("./memory_custom_validation.cjs");
 const { parseAllowedRepos, validateRepo } = require("./repo_helpers.cjs");
 const { pushSignedCommits } = require("./push_signed_commits.cjs");
 
@@ -49,6 +52,8 @@ async function main() {
   const maxPatchSize = parseInt(process.env.MAX_PATCH_SIZE || "10240", 10);
   const fileGlobFilter = process.env.FILE_GLOB_FILTER || "";
   const formatJSON = process.env.FORMAT_JSON === "true";
+  const validationScriptBase64 = process.env.VALIDATION_SCRIPT_B64 || "";
+  const validationTimeoutSeconds = parseInt(process.env.VALIDATION_TIMEOUT_SECONDS || "60", 10);
 
   // Parse allowed extensions with error handling
   let allowedExtensions = [".json", ".jsonl", ".txt", ".md", ".csv"];
@@ -84,14 +89,19 @@ async function main() {
 
   /** @param {string} absPath */
   function tryParseJSONFile(absPath) {
-    const raw = fs.readFileSync(absPath, "utf8");
+    let raw;
+    try {
+      raw = fs.readFileSync(absPath, "utf8");
+    } catch (err) {
+      throw new Error(`Failed to read file ${absPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
     if (!raw.trim()) {
       throw new Error(`Empty JSON file: ${absPath}`);
     }
     try {
       return JSON.parse(raw);
     } catch (e) {
-      throw new Error(`Invalid JSON in ${absPath}: ${getErrorMessage(e)}`);
+      throw new Error(`Invalid JSON in ${absPath}: ${getErrorMessage(e)}`, { cause: e });
     }
   }
 
@@ -313,7 +323,12 @@ async function main() {
    * @param {string} relativePath - Relative path from sourceMemoryPath (for nested files)
    */
   function scanDirectory(dirPath, relativePath = "") {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    let entries;
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch (err) {
+      throw new Error(`Failed to read directory ${dirPath}: ${getErrorMessage(err)}`, { cause: err });
+    }
 
     for (const entry of entries) {
       const fullPath = path.join(dirPath, entry.name);
@@ -324,7 +339,12 @@ async function main() {
         // Recursively scan subdirectory
         scanDirectory(fullPath, relativeFilePath);
       } else if (entry.isFile()) {
-        const stats = fs.statSync(fullPath);
+        let stats;
+        try {
+          stats = fs.statSync(fullPath);
+        } catch (err) {
+          throw new Error(`Failed to inspect file ${fullPath}: ${getErrorMessage(err)}`, { cause: err });
+        }
         const normalizedRelPath = relativeFilePath.replace(/\\/g, "/");
 
         // Validate file name patterns if filter is set
@@ -429,58 +449,63 @@ async function main() {
   if (formatJSON) {
     core.info("FORMAT_JSON is enabled: formatting .json files as human-readable...");
 
-    /**
-     * Recursively find and format all .json files under a directory
-     * @param {string} dirPath - Directory to scan
-     */
-    function formatJSONFilesInDir(dirPath) {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dirPath, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name !== ".git") {
-            formatJSONFilesInDir(fullPath);
-          }
-        } else if (entry.isFile() && entry.name.endsWith(".json")) {
-          try {
-            const raw = fs.readFileSync(fullPath, "utf8");
-            if (!raw.trim()) {
-              continue;
-            }
-            const parsed = JSON.parse(raw);
-            const formatted = JSON.stringify(parsed, null, 2) + "\n";
-            if (raw !== formatted) {
-              const formattedSize = Buffer.byteLength(formatted, "utf8");
-              if (formattedSize > maxFileSize) {
-                const sizeError = new Error(`Formatted JSON exceeds MAX_FILE_SIZE: ${path.relative(destMemoryPath, fullPath)} (${formattedSize} bytes > ${maxFileSize} bytes)`);
-                sizeError.name = "FormatJSONSizeLimitError";
-                throw sizeError;
-              }
-              fs.writeFileSync(fullPath, formatted, "utf8");
-              core.info(`Formatted JSON: ${path.relative(destMemoryPath, fullPath)}`);
-            }
-          } catch (/** @type {any} */ error) {
-            if (error?.name === "FormatJSONSizeLimitError") {
-              throw error;
-            }
-            core.warning(`Skipping JSON formatting for ${path.relative(destMemoryPath, fullPath)}: ${getErrorMessage(error)}`);
-          }
-        }
-      }
-    }
-
     try {
-      formatJSONFilesInDir(destMemoryPath);
+      const formattedFiles = formatJSONFiles(destMemoryPath, maxFileSize);
+      for (const formattedFile of formattedFiles) {
+        core.info(`Formatted JSON: ${formattedFile}`);
+      }
     } catch (error) {
       core.setFailed(`Failed to format JSON files: ${getErrorMessage(error)}`);
       return;
     }
   }
 
-  // Check if we have any changes to commit
+  if (validationScriptBase64) {
+    core.info("Running custom repo-memory validation before commit...");
+    const customValidation = runCustomMemoryValidation({
+      scriptBase64: validationScriptBase64,
+      memoryDir: destMemoryPath,
+      memoryId,
+      kind: "repo",
+      timeoutSeconds: validationTimeoutSeconds,
+    });
+    if (!customValidation.ok) {
+      const reason = customValidation.timedOut ? `timed out after ${validationTimeoutSeconds} second(s)` : `exited with code ${customValidation.exitCode}`;
+      const errorMessage = `Custom repo-memory validation failed for '${memoryId}': ${reason}.`;
+      if (customValidation.stdout) {
+        core.info(`Custom repo-memory validation stdout:\n${customValidation.stdout}`);
+      }
+      if (customValidation.stderr) {
+        core.error(`Custom repo-memory validation stderr:\n${customValidation.stderr}`);
+      }
+      core.setOutput("validation_failed", "true");
+      core.setOutput("validation_error", errorMessage);
+      core.setFailed(errorMessage);
+      return;
+    }
+    if (customValidation.stdout) {
+      core.info(`Custom repo-memory validation stdout:\n${customValidation.stdout}`);
+    }
+    if (customValidation.stderr) {
+      core.info(`Custom repo-memory validation stderr:\n${customValidation.stderr}`);
+    }
+    core.info("Custom repo-memory validation passed.");
+  }
+
+  // Build literal pathspecs from the relative paths of files to copy.
+  // The :(literal) magic prefix tells Git to treat each entry as a plain string,
+  // preventing glob expansion or pathspec-magic interpretation (e.g. :(top),
+  // wildcards) even when a filename happens to contain those characters.
+  const literalPathspecs = Array.from(new Set(filesToCopy.map(file => `:(literal)${file.relativePath}`))).sort();
+
+  // Check if we have any changes to commit, scoped to managed memory files only.
   let changedFileCount = 0;
   try {
-    const status = execGitSync(["status", "--porcelain"]);
+    const statusArgs = ["status", "--porcelain"];
+    if (literalPathspecs.length > 0) {
+      statusArgs.push("--", ...literalPathspecs);
+    }
+    const status = execGitSync(statusArgs, { cwd: workspaceDir });
     const changedEntries = status
       .split("\n")
       .map(line => line.trim())
@@ -513,44 +538,45 @@ async function main() {
   // sparse-checkout, causing a plain "git add ." to silently skip or reject
   // files on the first run for a new memory branch.
   try {
-    execGitSync(["add", "--sparse", "."], { stdio: "inherit" });
+    const addArgs = ["add", "--sparse"];
+    if (literalPathspecs.length > 0) {
+      addArgs.push("--", ...literalPathspecs);
+    } else {
+      addArgs.push(".");
+    }
+    execGitSync(addArgs, { stdio: "inherit", cwd: workspaceDir });
   } catch (error) {
     core.setFailed(`Failed to stage changes: ${getErrorMessage(error)}`);
     return;
   }
 
-  // Validate total patch size before committing
-  // Only additions (new content) are counted toward the patch size limit.
-  // Deletions are ignored since removing content is acceptable and does not
-  // contribute to the size of the content being pushed.
+  // Validate total patch size before committing.
+  // The patch diff size is the net bytes added (additions minus deletions, clamped to zero).
+  // Using the net value prevents files that are rewritten with similar-sized content
+  // (e.g. a regenerated JSON object) from being counted as "entire source code size"
+  // even though only a small portion of the data actually changed.
   try {
-    const patchContent = execGitSync(["diff", "--cached"], { stdio: "pipe" });
-    // Count only added lines (starting with '+', excluding '+++' file-header lines)
-    const addedSizeBytes = patchContent
-      .split("\n")
-      .filter(line => line.startsWith("+") && !line.startsWith("+++"))
-      .reduce((sum, line) => sum + Buffer.byteLength(line + "\n", "utf8"), 0);
-    const patchSizeBytes = addedSizeBytes;
+    const patchSizeBytes = getStagedPatchDiffSizeBytes({ execGitSyncFn: execGitSync, cwd: workspaceDir });
     const patchSizeKb = Math.ceil(patchSizeBytes / 1024);
     const maxPatchSizeKb = Math.floor(maxPatchSize / 1024);
     // Allow 20% overhead to account for git diff format (headers, context lines, etc.)
     const effectiveMaxPatchSize = Math.floor(maxPatchSize * 1.2);
     const effectiveMaxPatchSizeKb = Math.floor(effectiveMaxPatchSize / 1024);
-    const patchSizeMessage = `Patch additions size: ${patchSizeKb} KB (${patchSizeBytes} bytes) (configured limit: ${maxPatchSizeKb} KB (${maxPatchSize} bytes), effective with 20% overhead: ${effectiveMaxPatchSizeKb} KB (${effectiveMaxPatchSize} bytes))`;
+    const patchSizeMessage = `Patch diff size: ${patchSizeKb} KB (${patchSizeBytes} bytes) (configured limit: ${maxPatchSizeKb} KB (${maxPatchSize} bytes), effective with 20% overhead: ${effectiveMaxPatchSizeKb} KB (${effectiveMaxPatchSize} bytes))`;
     if (patchSizeBytes > effectiveMaxPatchSize) {
       // Warn at warning level so the size is visible even without verbose mode
       core.warning(patchSizeMessage);
       // Add per-file diff stats to diagnose what's causing the large patch
       // (e.g. a full rewrite of an accumulated history file shows old + new content in the diff)
       try {
-        const diffStat = execGitSync(["diff", "--cached", "--stat"], { stdio: "pipe" });
+        const diffStat = execGitSync(["diff", "--cached", "--stat"], { stdio: "pipe", cwd: workspaceDir });
         core.warning(`Patch content breakdown (git diff --stat):\n${diffStat}`);
       } catch (statError) {
         core.warning(`Could not retrieve diff stat: ${getErrorMessage(statError)}`);
       }
       core.setOutput("patch_size_exceeded", "true");
       core.setFailed(
-        `Patch additions size (${patchSizeKb} KB, ${patchSizeBytes} bytes) exceeds maximum allowed size (${effectiveMaxPatchSizeKb} KB, ${effectiveMaxPatchSize} bytes, configured limit: ${maxPatchSizeKb} KB with 20% overhead allowance). Reduce the number or size of changes, or increase max-patch-size.`
+        `Patch diff size (${patchSizeKb} KB, ${patchSizeBytes} bytes) exceeds maximum allowed size (${effectiveMaxPatchSizeKb} KB, ${effectiveMaxPatchSize} bytes, configured limit: ${maxPatchSizeKb} KB with 20% overhead allowance). Reduce the number or size of changes, or increase max-patch-size.`
       );
       return;
     } else if (patchSizeBytes > maxPatchSize) {
@@ -560,7 +586,7 @@ async function main() {
       core.info(patchSizeMessage);
     }
   } catch (error) {
-    core.setFailed(`Failed to compute patch additions size: ${getErrorMessage(error)}`);
+    core.setFailed(`Failed to compute patch diff size: ${getErrorMessage(error)}`);
     return;
   }
 

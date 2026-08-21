@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/testutil"
 	"github.com/github/gh-aw/pkg/timeutil"
 	"github.com/stretchr/testify/assert"
@@ -172,6 +173,32 @@ func TestFindTokenUsageFile(t *testing.T) {
 		assert.Equal(t, tokenFile, result, "should find file in primary path")
 	})
 
+	t.Run("finds in sandbox/firewall/audit path (AWF v0.27.7+)", func(t *testing.T) {
+		tmpDir := testutil.TempDir(t, "find-token-usage")
+		auditDir := filepath.Join(tmpDir, "sandbox", "firewall", "audit", "api-proxy-logs")
+		require.NoError(t, os.MkdirAll(auditDir, 0o755))
+		tokenFile := filepath.Join(auditDir, "token-usage.jsonl")
+		require.NoError(t, os.WriteFile(tokenFile, []byte(`{"input_tokens":1}`+"\n"), 0o644))
+
+		result := findTokenUsageFile(tmpDir)
+		assert.Equal(t, tokenFile, result, "should find file in AWF audit path")
+	})
+
+	t.Run("prefers sandbox/firewall/logs over sandbox/firewall/audit when both exist", func(t *testing.T) {
+		tmpDir := testutil.TempDir(t, "find-token-usage")
+		logsDir := filepath.Join(tmpDir, "sandbox", "firewall", "logs", "api-proxy-logs")
+		auditDir := filepath.Join(tmpDir, "sandbox", "firewall", "audit", "api-proxy-logs")
+		require.NoError(t, os.MkdirAll(logsDir, 0o755))
+		require.NoError(t, os.MkdirAll(auditDir, 0o755))
+		logsFile := filepath.Join(logsDir, "token-usage.jsonl")
+		auditFile := filepath.Join(auditDir, "token-usage.jsonl")
+		require.NoError(t, os.WriteFile(logsFile, []byte(`{"input_tokens":1}`+"\n"), 0o644))
+		require.NoError(t, os.WriteFile(auditFile, []byte(`{"input_tokens":2}`+"\n"), 0o644))
+
+		result := findTokenUsageFile(tmpDir)
+		assert.Equal(t, logsFile, result, "should prefer primary logs path over AWF audit path")
+	})
+
 	t.Run("finds in firewall-audit-logs directory", func(t *testing.T) {
 		tmpDir := testutil.TempDir(t, "find-token-usage")
 		logsDir := filepath.Join(tmpDir, "firewall-audit-logs", "api-proxy-logs")
@@ -332,19 +359,23 @@ func TestTokenUsageSummaryMethods(t *testing.T) {
 		summary := &TokenUsageSummary{
 			ByModel: map[string]*ModelTokenUsage{
 				"small-model": {
-					Provider:    "provider-a",
-					InputTokens: 10,
-					Requests:    1,
-					DurationMs:  100,
+					Provider:         "provider-a",
+					TokenCoreMetrics: TokenCoreMetrics{InputTokens: 10},
+					Requests:         1,
+					DurationMs:       100,
 				},
 				"large-model": {
-					Provider:         "provider-b",
-					InputTokens:      100,
-					OutputTokens:     200,
-					CacheReadTokens:  5000,
-					CacheWriteTokens: 3000,
-					Requests:         5,
-					DurationMs:       5000,
+					Provider: "provider-b",
+					TokenCoreMetrics: TokenCoreMetrics{
+						InputTokens:      100,
+						OutputTokens:     200,
+						CacheReadTokens:  5000,
+						CacheWriteTokens: 3000,
+						ReasoningTokens:  30,
+						EffectiveTokens:  8330,
+					},
+					Requests:   5,
+					DurationMs: 5000,
 				},
 			},
 		}
@@ -354,6 +385,21 @@ func TestTokenUsageSummaryMethods(t *testing.T) {
 		assert.Equal(t, "large-model", rows[0].Model, "first row should be model with most tokens")
 		assert.Equal(t, "small-model", rows[1].Model, "second row should be model with fewer tokens")
 		assert.Equal(t, "1.0s", rows[0].AvgDuration, "avg duration for large model")
+		assert.Equal(t, 30, summary.ByModel["large-model"].ReasoningTokens, "reasoning tokens should remain tracked in model core metrics")
+		assert.Equal(t, 8330, summary.ByModel["large-model"].EffectiveTokens, "effective tokens should remain tracked in model core metrics")
+
+		encoded, err := json.Marshal(rows[0])
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), "reasoning_tokens", "row JSON should preserve legacy shape")
+		assert.NotContains(t, string(encoded), "effective_tokens", "row JSON should preserve legacy shape")
+
+		rendered := console.RenderStruct(rows)
+		assert.Contains(t, rendered, "Input", "row table should keep quartet columns")
+		assert.Contains(t, rendered, "Output", "row table should keep quartet columns")
+		assert.Contains(t, rendered, "Cache Read", "row table should keep quartet columns")
+		assert.Contains(t, rendered, "Cache Write", "row table should keep quartet columns")
+		assert.NotContains(t, rendered, "ReasoningTokens", "row table should preserve legacy columns")
+		assert.NotContains(t, rendered, "EffectiveTokens", "row table should preserve legacy columns")
 	})
 }
 
@@ -716,10 +762,12 @@ func TestCacheEfficiency(t *testing.T) {
 
 func TestModelTokenUsageReasoningTokensJSONRoundTrip(t *testing.T) {
 	original := ModelTokenUsage{
-		Provider:        "anthropic",
-		InputTokens:     10,
-		OutputTokens:    20,
-		ReasoningTokens: 30,
+		Provider: "anthropic",
+		TokenCoreMetrics: TokenCoreMetrics{
+			InputTokens:     10,
+			OutputTokens:    20,
+			ReasoningTokens: 30,
+		},
 	}
 
 	raw, err := json.Marshal(original)

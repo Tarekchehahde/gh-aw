@@ -22,6 +22,7 @@ var semverLog = logger.New("semverutil:semverutil")
 // It intentionally excludes prerelease and build-metadata suffixes because GitHub Actions
 // version pins use only these three forms.
 var actionVersionTagRegex = regexp.MustCompile(`^v[0-9]+(\.[0-9]+(\.[0-9]+)?)?$`)
+var gitDescribePrereleaseRegex = regexp.MustCompile(`^[0-9]+-g[0-9a-f]+(?:-dirty)?$`)
 
 // SemanticVersion represents a parsed semantic version.
 type SemanticVersion struct {
@@ -123,10 +124,38 @@ func Compare(v1, v2 string) int {
 	return result
 }
 
+// NormalizeGitDescribeSemver collapses local git-describe compiler versions to
+// their base release tag for compatibility checks.
+//
+// Examples:
+//   - v1.2.3-27-gabc1234      -> v1.2.3
+//   - v1.2.3-27-gabc1234-dirty -> v1.2.3
+//   - v1.2.3-dirty            -> v1.2.3
+//   - v1.2.3-beta.1           -> v1.2.3-beta.1
+func NormalizeGitDescribeSemver(v string) string {
+	v = EnsureVPrefix(strings.TrimSpace(v))
+	if !semver.IsValid(v) {
+		return v
+	}
+
+	canonical := semver.Canonical(v)
+	prerelease := strings.TrimPrefix(semver.Prerelease(canonical), "-")
+	if prerelease == "dirty" || gitDescribePrereleaseRegex.MatchString(prerelease) {
+		return strings.TrimSuffix(canonical, semver.Prerelease(canonical))
+	}
+
+	return canonical
+}
+
 // IsPreciseVersion returns true if the version has explicit minor and patch components
-// (i.e., at least two dots in the version string, e.g. "v6.0.0" is precise, "v6" is not).
+// (i.e., at least two dots in the core version, e.g. "v6.0.0" is precise, "v6" is not).
+// Only core-version dots are counted; pre-release and build-metadata suffixes are excluded.
 func (v *SemanticVersion) IsPreciseVersion() bool {
 	versionPart := strings.TrimPrefix(v.Raw, "v")
+	// Strip pre-release and build-metadata so their dots are not counted.
+	if idx := strings.IndexAny(versionPart, "-+"); idx >= 0 {
+		versionPart = versionPart[:idx]
+	}
 	dotCount := strings.Count(versionPart, ".")
 	return dotCount >= 2
 }

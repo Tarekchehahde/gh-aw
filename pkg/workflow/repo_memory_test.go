@@ -762,7 +762,7 @@ func TestRepoMemoryMaxPatchSizeValidation(t *testing.T) {
 			if tt.wantError {
 				require.Error(t, err, "Should return an error")
 				if err != nil {
-					assert.Contains(t, err.Error(), tt.errorText, "Error message should match")
+					require.ErrorContains(t, err, tt.errorText, "Error message should match")
 				}
 			} else {
 				require.NoError(t, err, "Should not return an error")
@@ -826,7 +826,7 @@ func TestRepoMemoryMaxPatchSizeValidationArray(t *testing.T) {
 			if tt.wantError {
 				require.Error(t, err, "Should return an error")
 				if err != nil {
-					assert.Contains(t, err.Error(), tt.errorText, "Error message should match")
+					require.ErrorContains(t, err, tt.errorText, "Error message should match")
 				}
 			} else {
 				require.NoError(t, err, "Should not return an error")
@@ -946,7 +946,7 @@ func TestBranchPrefixValidation(t *testing.T) {
 			err := validateBranchPrefix(tt.prefix)
 			if tt.wantErr {
 				require.Error(t, err, "Expected error for prefix: %s", tt.prefix)
-				assert.Contains(t, err.Error(), tt.errMsg, "Error message should contain: %s", tt.errMsg)
+				require.ErrorContains(t, err, tt.errMsg, "Error message should contain: %s", tt.errMsg)
 			} else {
 				require.NoError(t, err, "Expected no error for prefix: %s", tt.prefix)
 			}
@@ -1005,6 +1005,27 @@ func TestBranchPrefixInArrayConfig(t *testing.T) {
 	// Both memories should use the same prefix
 	assert.Equal(t, "my-prefix/session", config.Memories[0].BranchName, "Expected branch name 'my-prefix/session'")
 	assert.Equal(t, "my-prefix/logs", config.Memories[1].BranchName, "Expected branch name 'my-prefix/logs'")
+}
+
+func TestRepoMemoryCustomIDDerivesBranchName(t *testing.T) {
+	toolsMap := map[string]any{
+		"repo-memory": map[string]any{
+			"id": "my-agent",
+		},
+	}
+
+	toolsConfig, err := ParseToolsConfig(toolsMap)
+	require.NoError(t, err, "Failed to parse tools config")
+
+	compiler := NewCompiler()
+	config, err := compiler.extractRepoMemoryConfig(toolsConfig, "my-workflow")
+	require.NoError(t, err, "Failed to extract repo-memory config")
+	require.NotNil(t, config, "Expected non-nil config")
+	require.Len(t, config.Memories, 1, "Expected a single repo memory entry")
+
+	memory := config.Memories[0]
+	assert.Equal(t, "my-agent", memory.ID, "Expected explicit id to be preserved")
+	assert.Equal(t, "memory/my-agent", memory.BranchName, "Expected branch name to derive from explicit id")
 }
 
 // TestBranchPrefixWithExplicitBranchName tests that explicit branch-name overrides prefix
@@ -1545,6 +1566,55 @@ func TestRepoMemoryFormatJSONPushStepEnvVar(t *testing.T) {
 	})
 }
 
+func TestRepoMemoryValidationConfigAndGeneratedSteps(t *testing.T) {
+	toolsMap := map[string]any{
+		"repo-memory": map[string]any{
+			"branch-name": "memory/notes",
+			"validation": map[string]any{
+				"script":          "if (!fs.existsSync(path.join(memoryRoot, 'state.json'))) throw new Error('missing state');",
+				"timeout-minutes": 1,
+			},
+		},
+	}
+
+	toolsConfig, err := ParseToolsConfig(toolsMap)
+	require.NoError(t, err)
+
+	compiler := NewCompiler()
+	config, err := compiler.extractRepoMemoryConfig(toolsConfig, "")
+	require.NoError(t, err)
+	require.NotNil(t, config)
+	require.Len(t, config.Memories, 1)
+	require.NotNil(t, config.Memories[0].Validation)
+	assert.Equal(t, 1, config.Memories[0].Validation.TimeoutMinutes)
+	assert.Contains(t, config.Memories[0].Validation.Script, "missing state")
+
+	data := &WorkflowData{RepoMemoryConfig: config}
+	var upload strings.Builder
+	generateRepoMemoryArtifactUpload(&upload, data, getActionPin)
+	uploadYAML := upload.String()
+	assert.Contains(t, uploadYAML, "Validate repo-memory domain content (default)")
+	assert.Contains(t, uploadYAML, "VALIDATION_SCRIPT_B64:")
+	assert.Contains(t, uploadYAML, "validate_memory_step.cjs")
+	assert.Contains(t, uploadYAML, "steps."+repoMemoryValidationStepID("default")+".outcome == 'success'")
+
+	pushJob, err := compiler.buildPushRepoMemoryJob(data, false)
+	require.NoError(t, err)
+	require.NotNil(t, pushJob)
+	pushYAML := strings.Join(pushJob.Steps, "\n")
+	assert.Contains(t, pushYAML, "VALIDATION_SCRIPT_B64:")
+	assert.Contains(t, pushYAML, "VALIDATION_TIMEOUT_SECONDS: 60")
+}
+
+func TestRepoMemoryValidationStepIDsDoNotCollide(t *testing.T) {
+	hyphenID := repoMemoryValidationStepID("my-memory")
+	underscoreID := repoMemoryValidationStepID("my_memory")
+
+	assert.NotEqual(t, hyphenID, underscoreID)
+	assert.Equal(t, "validate_repo_memory_6d792d6d656d6f7279", hyphenID)
+	assert.Equal(t, "validate_repo_memory_6d795f6d656d6f7279", underscoreID)
+}
+
 // TestValidateFileGlobPatterns tests the validateFileGlobPatterns function
 func TestValidateFileGlobPatterns(t *testing.T) {
 	tests := []struct {
@@ -1603,7 +1673,7 @@ func TestValidateFileGlobPatterns(t *testing.T) {
 			err := validateFileGlobPatterns(tt.patterns)
 			if tt.wantErr {
 				require.Error(t, err, "Expected error for patterns: %v", tt.patterns)
-				assert.Contains(t, err.Error(), tt.errMsg, "Error message should contain: %s", tt.errMsg)
+				require.ErrorContains(t, err, tt.errMsg, "Error message should contain: %s", tt.errMsg)
 			} else {
 				require.NoError(t, err, "Expected no error for patterns: %v", tt.patterns)
 			}
@@ -1628,7 +1698,7 @@ func TestFileGlobPatternValidationInConfig(t *testing.T) {
 		compiler := NewCompiler()
 		_, err = compiler.extractRepoMemoryConfig(toolsConfig, "test-workflow")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must not start with '/'")
+		require.ErrorContains(t, err, "must not start with '/'")
 	})
 
 	t.Run("rejects absolute path in object notation", func(t *testing.T) {
@@ -1642,7 +1712,7 @@ func TestFileGlobPatternValidationInConfig(t *testing.T) {
 		compiler := NewCompiler()
 		_, err = compiler.extractRepoMemoryConfig(toolsConfig, "test-workflow")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must not start with '/'")
+		require.ErrorContains(t, err, "must not start with '/'")
 	})
 
 	t.Run("accepts valid slashless patterns in array notation", func(t *testing.T) {

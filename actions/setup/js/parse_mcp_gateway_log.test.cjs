@@ -12,6 +12,7 @@ const {
   generateTokenSteeringSummary,
   generateModelAliasResolutionSummary,
   parseRpcMessagesJsonl,
+  getRpcMessageType,
   getRpcRequestLabel,
   generateRpcMessagesSummary,
   printAllGatewayFiles,
@@ -768,6 +769,189 @@ Some content here.`;
       }
     });
 
+    test("does not false-positive ai_credits_rate_limit_error from rpc-messages.jsonl content with rate-limit branch names and ai-credits commit messages", async () => {
+      // Regression test: rpc-messages.jsonl contains MCP tool call responses that include
+      // arbitrary repository data (branch names, commit messages) which can contain keywords
+      // like "rate-limit" and "ai-credits". These must NOT be treated as real rate limit errors.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-test-"));
+      const rpcMessagesPath = path.join(tmpDir, "rpc-messages.jsonl");
+      const originalExistsSync = fs.existsSync;
+      const originalReadFileSync = fs.readFileSync;
+
+      try {
+        // Simulate a list_branches MCP response with a branch that contains "rate-limit"
+        // followed later in the same response by a branch with "ai-credits" (pattern 2 match)
+        const branchesPayload = JSON.stringify({
+          timestamp: "2026-08-02T08:39:00Z",
+          event: "message",
+          direction: "IN",
+          server_id: "github",
+          payload: {
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify([
+                    { name: "schema-coverage-rate-limit-6dc5507939c41e8a", sha: "abc123" },
+                    { name: "signed/jsweep/ai-credits-context-5df6a8a73adbb3c8", sha: "def456" },
+                  ]),
+                },
+              ],
+            },
+          },
+        });
+        // Simulate a list_workflow_runs MCP response with a commit message containing both
+        // "AI credits" and "rate-limit" (pattern 1 match)
+        const runsPayload = JSON.stringify({
+          timestamp: "2026-08-02T08:42:00Z",
+          event: "message",
+          direction: "IN",
+          server_id: "github",
+          payload: {
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify([
+                    {
+                      id: 30740108209,
+                      head_commit: {
+                        message: "Fix AI credits throughput rate-limit errors being silently swallowed (#49360)",
+                      },
+                    },
+                  ]),
+                },
+              ],
+            },
+          },
+        });
+        fs.writeFileSync(rpcMessagesPath, [branchesPayload, runsPayload].join("\n"));
+
+        const mockCore = {
+          info: vi.fn(),
+          debug: vi.fn(),
+          startGroup: vi.fn(),
+          endGroup: vi.fn(),
+          notice: vi.fn(),
+          warning: vi.fn(),
+          error: vi.fn(),
+          setFailed: vi.fn(),
+          exportVariable: vi.fn(),
+          setOutput: vi.fn(),
+          summary: {
+            addRaw: vi.fn().mockReturnThis(),
+            addDetails: vi.fn().mockReturnThis(),
+            write: vi.fn(),
+          },
+        };
+
+        fs.existsSync = vi.fn(filepath => {
+          if (filepath === "/tmp/gh-aw/mcp-logs/rpc-messages.jsonl") return true;
+          if (filepath === "/tmp/gh-aw/mcp-logs/gateway.md") return false;
+          if (filepath === "/tmp/gh-aw/mcp-logs/gateway.jsonl") return false;
+          return originalExistsSync(filepath);
+        });
+
+        fs.readFileSync = vi.fn((filepath, encoding) => {
+          if (filepath === "/tmp/gh-aw/mcp-logs/rpc-messages.jsonl") {
+            return originalReadFileSync(rpcMessagesPath, encoding);
+          }
+          return originalReadFileSync(filepath, encoding);
+        });
+
+        global.core = mockCore;
+
+        const { main } = require("./parse_mcp_gateway_log.cjs");
+        await main();
+
+        // ai_credits_rate_limit_error must NOT be set to true from branch names / commit messages
+        const setOutputCalls = mockCore.setOutput.mock.calls;
+        const rateLimitCall = setOutputCalls.find(([name]) => name === "ai_credits_rate_limit_error");
+        expect(rateLimitCall).toBeDefined();
+        expect(rateLimitCall[1]).toBe("false");
+      } finally {
+        fs.existsSync = originalExistsSync;
+        fs.readFileSync = originalReadFileSync;
+        delete global.core;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    test("detects ai_credits_rate_limit_error from stderr.log even when rpc-messages.jsonl contains only false-positive-like content", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-test-"));
+      const rpcMessagesPath = path.join(tmpDir, "rpc-messages.jsonl");
+      const stderrLogPath = path.join(tmpDir, "stderr.log");
+      const originalExistsSync = fs.existsSync;
+      const originalReadFileSync = fs.readFileSync;
+
+      try {
+        const rpcPayload = JSON.stringify({
+          timestamp: "2026-08-02T08:39:00Z",
+          event: "message",
+          direction: "IN",
+          server_id: "github",
+          payload: {
+            result: {
+              content: [{ type: "text", text: JSON.stringify([{ name: "schema-coverage-rate-limit-abc123" }]) }],
+            },
+          },
+        });
+        fs.writeFileSync(rpcMessagesPath, rpcPayload);
+        fs.writeFileSync(stderrLogPath, "CAPIError: 429 Too Many Requests");
+
+        const mockCore = {
+          info: vi.fn(),
+          debug: vi.fn(),
+          startGroup: vi.fn(),
+          endGroup: vi.fn(),
+          notice: vi.fn(),
+          warning: vi.fn(),
+          error: vi.fn(),
+          setFailed: vi.fn(),
+          exportVariable: vi.fn(),
+          setOutput: vi.fn(),
+          summary: {
+            addRaw: vi.fn().mockReturnThis(),
+            addDetails: vi.fn().mockReturnThis(),
+            write: vi.fn(),
+          },
+        };
+
+        fs.existsSync = vi.fn(filepath => {
+          if (filepath === "/tmp/gh-aw/mcp-logs/rpc-messages.jsonl") return true;
+          if (filepath === "/tmp/gh-aw/mcp-logs/stderr.log") return true;
+          if (filepath === "/tmp/gh-aw/mcp-logs/gateway.md") return false;
+          if (filepath === "/tmp/gh-aw/mcp-logs/gateway.jsonl") return false;
+          if (filepath === "/tmp/gh-aw/mcp-logs/gateway.log") return false;
+          return originalExistsSync(filepath);
+        });
+
+        fs.readFileSync = vi.fn((filepath, encoding) => {
+          if (filepath === "/tmp/gh-aw/mcp-logs/rpc-messages.jsonl") {
+            return originalReadFileSync(rpcMessagesPath, encoding);
+          }
+          if (filepath === "/tmp/gh-aw/mcp-logs/stderr.log") {
+            return originalReadFileSync(stderrLogPath, encoding);
+          }
+          return originalReadFileSync(filepath, encoding);
+        });
+
+        global.core = mockCore;
+        const { main } = require("./parse_mcp_gateway_log.cjs");
+        await main();
+
+        const setOutputCalls = mockCore.setOutput.mock.calls;
+        const rateLimitCall = setOutputCalls.find(([name]) => name === "ai_credits_rate_limit_error");
+        expect(rateLimitCall).toBeDefined();
+        expect(rateLimitCall[1]).toBe("true");
+      } finally {
+        fs.existsSync = originalExistsSync;
+        fs.readFileSync = originalReadFileSync;
+        delete global.core;
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     test("calls setFailed when an unexpected error is thrown inside main", async () => {
       const originalExistsSync = fs.existsSync;
       const originalReadFileSync = fs.readFileSync;
@@ -1118,6 +1302,21 @@ Some content here.`;
       const events = parseGatewayJsonlForDifcFiltered(jsonlContent);
       expect(events).toHaveLength(2);
     });
+
+    test("extracts events using the schema rpc-message/v2 'event' field (no top-level type)", () => {
+      const jsonlContent = JSON.stringify({
+        timestamp: "2026-08-15T23:30:00Z",
+        event: "difc_filtered",
+        _schema: "rpc-message/v2",
+        server_id: "github",
+        tool_name: "list_issues",
+        reason: "Integrity check failed",
+      });
+
+      const events = parseGatewayJsonlForDifcFiltered(jsonlContent);
+      expect(events).toHaveLength(1);
+      expect(events[0].tool_name).toBe("list_issues");
+    });
   });
 
   describe("parseGatewayJsonlForTokenSteering", () => {
@@ -1434,6 +1633,60 @@ Some content here.`;
       const result = parseRpcMessagesJsonl(content);
       expect(result.requests).toHaveLength(1);
       expect(result.other).toHaveLength(0);
+    });
+
+    // Regression test for https://github.com/github/gh-aw/issues/53254: real-world
+    // rpc-messages.jsonl files (schema "rpc-message/v2") use a top-level "event" field
+    // ("rpc_request"/"rpc_response") instead of the legacy top-level "type" field.
+    test("categorizes entries using the schema rpc-message/v2 'event' field", () => {
+      const content = [
+        JSON.stringify({
+          timestamp: "2026-08-15T23:48:42.233Z",
+          event: "rpc_request",
+          _schema: "rpc-message/v2",
+          direction: "OUT",
+          server_id: "github",
+          method: "tools/call",
+          payload: { jsonrpc: "2.0", method: "tools/call", params: { name: "list_issues", arguments: {} } },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-15T23:48:42.400Z",
+          event: "rpc_response",
+          _schema: "rpc-message/v2",
+          direction: "IN",
+          server_id: "github",
+          payload: { jsonrpc: "2.0", id: 1, result: {} },
+        }),
+      ].join("\n");
+
+      const result = parseRpcMessagesJsonl(content);
+      expect(result.requests).toHaveLength(1);
+      expect(result.responses).toHaveLength(1);
+      expect(result.other).toHaveLength(0);
+      expect(result.requests[0].server_id).toBe("github");
+      expect(result.requests[0].type).toBe("REQUEST");
+    });
+  });
+
+  describe("getRpcMessageType", () => {
+    test("returns the legacy type field when present", () => {
+      expect(getRpcMessageType({ type: "REQUEST", event: "rpc_response" })).toBe("REQUEST");
+    });
+
+    test("maps rpc_request to REQUEST", () => {
+      expect(getRpcMessageType({ event: "rpc_request" })).toBe("REQUEST");
+    });
+
+    test("maps rpc_response to RESPONSE", () => {
+      expect(getRpcMessageType({ event: "rpc_response" })).toBe("RESPONSE");
+    });
+
+    test("maps difc_filtered to DIFC_FILTERED", () => {
+      expect(getRpcMessageType({ event: "difc_filtered" })).toBe("DIFC_FILTERED");
+    });
+
+    test("returns empty string when neither field is present", () => {
+      expect(getRpcMessageType({ server_id: "github" })).toBe("");
     });
   });
 

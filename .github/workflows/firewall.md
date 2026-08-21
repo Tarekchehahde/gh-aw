@@ -13,6 +13,7 @@ engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 network:
   allowed:
     - defaults
@@ -20,8 +21,8 @@ network:
   
 sandbox:
   agent:
+    runtime: cloud-hypervisor
     id: awf
-    sudo: false
 imports:
   - shared/otlp.md
 tools:

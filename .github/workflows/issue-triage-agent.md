@@ -8,9 +8,6 @@ on:
 permissions:
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
 
 tools:
   cli-proxy: true
@@ -18,6 +15,11 @@ tools:
     min-integrity: approved
     toolsets: [issues, labels]
 safe-outputs:
+  data:
+    issue_number: integer
+    label: string
+    confidence: string
+    reasoning: string
   add-labels:
     allowed: [bug, feature, enhancement, documentation, question, help-wanted, good-first-issue]
   add-comment: {}
@@ -26,6 +28,14 @@ imports:
   - shared/reporting.md
 
   - shared/otlp.md
+evals:
+  - id: labels_applied_or_noop
+    question: Did the agent apply at least one label to an unlabeled issue, or correctly skip when no unlabeled issues were found?
+  - id: allowed_labels_only
+    question: Does the agent output show that only labels from the allowed set were applied to issues?
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Issue Triage Agent

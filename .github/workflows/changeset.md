@@ -14,9 +14,9 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+model: gpt-5.4
 engine:
   id: codex
-  model: gpt-5.4
 strict: true
 safe-outputs:
   push-to-pull-request-branch:
@@ -43,6 +43,8 @@ network:
     - go
 tools:
   cli-proxy: true
+  github:
+    mode: gh-proxy
   bash:
     - "*"
   edit:
@@ -54,7 +56,12 @@ imports:
   - shared/otlp.md
 sandbox:
   agent:
-    sudo: false
+    runtime: gvisor
+evals:
+  - id: changeset-created
+    question: Did the agent create a valid changeset file for the labeled pull request?
+  - id: content-accurate
+    question: Does the changeset accurately summarize the changes described in the pull request?
 ---
 
 # Changeset Generator

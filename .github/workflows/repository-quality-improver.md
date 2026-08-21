@@ -18,6 +18,10 @@ permissions:
   issues: read
   pull-requests: read
 engine: copilot
+network:
+  allowed:
+    - defaults
+    - go
 imports:
   - uses: shared/daily-audit-base.md
     with:
@@ -53,11 +57,11 @@ steps:
         echo ""
         echo "## Code Metrics"
         echo "### Largest Go source files (top 20)"
-        find . -type f -name "*.go" ! -name "*_test.go" ! -path "./.git/*" | xargs wc -l 2>/dev/null | sort -rn | head -21 | tail -20
+        find . -type f -name "*.go" ! -name "*_test.go" ! -path "./.git/*" -print0 | xargs -0 wc -l 2>/dev/null | sort -rn | head -21 | tail -20
 
         echo "### Test ratio"
-        TEST_LOC=$(find . -type f -name "*_test.go" ! -path "./.git/*" | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
-        SRC_LOC=$(find . -type f -name "*.go" ! -name "*_test.go" ! -path "./.git/*" | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+        TEST_LOC=$(find . -type f -name "*_test.go" ! -path "./.git/*" -print0 | xargs -0 wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+        SRC_LOC=$(find . -type f -name "*.go" ! -name "*_test.go" ! -path "./.git/*" -print0 | xargs -0 wc -l 2>/dev/null | tail -1 | awk '{print $1}')
         echo "Test LOC: $TEST_LOC | Source LOC: $SRC_LOC"
 
         echo "### Directory file counts"
@@ -76,10 +80,8 @@ steps:
       echo "✅ Quality metrics collected → /tmp/gh-aw/agent/analysis-context.md"
 
 
-sandbox:
-  agent:
-    sudo: false
 ---
+
 # Repository Quality Improvement Agent
 
 You are the Repository Quality Improvement Agent — an expert system that periodically analyses and improves different aspects of the repository's quality by focusing on a specific software development lifecycle area each day.

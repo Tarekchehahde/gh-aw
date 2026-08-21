@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -19,6 +20,29 @@ const (
 	defaultMCPLogsToolCount            = 100
 	defaultMCPLogsTimeoutMinutes       = 1
 	mcpLogsRunsPerDefaultTimeoutMinute = 40
+	mcpLogsGatewayDeadlineMargin       = 5 * time.Second
+	// defaultMCPLogsMinTimeoutMinutesAllWorkflows is the minimum timeout (in minutes)
+	// used when no workflow_name filter is provided.  Querying all workflow runs at once
+	// requires a single GitHub API call rather than a workflow-scoped call, but for
+	// large repositories the unfiltered endpoint can be significantly slower.  A higher
+	// floor gives the tool enough headroom in those cases.
+	defaultMCPLogsMinTimeoutMinutesAllWorkflows = 5
+	// maxMCPLogsSubprocessTimeoutMinutes caps the user-supplied timeout to prevent
+	// a runaway subprocess from holding a guardrail slot for an unbounded duration.
+	// With up to 4 concurrent subprocess slots (maxActiveMCPChildProcesses), a
+	// single long-running request could otherwise block all callers for an arbitrarily
+	// long time.
+	maxMCPLogsSubprocessTimeoutMinutes = 60
+
+	// defaultMCPAuditTimeoutMinutes is the default subprocess timeout for the audit
+	// tool.  Auditing a single run typically takes 5–30 s, but large runs with many
+	// artifact sets can take longer.  5 minutes gives ample headroom while still
+	// bounding the subprocess lifetime.
+	defaultMCPAuditTimeoutMinutes = 5
+	// defaultMCPAuditDiffTimeoutMinutes is the default subprocess timeout for the
+	// audit-diff tool.  5 minutes gives ample headroom for the artifact-download
+	// and diff steps while still bounding the subprocess lifetime.
+	defaultMCPAuditDiffTimeoutMinutes = 5
 )
 
 // appendRepoFlagFromEnv appends "--repo <owner/repo>" to args when GITHUB_REPOSITORY
@@ -34,6 +58,43 @@ func appendRepoFlagFromEnv(args []string) []string {
 	return args
 }
 
+// newMCPSubprocessContext creates a subprocess context that is detached from the
+// MCP gateway's per-request deadline.  The gateway imposes a short RPC deadline
+// (typically 60 s) on the request context; passing that context directly to
+// exec.CommandContext would kill long-running subprocesses prematurely.
+//
+// The returned context is rooted at context.Background() (values preserved,
+// gateway deadline stripped) and carries only the caller-specified timeout.
+// A goroutine is started to forward explicit client cancellations
+// (context.Canceled) to the subprocess while ignoring DeadlineExceeded from
+// the gateway.
+//
+// toolName is used solely in the panic-recovery log message.
+func newMCPSubprocessContext(ctx context.Context, timeout time.Duration, toolName string) (context.Context, context.CancelFunc) {
+	subCtx, subCancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		timeout,
+	)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				mcpLog.Printf("Panic in MCP %s context-watcher goroutine (recovered): %v", toolName, r)
+			}
+		}()
+		// Only forward explicit cancellations (context.Canceled); do NOT propagate
+		// context.DeadlineExceeded from the MCP gateway — that would kill the subprocess
+		// at the gateway's 60 s RPC deadline and defeat the purpose of this fix.
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.Canceled {
+				subCancel() // propagate client disconnect to subprocess
+			}
+		case <-subCtx.Done(): // subprocess timed out or caller already cancelled
+		}
+	}()
+	return subCtx, subCancel
+}
+
 // logsArgs holds the input parameters for the logs tool.
 type logsArgs struct {
 	WorkflowName      string   `json:"workflow_name,omitempty" jsonschema:"Name of the workflow to download logs for (empty for all)"`
@@ -41,6 +102,7 @@ type logsArgs struct {
 	StartDate         string   `json:"start_date,omitempty" jsonschema:"Filter runs created after this date (YYYY-MM-DD or delta like -1d, -1w, -1mo)"`
 	EndDate           string   `json:"end_date,omitempty" jsonschema:"Filter runs created before this date (YYYY-MM-DD or delta like -1d, -1w, -1mo)"`
 	Engine            string   `json:"engine,omitempty" jsonschema:"Filter logs by agentic engine type (claude, codex, copilot)"`
+	Runtime           string   `json:"runtime,omitempty" jsonschema:"Filter logs by sandbox agent runtime (gvisor, docker-sbx)"`
 	Firewall          bool     `json:"firewall,omitempty" jsonschema:"Filter to only runs with firewall enabled"`
 	NoFirewall        bool     `json:"no_firewall,omitempty" jsonschema:"Filter to only runs without firewall enabled"`
 	FilteredIntegrity bool     `json:"filtered_integrity,omitempty" jsonschema:"Filter to only runs that contain DIFC integrity-filtered events in gateway logs"`
@@ -67,12 +129,34 @@ func effectiveMCPLogsToolCount(count int) int {
 	return defaultMCPLogsToolCount
 }
 
-func effectiveMCPLogsToolTimeoutMinutes(requestedTimeout, count int) int {
+func effectiveMCPLogsToolTimeoutMinutes(requestedTimeout, count int, workflowName, engine string) int {
 	if requestedTimeout > 0 {
-		return requestedTimeout
+		return min(requestedTimeout, maxMCPLogsSubprocessTimeoutMinutes)
 	}
 
-	return defaultMCPLogsToolTimeoutMinutesForCount(count)
+	base := defaultMCPLogsToolTimeoutMinutesForCount(count)
+	if workflowName == "" || engine != "" {
+		// Without a workflow filter, or when filtering by engine, the CLI scans runs
+		// across workflows and reads their artifacts. Apply a higher minimum so the
+		// tool is less likely to exhaust the MCP gateway's per-tool timeout.
+		return max(defaultMCPLogsMinTimeoutMinutesAllWorkflows, base)
+	}
+	return base
+}
+
+func effectiveMCPLogsToolSoftTimeoutSeconds(ctx context.Context, timeoutMinutes int) (int, bool) {
+	deadline, ok := ctx.Deadline()
+	if !ok || timeoutMinutes <= 0 {
+		return 0, false
+	}
+	softTimeout := time.Until(deadline) - mcpLogsGatewayDeadlineMargin
+	if softTimeout <= 0 {
+		return 0, false
+	}
+	if softTimeout >= time.Duration(timeoutMinutes)*time.Minute {
+		return 0, false
+	}
+	return max(1, int(softTimeout.Seconds())), true
 }
 
 // The logs tool requires write+ access and checks actor permissions.
@@ -88,11 +172,11 @@ func registerLogsTool(server *mcp.Server, execCmd execCmdFunc, actor string, val
 	if err := AddSchemaDefault(logsSchema, "count", defaultMCPLogsToolCount); err != nil {
 		mcpLog.Printf("Failed to add default for count: %v", err)
 	}
-	// Schema default corresponds to defaultMCPLogsToolCount; runtime timeout
-	// scales with the effective count used for the request.
-	if err := AddSchemaDefault(logsSchema, "timeout", defaultMCPLogsToolTimeoutMinutesForCount(defaultMCPLogsToolCount)); err != nil {
-		mcpLog.Printf("Failed to add default for timeout: %v", err)
-	}
+	// No schema default for timeout: the runtime auto-computes it from the effective
+	// count and workflow_name so that no-workflow queries (which scan across all runs)
+	// receive a higher floor than single-workflow queries.  Setting a static default
+	// here would cause the go-sdk to fill it in before the handler sees the arguments,
+	// bypassing the per-request computation.
 	if err := AddSchemaDefault(logsSchema, "max_tokens", 12000); err != nil {
 		mcpLog.Printf("Failed to add default for max_tokens: %v", err)
 	}
@@ -118,12 +202,13 @@ If the command times out before fetching all available logs, a "continuation" fi
 in the JSON data with updated parameters to continue fetching more data.
 Check for the presence of the continuation field to determine if there are more logs available.
 
+When results are incomplete, the tool response also sets "partial": true and repeats the
+"continuation" cursor inline, so partial results can be detected without reading the file.
+
 The continuation field includes all necessary parameters (before_run_id, etc.) to resume fetching
 from where the previous request stopped due to timeout.`,
 		InputSchema: logsSchema,
-		Icons: []mcp.Icon{
-			{Source: "📝"},
-		},
+		Icons:       mcpToolIcons("📝"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args logsArgs) (*mcp.CallToolResult, any, error) {
 		// Check actor permissions first
 		if err := checkActorPermission(ctx, actor, validateActor, "logs"); err != nil {
@@ -183,6 +268,9 @@ from where the previous request stopped due to timeout.`,
 		if args.Engine != "" {
 			cmdArgs = append(cmdArgs, "--engine", args.Engine)
 		}
+		if args.Runtime != "" {
+			cmdArgs = append(cmdArgs, "--runtime", args.Runtime)
+		}
 		if args.Firewall {
 			cmdArgs = append(cmdArgs, "--firewall")
 		}
@@ -210,9 +298,12 @@ from where the previous request stopped due to timeout.`,
 		cmdArgs = appendRepoFlagFromEnv(cmdArgs)
 
 		// Scale the implicit MCP timeout with the requested fetch window so
-		// larger fleet-wide requests do not hit the 60s server deadline by default.
-		timeoutValue := effectiveMCPLogsToolTimeoutMinutes(args.Timeout, effectiveCount)
+		// larger fleet-wide requests do not hit the default per-tool timeout.
+		timeoutValue := effectiveMCPLogsToolTimeoutMinutes(args.Timeout, effectiveCount, args.WorkflowName, args.Engine)
 		cmdArgs = append(cmdArgs, "--timeout", strconv.Itoa(timeoutValue))
+		if softTimeoutSeconds, ok := effectiveMCPLogsToolSoftTimeoutSeconds(ctx, timeoutValue); ok {
+			cmdArgs = append(cmdArgs, "--timeout-seconds", strconv.Itoa(softTimeoutSeconds))
+		}
 
 		// Always use --json mode in MCP server
 		cmdArgs = append(cmdArgs, "--json")
@@ -223,11 +314,45 @@ from where the previous request stopped due to timeout.`,
 
 		notifyProgress(ctx, req, 0, 100, "Downloading workflow logs...")
 
+		// The MCP gateway imposes a per-tool RPC deadline (typically 60 s) on the
+		// request context. exec.CommandContext ties the subprocess lifetime to that
+		// context, so the subprocess is killed after 60 s even when the caller
+		// explicitly requests a longer timeout via args.Timeout.
+		//
+		// Fix: detach from the gateway deadline by stripping cancellation/deadline
+		// from ctx via context.WithoutCancel, then applying only the user-requested
+		// timeout.  Context values (e.g. trace IDs) are preserved.  We still forward
+		// any explicit cancellations from the MCP request context (e.g. client
+		// disconnect) so the subprocess is cleaned up promptly when the caller goes away.
+		subCtx, subCancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			time.Duration(timeoutValue)*time.Minute,
+		)
+		defer subCancel()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					mcpLog.Printf("Panic in MCP logs context-watcher goroutine (recovered): %v", r)
+				}
+			}()
+			// Goroutine exits cleanly in both cases: client disconnect or subprocess timeout.
+			// Only forward explicit cancellations (context.Canceled); do NOT propagate
+			// context.DeadlineExceeded from the MCP gateway — that would kill the subprocess
+			// at the gateway's 60 s RPC deadline and defeat the purpose of this fix.
+			select {
+			case <-ctx.Done():
+				if ctx.Err() == context.Canceled {
+					subCancel() // propagate client disconnect to subprocess
+				}
+			case <-subCtx.Done(): // subprocess timed out or subCancel() already called
+			}
+		}()
+
 		// Execute the CLI command
 		// Use separate stdout/stderr capture instead of CombinedOutput because:
 		// - Stdout contains JSON output (--json flag)
 		// - Stderr contains console messages and error details
-		stdout, err := runMCPExecOutput(ctx, execCmd, cmdArgs...)
+		stdout, err := runMCPExecOutput(subCtx, execCmd, cmdArgs...)
 
 		// The logs command outputs JSON to stdout when --json flag is used.
 		// If the command fails, we need to provide detailed error information.
@@ -264,6 +389,7 @@ from where the previous request stopped due to timeout.`,
 			if mainMsg == "" {
 				mainMsg = err.Error()
 			}
+
 			return nil, nil, newMCPError(jsonrpc.CodeInternalError, "failed to download workflow logs: "+mainMsg, errorData)
 		}
 
@@ -291,6 +417,7 @@ type auditArgs struct {
 	MaxTokens    int      `json:"max_tokens,omitempty"       jsonschema:"Deprecated: accepted for backward compatibility but ignored."`
 	Experiment   string   `json:"experiment,omitempty"       jsonschema:"Filter to runs that include this experiment name. When set, runs whose experiment artifact does not contain an assignment for this experiment name are skipped."`
 	Variant      string   `json:"variant,omitempty"          jsonschema:"Filter to runs assigned this specific variant value. Requires experiment to be set."`
+	Runtime      string   `json:"runtime,omitempty"          jsonschema:"Filter to runs using a specific sandbox agent runtime (e.g., gvisor, docker-sbx). Runs without a matching runtime are skipped."`
 }
 
 // normalizeAuditRunInput converts a single-run audit input (run_id or
@@ -356,6 +483,9 @@ When a job URL is provided (single-run mode only):
 Use experiment/variant to filter runs by A/B experiment assignment (skips runs
 that do not match). variant requires experiment.
 
+Use runtime to filter runs by sandbox agent runtime (gvisor, docker-sbx); runs
+without a matching runtime are skipped.
+
 Single-run returns JSON with:
 - overview: Basic run information (run_id, workflow_name, status, conclusion, created_at, started_at, updated_at, duration, event, branch, url, logs_path, experiment)
 - metrics: Execution metrics (token_usage, estimated_cost, turns, error_count, warning_count)
@@ -373,9 +503,7 @@ Single-run returns JSON with:
 
 Multi-run diff returns JSON describing changes between the base and each comparison run.`,
 		InputSchema: auditSchema,
-		Icons: []mcp.Icon{
-			{Source: "🔍"},
-		},
+		Icons:       mcpToolIcons("🔍"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args auditArgs) (*mcp.CallToolResult, any, error) {
 		// Check actor permissions first
 		if err := checkActorPermission(ctx, actor, validateActor, "audit"); err != nil {
@@ -430,16 +558,23 @@ Multi-run diff returns JSON describing changes between the base and each compari
 		if args.Variant != "" {
 			cmdArgs = append(cmdArgs, "--variant", args.Variant)
 		}
+		if args.Runtime != "" {
+			cmdArgs = append(cmdArgs, "--runtime", args.Runtime)
+		}
 
 		cmdArgs = appendRepoFlagFromEnv(cmdArgs)
 
 		notifyProgress(ctx, req, 0, 100, "Downloading audit artifacts...")
 
+		// Detach from the gateway's per-tool RPC deadline; see newMCPSubprocessContext.
+		subCtx, subCancel := newMCPSubprocessContext(ctx, time.Duration(defaultMCPAuditTimeoutMinutes)*time.Minute, "audit")
+		defer subCancel()
+
 		// Execute the CLI command.
 		// Use separate stdout/stderr capture instead of CombinedOutput because:
 		// - Stdout contains JSON output (--json flag)
 		// - Stderr contains console messages and debug logs that shouldn't be mixed with JSON
-		stdout, err := runMCPExecOutput(ctx, execCmd, cmdArgs...)
+		stdout, err := runMCPExecOutput(subCtx, execCmd, cmdArgs...)
 
 		// The audit command outputs JSON to stdout when --json flag is used.
 		// If the command fails, we need to provide detailed error information.
@@ -537,9 +672,7 @@ then produces a diff showing:
 
 Returns JSON describing the differences between the base run and each comparison run.`,
 		InputSchema: schema,
-		Icons: []mcp.Icon{
-			{Source: "🔎"},
-		},
+		Icons:       mcpToolIcons("🔎"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args auditDiffArgs) (*mcp.CallToolResult, any, error) {
 		if err := checkActorPermission(ctx, actor, validateActor, "audit-diff"); err != nil {
 			return nil, nil, err
@@ -570,7 +703,11 @@ Returns JSON describing the differences between the base run and each comparison
 
 		notifyProgress(ctx, req, 0, 100, "Downloading artifacts for diff...")
 
-		stdout, err := runMCPExecOutput(ctx, execCmd, cmdArgs...)
+		// Detach from the gateway's per-tool RPC deadline; see newMCPSubprocessContext.
+		subCtx, subCancel := newMCPSubprocessContext(ctx, time.Duration(defaultMCPAuditDiffTimeoutMinutes)*time.Minute, "audit-diff")
+		defer subCancel()
+
+		stdout, err := runMCPExecOutput(subCtx, execCmd, cmdArgs...)
 		outputStr := string(stdout)
 
 		if err != nil {

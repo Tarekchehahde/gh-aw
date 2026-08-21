@@ -12,13 +12,13 @@
 const { loadAgentOutput } = require("./load_agent_output.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { ERR_CONFIG, ERR_PARSE, ERR_VALIDATION } = require("./error_codes.cjs");
-const { hasUnresolvedTemporaryIds, replaceTemporaryIdReferences, replaceArtifactUrlReferences, normalizeTemporaryId } = require("./temporary_id.cjs");
+const { classifySafeOutputResult, computeSafeOutputsStatus, isFailedProcessingResult } = require("./safe_outputs_status.cjs");
+const { hasUnresolvedTemporaryIds, replaceTemporaryIdReferences, replaceArtifactUrlReferences, normalizeTemporaryId, extractTemporaryIdReferences, getCreatedTemporaryId } = require("./temporary_id.cjs");
 const { generateMissingInfoSections } = require("./missing_info_formatter.cjs");
 const { setCollectedMissings } = require("./missing_messages_helper.cjs");
 const { writeSafeOutputSummaries } = require("./safe_output_summary.cjs");
 const { getAssignToAgentAssigned, getAssignToAgentErrors, getAssignToAgentErrorCount, writeAssignToAgentSummary } = require("./assign_to_agent.cjs");
-const { getCreateAgentSessionNumber, getCreateAgentSessionUrl, writeCreateAgentSessionSummary } = require("./create_agent_session.cjs");
-const { createReviewBuffer } = require("./pr_review_buffer.cjs");
+const { createPrReviewBufferRegistry } = require("./pr_review_buffer.cjs");
 const { sanitizeContent } = require("./sanitize_content.cjs");
 const { resolveAllowedMentionsFromPayload } = require("./resolve_mentions_from_payload.cjs");
 const { createManifestLogger, ensureManifestExists, extractCreatedItemFromResult, writeTemporaryIdMapFile } = require("./safe_output_manifest.cjs");
@@ -29,6 +29,7 @@ const { checkRateLimitHeadroom } = require("./rate_limit_helpers.cjs");
 const { redactSensitiveConfig } = require("./safe_outputs_config_redact.cjs");
 const nodePath = require("path");
 const fs = require("fs");
+const GITHUB_TOKEN_CONFIG_KEY = "github-token";
 
 /**
  * Handler map configuration
@@ -58,6 +59,7 @@ const HANDLER_MAP = {
   merge_pull_request: "./merge_pull_request.cjs",
   close_pull_request: "./close_pull_request.cjs",
   mark_pull_request_as_ready_for_review: "./mark_pull_request_as_ready_for_review.cjs",
+  approve_workflow_run: "./approve_workflow_run.cjs",
   hide_comment: "./hide_comment.cjs",
   set_issue_type: "./set_issue_type.cjs",
   set_issue_field: "./set_issue_field.cjs",
@@ -100,6 +102,9 @@ const STANDALONE_STEP_TYPES = new Set(["upload_asset", "noop"]);
  * If any of these fail, the remaining non-code-push messages are cancelled with a clear reason.
  */
 const CODE_PUSH_TYPES = new Set(["push_to_pull_request_branch", "create_pull_request"]);
+
+/** @type {Set<string>} Project-safe-output handlers that should default to GH_AW_PROJECT_GITHUB_TOKEN when no per-handler github-token is configured. */
+const PROJECT_HANDLER_TYPES = new Set(["create_project", "create_project_status_update", "update_project"]);
 
 // Threat-detection warn-mode requirement IDs from safe-outputs specification:
 // - WTD2: Convertible outputs must be mapped to a reviewable type.
@@ -164,6 +169,7 @@ const THREAT_WARNING_ABORT_TYPES = new Set([
   "close_pull_request",
   "merge_pull_request",
   "mark_pull_request_as_ready_for_review",
+  "approve_workflow_run",
   "resolve_pull_request_review_thread",
   "dismiss_pull_request_review",
   "add_labels",
@@ -276,7 +282,7 @@ function loadConfig() {
     // Normalize config keys: convert hyphens to underscores
     return Object.fromEntries(Object.entries(config).map(([k, v]) => [k.replace(/-/g, "_"), v]));
   } catch (error) {
-    throw new Error(`${ERR_PARSE}: Failed to parse GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: ${getErrorMessage(error)}`);
+    throw new Error(`${ERR_PARSE}: Failed to parse GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: ${getErrorMessage(error)}`, { cause: error });
   }
 }
 
@@ -284,15 +290,58 @@ function loadConfig() {
 const PR_REVIEW_HANDLER_TYPES = new Set(["create_pull_request_review_comment", "submit_pull_request_review"]);
 
 /**
+ * @type {WeakMap<Map<string, Function>, Map<string, string>>} Records why configured handlers failed to
+ * load, keyed by the handler map returned from loadHandlers(). The reasons are surfaced when a message
+ * is skipped because no handler was loaded. Scoping by handler map keeps concurrent loadHandlers()
+ * invocations isolated from each other.
+ */
+const handlerLoadErrorsByHandlerMap = new WeakMap();
+
+/**
+ * Wrap a handler so project-safe-output execution can temporarily bind global.github
+ * to the handler-specific authenticated client.
+ *
+ * @param {string} type - Safe-output handler type
+ * @param {Function} messageHandler - Loaded handler function
+ * @param {Object|null} handlerGithubClient - Optional per-handler GitHub client
+ * @returns {Function} Wrapped handler function
+ */
+function wrapWithClientRebinding(type, messageHandler, handlerGithubClient) {
+  if (!PROJECT_HANDLER_TYPES.has(type) || !handlerGithubClient) {
+    return messageHandler;
+  }
+  return async (...args) => {
+    /** @type {any} */
+    const globalState = global;
+    const hadGithub = Object.prototype.hasOwnProperty.call(globalState, "github");
+    const previousGithub = globalState.github;
+    globalState.github = handlerGithubClient;
+    try {
+      return await messageHandler(...args);
+    } finally {
+      if (hadGithub) {
+        globalState.github = previousGithub;
+      } else {
+        delete globalState.github;
+      }
+    }
+  };
+}
+
+/**
  * Load and initialize handlers for enabled safe output types
  * Calls each handler's factory function (main) to get message processors
  * @param {Object} config - Safe outputs configuration
- * @param {Object} prReviewBuffer - Shared PR review buffer instance
+ * @param {Object} prReviewBufferRegistry - PR review buffer registry instance
  * @param {string[]} [resolvedAllowedMentionAliases] - Pre-resolved mention aliases shared across handlers
  * @returns {Promise<Map<string, Function>>} Map of type to message handler function
  */
-async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliases = []) {
+async function loadHandlers(config, prReviewBufferRegistry, resolvedAllowedMentionAliases = []) {
   const messageHandlers = new Map();
+
+  /** @type {Map<string, string>} */
+  const handlerLoadErrors = new Map();
+  handlerLoadErrorsByHandlerMap.set(messageHandlers, handlerLoadErrors);
 
   core.info("Loading and initializing safe output handlers based on configuration...");
 
@@ -306,6 +355,10 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
           // Call the factory function with config to get the message handler
           const handlerConfig = { ...(config[type] || {}) };
 
+          if (PROJECT_HANDLER_TYPES.has(type) && !handlerConfig[GITHUB_TOKEN_CONFIG_KEY] && process.env.GH_AW_PROJECT_GITHUB_TOKEN) {
+            handlerConfig[GITHUB_TOKEN_CONFIG_KEY] = process.env.GH_AW_PROJECT_GITHUB_TOKEN;
+          }
+
           // Pass top-level mentions policy through so handlers can preserve
           // the same allowed mention aliases used during collection.
           if (handlerConfig.mentions == null && config.mentions != null) {
@@ -315,12 +368,19 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
             handlerConfig.allowedMentionAliases = resolvedAllowedMentionAliases;
           }
 
-          // Inject shared PR review buffer into handlers that need it
+          // Inject shared PR review buffer registry into handlers that need it
           if (PR_REVIEW_HANDLER_TYPES.has(type)) {
-            handlerConfig._prReviewBuffer = prReviewBuffer;
+            handlerConfig._prReviewBufferRegistry = prReviewBufferRegistry;
           }
 
-          const messageHandler = await handlerModule.main(handlerConfig);
+          /** @type {any|null} */
+          let handlerGithubClient = null;
+          /** @type {any} */
+          const globalState = global;
+          if (handlerConfig[GITHUB_TOKEN_CONFIG_KEY] && typeof globalState.getOctokit === "function") {
+            handlerGithubClient = globalState.getOctokit(handlerConfig[GITHUB_TOKEN_CONFIG_KEY]);
+          }
+          const messageHandler = await handlerModule.main(handlerConfig, handlerGithubClient);
 
           if (typeof messageHandler !== "function") {
             // This is a fatal error - the handler is misconfigured
@@ -330,9 +390,10 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
             throw error;
           }
 
-          messageHandlers.set(type, messageHandler);
+          messageHandlers.set(type, wrapWithClientRebinding(type, messageHandler, handlerGithubClient));
           core.info(`✓ Loaded and initialized handler for: ${type}`);
         } else {
+          handlerLoadErrors.set(type, "handler module does not export a main function");
           core.warning(`Handler module ${type} does not export a main function`);
         }
       } catch (error) {
@@ -342,6 +403,7 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
           throw error;
         }
         // For other errors (e.g., module not found), log warning and continue
+        handlerLoadErrors.set(type, errorMessage);
         core.warning(`Failed to load handler for ${type}: ${errorMessage}`);
       }
     } else {
@@ -386,11 +448,13 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
             core.info(`✓ Loaded and initialized custom script handler for: ${scriptType}`);
           }
         } else {
+          handlerLoadErrors.set(scriptType, "custom script module does not export a main function");
           core.warning(`Custom script handler module ${scriptType} does not export a main function — skipping`);
         }
       } catch (error) {
         // Non-fatal: log a warning and continue loading the remaining handlers. A broken
         // custom script should not prevent built-in or other custom handlers from running.
+        handlerLoadErrors.set(scriptType, getErrorMessage(error));
         core.warning(`Failed to load custom script handler for ${scriptType}: ${getErrorMessage(error)} — this handler will be skipped`);
       }
     }
@@ -417,9 +481,11 @@ async function loadHandlers(config, prReviewBuffer, resolvedAllowedMentionAliase
             core.info(`✓ Loaded and initialized custom action handler for: ${actionType}`);
           }
         } else {
+          handlerLoadErrors.set(actionType, "custom action module does not export a main function");
           core.warning(`Custom action handler module does not export a main function — skipping ${actionType}`);
         }
       } catch (error) {
+        handlerLoadErrors.set(actionType, getErrorMessage(error));
         core.warning(`Failed to load custom action handler for ${actionType}: ${getErrorMessage(error)} — this handler will be skipped`);
       }
     }
@@ -535,14 +601,46 @@ function rollbackReviewResults(results, errorMessage) {
 }
 
 /**
+ * Roll back processing results for a specific PR when its review finalization fails.
+ * Matches results by repo and pull_request_number. Falls back to rolling back all
+ * review results when no results carry per-PR identifiers.
+ *
+ * @param {Array<{type: string, success: boolean, error?: string, repo?: string, pull_request_number?: number, result?: {repo?: string, pull_request_number?: number}}>} results
+ * @param {string} repo - Repository slug (owner/repo)
+ * @param {number} prNumber - Pull request number
+ * @param {string} errorMessage - Error message to attach to the rolled-back results
+ */
+function rollbackReviewResultsForPR(results, repo, prNumber, errorMessage) {
+  // processMessages wraps each handler result under r.result, so per-PR identifiers
+  // are nested there. Fall back to top-level for backward compatibility with callers
+  // that pass raw handler results directly.
+  const prResults = results.filter(
+    r => (r.type === "submit_pull_request_review" || r.type === "create_pull_request_review_comment") && r.success === true && (r.result?.repo ?? r.repo) === repo && (r.result?.pull_request_number ?? r.pull_request_number) === prNumber
+  );
+  if (prResults.length > 0) {
+    for (const r of prResults) {
+      r.success = false;
+      r.error = `Review finalization failed: ${errorMessage}`;
+    }
+  } else {
+    // No results carry per-PR identifiers (e.g. legacy submit_pr_review results without repo/pull_request_number).
+    // Fall back to rolling back all buffered review results for this run.
+    core.warning(`rollbackReviewResultsForPR: no results matched ${repo}#${prNumber} — falling back to rolling back all review results`);
+    for (const r of results) {
+      if ((r.type === "submit_pull_request_review" || r.type === "create_pull_request_review_comment") && r.success === true) {
+        r.success = false;
+        r.error = `Review finalization failed: ${errorMessage}`;
+      }
+    }
+  }
+}
+
+/**
  * Mark buffered review results as skipped when the PR is locked and submission was
  * soft-skipped (success:true, skipped:true). Both submit_pull_request_review and
  * create_pull_request_review_comment handlers buffer during message processing, so
  * the skip must be back-propagated here so the Processing Summary reflects the actual
  * outcome (skipped) rather than a misleading success count.
- *
- * Note: uses `skipReason` (not `reason`) so that the step-summary generator does not
- * treat these entries as delegated-step skips and omit them from the output.
  *
  * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string}>} results - Processing results to mutate
  * @param {string} skipReason - Human-readable reason for the skip
@@ -557,13 +655,23 @@ function skipReviewResults(results, skipReason) {
 }
 
 /**
- * Determine whether a processing result is a non-skipped, non-deferred, non-cancelled failure.
+ * Mark buffered review results for a specific PR as skipped.
  *
- * @param {{success?: boolean, deferred?: boolean, skipped?: boolean, cancelled?: boolean}|null|undefined} result
- * @returns {boolean}
+ * @param {Array<{type: string, success: boolean, skipped?: boolean, skipReason?: string, repo?: string, pull_request_number?: number, result?: {repo?: string, pull_request_number?: number}}>} results
+ * @param {string} repo - Repository slug (owner/repo)
+ * @param {number} prNumber - Pull request number
+ * @param {string} skipReason - Human-readable reason for the skip
  */
-function isFailedProcessingResult(result) {
-  return Boolean(result?.success === false && !result?.deferred && !result?.skipped && !result?.cancelled);
+function skipReviewResultsForPR(results, repo, prNumber, skipReason) {
+  for (const r of results) {
+    // processMessages wraps each handler result under r.result, so per-PR identifiers
+    // are nested there. Fall back to top-level for backward compatibility with callers
+    // that pass raw handler results directly.
+    if ((r.type === "submit_pull_request_review" || r.type === "create_pull_request_review_comment") && r.success === true && (r.result?.repo ?? r.repo) === repo && (r.result?.pull_request_number ?? r.pull_request_number) === prNumber) {
+      r.skipped = true;
+      r.skipReason = skipReason;
+    }
+  }
 }
 
 /** Types whose failures are surfaced as warnings rather than failing the safe_outputs job. */
@@ -597,6 +705,123 @@ function partitionFailureResults(results) {
 }
 
 /**
+ * Export item-level safe-output status as GitHub Actions outputs.
+ *
+ * @param {{itemsSucceeded: number, itemsApplied?: number, itemsSkipped?: number, itemsWarnings?: number, itemsCancelled?: number, itemsDeferred?: number, itemsFailed: number, status: string}} status
+ */
+function setSafeOutputsStatusOutputs(status) {
+  core.setOutput("items_succeeded", String(status.itemsSucceeded));
+  core.setOutput("items_applied", String(status.itemsApplied ?? status.itemsSucceeded));
+  core.setOutput("items_skipped", String(status.itemsSkipped ?? 0));
+  core.setOutput("items_warnings", String(status.itemsWarnings ?? 0));
+  core.setOutput("items_cancelled", String(status.itemsCancelled ?? 0));
+  core.setOutput("items_deferred", String(status.itemsDeferred ?? 0));
+  core.setOutput("items_failed", String(status.itemsFailed));
+  core.setOutput("status", status.status);
+}
+
+/**
+ * @param {string} type
+ * @param {number} messageIndex
+ * @param {Record<string, any>} result
+ * @returns {Record<string, any>}
+ */
+function buildSkippedResult(type, messageIndex, result) {
+  const message = result.reason || result.warning || result.error || "Handler returned skipped: true";
+  return {
+    type,
+    messageIndex,
+    success: result.success === true,
+    skipped: true,
+    ...(result.warning ? { warning: result.warning } : {}),
+    ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}),
+    ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+    error: message,
+    result,
+  };
+}
+
+/**
+ * Compute the processing order (original message indices) so that temporary-ID
+ * producers run before consumers while preserving the original order for
+ * independent messages and dependency cycles.
+ *
+ * @param {Array<Record<string, any>>} messages
+ * @returns {Array<number>} original message indices in processing order
+ */
+function sortMessageIndicesByTemporaryIdDependencies(messages) {
+  const producers = new Map();
+  messages.forEach((message, index) => {
+    const temporaryId = getCreatedTemporaryId(message);
+    if (temporaryId && !producers.has(temporaryId)) {
+      producers.set(temporaryId, index);
+    }
+  });
+
+  /** @type {Array<Array<number>>} */
+  const dependents = messages.map(() => []);
+  const inDegree = messages.map(() => 0);
+  messages.forEach((message, index) => {
+    const dependencies = message.type === "create_issue" ? extractTemporaryIdReferences({ blocked_by: message.blocked_by }) : new Set();
+    for (const temporaryId of dependencies) {
+      const producerIndex = producers.get(temporaryId);
+      if (producerIndex !== undefined && producerIndex !== index) {
+        dependents[producerIndex].push(index);
+        inDegree[index]++;
+      }
+    }
+  });
+
+  /** @type {Array<number>} */
+  const ready = [];
+  /** @param {number} index */
+  const pushReady = index => {
+    // Keep the ready queue ordered by original message index so independent
+    // messages keep their original relative order (stable topological sort).
+    let position = ready.length;
+    while (position > 0 && ready[position - 1] > index) position--;
+    ready.splice(position, 0, index);
+  };
+  inDegree.forEach((degree, index) => {
+    if (degree === 0) pushReady(index);
+  });
+  /** @type {Array<number>} */
+  const sorted = [];
+  while (ready.length > 0) {
+    const index = ready.shift();
+    if (index === undefined) break;
+    sorted.push(index);
+    for (const dependentIndex of dependents[index]) {
+      inDegree[dependentIndex]--;
+      if (inDegree[dependentIndex] === 0) {
+        pushReady(dependentIndex);
+      }
+    }
+  }
+
+  if (sorted.length !== messages.length) {
+    core.warning("Temporary ID dependency cycle detected; preserving original order for cyclic safe outputs");
+    const sortedIndices = new Set(sorted);
+    for (let index = 0; index < messages.length; index++) {
+      if (!sortedIndices.has(index)) sorted.push(index);
+    }
+  }
+  return sorted;
+}
+
+/**
+ * Sort messages so temporary-ID producers run before consumers while preserving
+ * the original order for independent messages and dependency cycles.
+ *
+ * @param {Array<Record<string, any>>} messages
+ * @returns {Array<Record<string, any>>}
+ */
+function sortMessagesByTemporaryIdDependencies(messages) {
+  return sortMessageIndicesByTemporaryIdDependencies(messages).map(index => messages[index]);
+}
+
+/**
  * Process all messages from agent output in the order they appear
  * Dispatches each message to the appropriate handler while maintaining shared state (temporary ID map)
  * Tracks outputs created with unresolved temporary IDs and generates synthetic updates after resolution
@@ -607,6 +832,7 @@ function partitionFailureResults(results) {
  * @returns {Promise<{success: boolean, results: Array<any>, temporaryIdMap: Object, artifactUrlMap: Map<string, string>, outputsWithUnresolvedIds: Array<any>, missings: Object, codePushFailures: Array<{type: string, error: string}>}>}
  */
 async function processMessages(messageHandlers, messages, onItemCreated = null) {
+  const processingOrder = sortMessageIndicesByTemporaryIdDependencies(messages);
   const results = [];
   const detectionConclusion = process.env.GH_AW_DETECTION_CONCLUSION || "";
 
@@ -655,8 +881,9 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
 
   core.info(`Processing ${messages.length} message(s) in order of appearance...`);
 
-  // Process messages in order of appearance
-  for (let i = 0; i < messages.length; i++) {
+  // Process messages in dependency order while reporting original message indices
+  for (let position = 0; position < processingOrder.length; position++) {
+    const i = processingOrder[position];
     const message = messages[i];
     const messageType = message.type;
 
@@ -705,6 +932,7 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
           messageIndex: i,
           success: false,
           skipped: true,
+          delegated: true,
           reason: "Handled by standalone step",
         });
         continue;
@@ -739,20 +967,23 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
           messageIndex: i,
           success: false,
           skipped: true,
+          delegated: true,
           reason: "Handled by custom safe output job",
         });
         continue;
       }
 
       // Unknown message type - warn the user
+      const loadError = handlerLoadErrorsByHandlerMap.get(messageHandlers)?.get(messageType);
+      const loadErrorSuffix = loadError ? ` The handler was configured but failed to load: ${loadError}` : "";
       core.warning(
-        `⚠️ No handler loaded for message type '${messageType}' (message ${i + 1}/${messages.length}). The message will be skipped. This may happen if the safe output type is not configured in the workflow's safe-outputs section.`
+        `⚠️ No handler loaded for message type '${messageType}' (message ${i + 1}/${messages.length}). The message will be skipped. This may happen if the safe output type is not configured in the workflow's safe-outputs section.${loadErrorSuffix}`
       );
       results.push({
         type: messageType,
         messageIndex: i,
         success: false,
-        error: `No handler loaded for type '${messageType}'`,
+        error: loadError ? `No handler loaded for type '${messageType}': ${loadError}` : `No handler loaded for type '${messageType}'`,
       });
       continue;
     }
@@ -805,18 +1036,14 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
       // Call the message handler with the individual message and resolved temp IDs
       const result = await messageHandler(effectiveMessage, resolvedTemporaryIds, temporaryIdMap);
 
-      // Check if the handler explicitly returned a skipped result (e.g. if_no_changes: warn/ignore).
-      // Skipped results should NOT trigger fail-fast cancellation of subsequent messages.
-      if (result && result.success === false && result.skipped === true && !result.deferred) {
-        const msg = result.error || "Handler returned success: false with skipped: true";
+      // Check if the handler explicitly returned a skipped result (e.g. policy filters,
+      // no-op warnings, or if_no_changes: warn/ignore). Skipped results should NOT
+      // trigger fail-fast cancellation of subsequent messages, and any summary-safe
+      // diagnostics supplied by the handler must be preserved.
+      if (result && result.skipped === true && !result.deferred) {
+        const msg = result.reason || result.warning || result.error || "Handler returned skipped: true";
         core.info(`⏭ Message ${i + 1} (${messageType}) skipped — ${msg}`);
-        results.push({
-          type: messageType,
-          messageIndex: i,
-          success: false,
-          skipped: true,
-          error: msg,
-        });
+        results.push(buildSkippedResult(messageType, i, result));
         continue;
       }
 
@@ -990,15 +1217,31 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
         // Call the handler again with updated temp ID map
         const result = await deferred.handler(deferred.message, resolvedTemporaryIds, temporaryIdMap);
 
+        if (result && result.skipped === true && !result.deferred) {
+          const msg = result.reason || result.warning || result.error || "Handler returned skipped: true";
+          core.info(`⏭ Retry of message ${deferred.messageIndex + 1} (${deferred.type}) skipped — ${msg}`);
+          const resultIndex = results.findIndex(r => r.messageIndex === deferred.messageIndex);
+          if (resultIndex >= 0) {
+            results[resultIndex] = buildSkippedResult(deferred.type, deferred.messageIndex, result);
+          }
+          continue;
+        }
+
         // Check if the handler explicitly returned a failure
         if (result && result.success === false && !result.deferred) {
           const errorMsg = result.error || "Handler returned success: false";
           core.error(`✗ Retry of message ${deferred.messageIndex + 1} (${deferred.type}) failed: ${errorMsg}`);
-          // Update the result to error
+          // Replace the deferred record so terminal retry failures classify as failed.
           const resultIndex = results.findIndex(r => r.messageIndex === deferred.messageIndex);
           if (resultIndex >= 0) {
-            results[resultIndex].success = false;
-            results[resultIndex].error = errorMsg;
+            results[resultIndex] = {
+              type: deferred.type,
+              messageIndex: deferred.messageIndex,
+              success: false,
+              deferred: false,
+              error: errorMsg,
+              result: { ...result, success: false, deferred: false, error: errorMsg },
+            };
           }
           continue;
         }
@@ -1054,11 +1297,19 @@ async function processMessages(messageHandlers, messages, onItemCreated = null) 
           logCreatedItemFromResult(onItemCreated, deferred.type, result);
         }
       } catch (error) {
-        core.error(`✗ Retry of message ${deferred.messageIndex + 1} (${deferred.type}) failed: ${getErrorMessage(error)}`);
-        // Update the result to error
+        const errorMsg = getErrorMessage(error);
+        core.error(`✗ Retry of message ${deferred.messageIndex + 1} (${deferred.type}) failed: ${errorMsg}`);
+        // Replace the deferred record so terminal retry exceptions classify as failed.
         const resultIndex = results.findIndex(r => r.messageIndex === deferred.messageIndex);
         if (resultIndex >= 0) {
-          results[resultIndex].error = getErrorMessage(error);
+          results[resultIndex] = {
+            type: deferred.type,
+            messageIndex: deferred.messageIndex,
+            success: false,
+            deferred: false,
+            error: errorMsg,
+            result: { success: false, deferred: false, error: errorMsg },
+          };
         }
       }
     }
@@ -1356,6 +1607,9 @@ async function main() {
   // Detect staged mode before try/finally so it's accessible in the finally block.
   // In staged mode (🎭 Staged Mode Preview) no real items are created in GitHub so no manifest should be emitted.
   const isStaged = isStagedMode();
+  /** @type {string | null} */
+  let failedOutputsMessage = null;
+  let statusOutputsSet = false;
 
   try {
     core.info("Safe Output Handler Manager starting...");
@@ -1380,15 +1634,18 @@ async function main() {
       if (!isStaged) ensureManifestExists();
       core.setOutput("temporary_id_map", "{}");
       core.setOutput("processed_count", "0");
+      setSafeOutputsStatusOutputs({ itemsSucceeded: 0, itemsFailed: 0, status: "success" });
+      statusOutputsSet = true;
       return;
     }
 
-    // Create the shared PR review buffer instance (no global state)
-    const prReviewBuffer = createReviewBuffer();
+    // Create the PR review buffer registry (one per-PR buffer created on demand)
+    const prReviewBufferRegistry = createPrReviewBufferRegistry();
 
     // Apply footer config with priority:
     // 1. submit_pull_request_review.footer (highest priority — footer controls review body)
     // 2. Default: "always"
+    /** @type {any} */
     let footerConfig = undefined;
     if (config.submit_pull_request_review?.footer !== undefined) {
       footerConfig = config.submit_pull_request_review.footer;
@@ -1396,13 +1653,13 @@ async function main() {
     }
 
     if (footerConfig !== undefined) {
-      prReviewBuffer.setFooterMode(footerConfig);
+      prReviewBufferRegistry.setDefaultFooterMode(footerConfig);
     }
 
     const allowedMentionAliases = config.mentions != null ? await resolveAllowedMentionsFromPayload(context, github, core, config.mentions) : [];
 
     // Load and initialize handlers based on configuration (factory pattern)
-    const messageHandlers = await loadHandlers(config, prReviewBuffer, allowedMentionAliases);
+    const messageHandlers = await loadHandlers(config, prReviewBufferRegistry, allowedMentionAliases);
 
     if (messageHandlers.size === 0) {
       core.info("No handlers loaded - nothing to process");
@@ -1411,6 +1668,8 @@ async function main() {
       // Set empty outputs for downstream steps
       core.setOutput("temporary_id_map", "{}");
       core.setOutput("processed_count", "0");
+      setSafeOutputsStatusOutputs({ itemsSucceeded: 0, itemsFailed: 0, status: "success" });
+      statusOutputsSet = true;
       return;
     }
 
@@ -1427,43 +1686,43 @@ async function main() {
     // Process all messages in order of appearance
     const processingResult = await processMessages(messageHandlers, allMessages, logCreatedItem);
 
-    // Finalize buffered PR review — submit when comments or metadata exist
-    if (prReviewBuffer.hasBufferedComments() || prReviewBuffer.hasReviewMetadata()) {
-      core.info(`\n=== Finalizing PR Review ===`);
-      const bufferedCount = prReviewBuffer.getBufferedCount();
-      if (bufferedCount > 0) {
-        core.info(`Submitting ${bufferedCount} buffered review comment(s) as a single PR review`);
-      } else {
-        core.info("Submitting PR review (body-only, no inline comments)");
-      }
-      let reviewFailureError = null;
-      try {
-        const reviewResult = await prReviewBuffer.submitReview();
-        if (reviewResult.success && !reviewResult.skipped) {
-          logCreatedItemFromResult(logCreatedItem, "submit_pull_request_review", reviewResult);
-          core.info(`✓ PR review submitted successfully: ${reviewResult.review_url}`);
-        } else if (reviewResult.success && reviewResult.skipped) {
-          const skipReason = reviewResult.reason || "PR review submission skipped";
-          core.warning(`⚠ ${skipReason}`);
-          if (reviewResult.pr_locked) {
-            core.setOutput("pr_locked", "true");
-          }
-          skipReviewResults(processingResult.results, skipReason);
-        } else if (!reviewResult.success) {
-          reviewFailureError = reviewResult.error || "PR review finalization failed";
-          core.error(`✗ Failed to submit PR review: ${reviewFailureError}`);
+    // Finalize buffered PR reviews — one review submission per distinct PR
+    const registryEntries = prReviewBufferRegistry.getAllEntries();
+    for (const { repo: reviewRepo, prNumber: reviewPrNum, buffer: reviewBuffer } of registryEntries) {
+      if (reviewBuffer.hasBufferedComments() || reviewBuffer.hasReviewMetadata()) {
+        core.info(`\n=== Finalizing PR Review for ${reviewRepo}#${reviewPrNum} ===`);
+        const bufferedCount = reviewBuffer.getBufferedCount();
+        if (bufferedCount > 0) {
+          core.info(`Submitting ${bufferedCount} buffered review comment(s) for ${reviewRepo}#${reviewPrNum}`);
+        } else {
+          core.info(`Submitting PR review for ${reviewRepo}#${reviewPrNum} (body-only, no inline comments)`);
         }
-      } catch (reviewError) {
-        reviewFailureError = getErrorMessage(reviewError);
-        core.error(`✗ Exception while submitting PR review: ${reviewFailureError}`);
-      }
+        /** @type {any} */
+        let reviewFailureError = null;
+        try {
+          const reviewResult = await reviewBuffer.submitReview();
+          if (reviewResult.success && !reviewResult.skipped) {
+            logCreatedItemFromResult(logCreatedItem, "submit_pull_request_review", reviewResult);
+            core.info(`✓ PR review submitted for ${reviewRepo}#${reviewPrNum}: ${reviewResult.review_url}`);
+          } else if (reviewResult.success && reviewResult.skipped) {
+            const skipReason = reviewResult.reason || `PR review for ${reviewRepo}#${reviewPrNum} skipped`;
+            core.warning(`⚠ ${skipReason}`);
+            if (reviewResult.pr_locked) {
+              core.setOutput("pr_locked", "true");
+            }
+            skipReviewResultsForPR(processingResult.results, reviewRepo, reviewPrNum, skipReason);
+          } else if (!reviewResult.success) {
+            reviewFailureError = reviewResult.error || `PR review finalization failed for ${reviewRepo}#${reviewPrNum}`;
+            core.error(`✗ Failed to submit PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
+          }
+        } catch (reviewError) {
+          reviewFailureError = getErrorMessage(reviewError);
+          core.error(`✗ Exception while submitting PR review for ${reviewRepo}#${reviewPrNum}: ${reviewFailureError}`);
+        }
 
-      // Roll back per-message success counts when the finalization POST failed.
-      // Both submit_pull_request_review and create_pull_request_review_comment handlers
-      // return success:true during message processing (they only buffer), so the failure
-      // must be reflected here to ensure the Processing Summary shows the correct counts.
-      if (reviewFailureError !== null) {
-        rollbackReviewResults(processingResult.results, reviewFailureError);
+        if (reviewFailureError !== null) {
+          rollbackReviewResultsForPR(processingResult.results, reviewRepo, reviewPrNum, reviewFailureError);
+        }
       }
     }
 
@@ -1488,21 +1747,23 @@ async function main() {
     await writeSafeOutputSummaries(processingResult.results, allMessages);
 
     // Log summary
-    const successCount = processingResult.results.filter(r => r.success).length;
+    const safeOutputsStatus = computeSafeOutputsStatus(processingResult.results);
+    const successCount = safeOutputsStatus.itemsSucceeded;
     const { fatalFailures, reportOnlyFailures } = partitionFailureResults(processingResult.results);
     const failureCount = fatalFailures.length;
     const reportOnlyFailureCount = reportOnlyFailures.length;
     const cancelledCount = processingResult.results.filter(r => r.cancelled).length;
     const deferredCount = processingResult.results.filter(r => r.deferred).length;
-    const skippedStandaloneResults = processingResult.results.filter(r => r.skipped && r.reason === "Handled by standalone step");
-    const skippedCustomJobResults = processingResult.results.filter(r => r.skipped && r.reason === "Handled by custom safe output job");
+    const skippedStandaloneResults = processingResult.results.filter(r => r.delegated && r.reason === "Handled by standalone step");
+    const skippedCustomJobResults = processingResult.results.filter(r => r.delegated && r.reason === "Handled by custom safe output job");
     const skippedNoHandlerResults = processingResult.results.filter(r => !r.success && !r.skipped && r.error?.includes("No handler loaded"));
-    const skippedHandlerResults = processingResult.results.filter(r => r.skipped && !r.reason && !r.deferred && !r.cancelled);
+    const skippedHandlerResults = processingResult.results.filter(r => classifySafeOutputResult(r) === "skipped");
 
     core.info(`\n=== Processing Summary ===`);
     core.info(`Total messages: ${processingResult.results.length}`);
+    core.info(`Status: ${safeOutputsStatus.status}`);
     core.info(`Successful: ${successCount}`);
-    core.info(`Failed: ${failureCount}`);
+    core.info(`Failed: ${safeOutputsStatus.itemsFailed}`);
     if (reportOnlyFailureCount > 0) {
       core.info(`Reported assignment failures: ${reportOnlyFailureCount}`);
     }
@@ -1539,7 +1800,7 @@ async function main() {
       core.warning(`${failureCount} message(s) failed to process`);
       const failedItemLines = fatalFailures.map(r => `  - ${r.type}: ${r.error || "Unknown error"}`);
       const failedItems = failedItemLines.join("\n");
-      core.setFailed(`${failureCount} safe output(s) failed:\n${failedItems}`);
+      failedOutputsMessage = `${failureCount} safe output(s) failed:\n${failedItems}`;
     }
     if (reportOnlyFailureCount > 0) {
       const reportOnlyTypes = [...new Set(reportOnlyFailures.map(r => r.type || "unknown"))];
@@ -1567,12 +1828,15 @@ async function main() {
 
     // Export processed count for consistency with project handler
     core.setOutput("processed_count", String(successCount));
+    setSafeOutputsStatusOutputs(safeOutputsStatus);
+    statusOutputsSet = true;
 
     // Export assign_to_agent outputs when the handler was loaded
     if (messageHandlers.has("assign_to_agent")) {
-      const assignToAgentAssigned = getAssignToAgentAssigned();
-      const assignToAgentErrors = getAssignToAgentErrors();
-      const assignToAgentErrorCount = getAssignToAgentErrorCount();
+      const assignToAgentHandler = messageHandlers.get("assign_to_agent");
+      const assignToAgentAssigned = getAssignToAgentAssigned(assignToAgentHandler);
+      const assignToAgentErrors = getAssignToAgentErrors(assignToAgentHandler);
+      const assignToAgentErrorCount = getAssignToAgentErrorCount(assignToAgentHandler);
       core.setOutput("assign_to_agent_assigned", assignToAgentAssigned);
       core.setOutput("assign_to_agent_assignment_errors", assignToAgentErrors);
       core.setOutput("assign_to_agent_assignment_error_count", assignToAgentErrorCount.toString());
@@ -1580,17 +1844,19 @@ async function main() {
         core.warning(`${assignToAgentErrorCount} agent assignment(s) failed`);
       }
       core.info(`Exported assign_to_agent outputs (${assignToAgentErrorCount} error(s))`);
-      await writeAssignToAgentSummary();
+      await writeAssignToAgentSummary(assignToAgentHandler);
     }
 
     // Export create_agent_session outputs when the handler was loaded
     if (messageHandlers.has("create_agent_session")) {
-      const sessionNumber = getCreateAgentSessionNumber();
-      const sessionUrl = getCreateAgentSessionUrl();
+      /** @type {any} */
+      const createAgentSessionHandler = messageHandlers.get("create_agent_session");
+      const sessionNumber = createAgentSessionHandler.getSessionNumber();
+      const sessionUrl = createAgentSessionHandler.getSessionUrl();
       core.setOutput("session_number", sessionNumber);
       core.setOutput("session_url", sessionUrl);
       core.info(`Exported create_agent_session outputs (session_number=${sessionNumber})`);
-      await writeCreateAgentSessionSummary();
+      await createAgentSessionHandler.writeSummary();
     }
 
     // Export create_discussion errors for conclusion job
@@ -1637,9 +1903,21 @@ async function main() {
     // so this is a safety net for cases where we never reached the logger creation.
     if (!isStaged) ensureManifestExists();
 
+    if (failedOutputsMessage !== null) {
+      core.setFailed(failedOutputsMessage);
+      return;
+    }
     core.info("Safe Output Handler Manager completed");
   } catch (error) {
-    core.setFailed(`${ERR_VALIDATION}: Handler manager failed: ${getErrorMessage(error)}`);
+    const handlerError = `${ERR_VALIDATION}: Handler manager failed: ${getErrorMessage(error)}`;
+    if (!statusOutputsSet) {
+      setSafeOutputsStatusOutputs({ itemsSucceeded: 0, itemsFailed: 0, status: "failure" });
+    }
+    if (failedOutputsMessage !== null) {
+      core.setFailed(`${failedOutputsMessage}\n${handlerError}`);
+      return;
+    }
+    core.setFailed(handlerError);
   } finally {
     // Guarantee the manifest file exists for artifact upload even when the handler fails.
     // This is a no-op if the file was already created by createManifestLogger().
@@ -1658,11 +1936,17 @@ module.exports = {
   loadConfig,
   loadHandlers,
   processMessages,
+  sortMessagesByTemporaryIdDependencies,
+  sortMessageIndicesByTemporaryIdDependencies,
   buildCommentMemoryMessagesFromFiles,
   rollbackReviewResults,
+  rollbackReviewResultsForPR,
   skipReviewResults,
+  skipReviewResultsForPR,
   logCreatedItemFromResult,
   isFailedProcessingResult,
   isReportOnlyFailureResult,
   partitionFailureResults,
+  computeSafeOutputsStatus,
+  setSafeOutputsStatusOutputs,
 };

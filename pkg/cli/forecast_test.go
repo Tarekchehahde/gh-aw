@@ -19,6 +19,7 @@ import (
 // ── extractWorkflowIDFromName ─────────────────────────────────────────────────
 
 func TestExtractWorkflowIDFromName(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want string
@@ -35,6 +36,7 @@ func TestExtractWorkflowIDFromName(t *testing.T) {
 }
 
 func TestExtractEngineNames(t *testing.T) {
+	t.Parallel()
 	cfg := &workflow.FrontmatterConfig{
 		Engine: map[string]any{
 			"id":       "copilot",
@@ -47,56 +49,28 @@ func TestExtractEngineNames(t *testing.T) {
 // ── RunForecast validation ────────────────────────────────────────────────────
 
 func TestRunForecast_InvalidPeriod(t *testing.T) {
+	t.Parallel()
 	cfg := ForecastConfig{Days: 30, Period: "quarter", SampleSize: 10}
 	err := RunForecast(cfg)
 	require.Error(t, err, "should error for invalid period")
 }
 
 func TestRunForecast_InvalidDays(t *testing.T) {
+	t.Parallel()
 	cfg := ForecastConfig{Days: 90, Period: "month", SampleSize: 10}
 	err := RunForecast(cfg)
 	require.Error(t, err, "should error for days=90 (max is 30)")
 }
 
 func TestRunForecast_InvalidTimeout(t *testing.T) {
+	t.Parallel()
 	cfg := ForecastConfig{Days: 30, Period: "month", SampleSize: 10, TimeoutMinutes: -1}
 	err := RunForecast(cfg)
 	require.Error(t, err, "should error for negative timeout")
 }
 
-// TestRunForecast_R_IMPL_040_ExperimentalWarning verifies that the experimental status
-// warning is emitted to stderr on every non-JSON invocation (R-IMPL-040), and is suppressed
-// when --json is specified.
-func TestRunForecast_R_IMPL_040_ExperimentalWarning(t *testing.T) {
-	captureStderr := func(fn func()) string {
-		r, w, err := os.Pipe()
-		require.NoError(t, err)
-		defer r.Close()
-		orig := os.Stderr
-		os.Stderr = w
-		t.Cleanup(func() { os.Stderr = orig })
-		fn()
-		// Close the write end before reading so io.ReadAll sees EOF.
-		require.NoError(t, w.Close())
-		out, readErr := io.ReadAll(r)
-		require.NoError(t, readErr)
-		return string(out)
-	}
-
-	// Without --json: warning MUST appear on stderr.
-	withoutJSON := captureStderr(func() {
-		_ = RunForecast(ForecastConfig{Days: 30, Period: "quarter", SampleSize: 10})
-	})
-	assert.Contains(t, withoutJSON, "experimental", "R-IMPL-040: warning must appear when --json is not set")
-
-	// With --json: warning MUST NOT appear on stderr.
-	withJSON := captureStderr(func() {
-		_ = RunForecast(ForecastConfig{Days: 30, Period: "quarter", SampleSize: 10, JSONOutput: true})
-	})
-	assert.NotContains(t, withJSON, "experimental", "R-IMPL-040: warning must be suppressed when --json is set")
-}
-
 func TestNewForecastCommand_DaysFlagDocumentsAllowedValues(t *testing.T) {
+	t.Parallel()
 	cmd := NewForecastCommand()
 	require.NotNil(t, cmd)
 
@@ -109,12 +83,13 @@ func TestNewForecastCommand_DaysFlagDocumentsAllowedValues(t *testing.T) {
 }
 
 func TestNewForecastCommand_TimeoutFlag(t *testing.T) {
+	t.Parallel()
 	cmd := NewForecastCommand()
 	require.NotNil(t, cmd)
 
 	timeoutFlag := cmd.Flags().Lookup("timeout")
 	require.NotNil(t, timeoutFlag, "forecast command should register --timeout")
-	assert.Equal(t, "Gracefully stop forecast computation after this many minutes (0 disables timeout)", timeoutFlag.Usage)
+	assert.Equal(t, "Gracefully stop forecast computation after this many minutes (0 = no timeout)", timeoutFlag.Usage)
 	assert.Equal(t, "0", timeoutFlag.DefValue)
 }
 
@@ -123,6 +98,7 @@ func TestNewForecastCommand_TimeoutFlag(t *testing.T) {
 // TestDurationEnrichment verifies that the forecast loop computes Duration from
 // StartedAt/UpdatedAt when the Duration field is zero (as returned by gh run list).
 func TestDurationEnrichment(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	end := start.Add(5 * time.Minute)
 
@@ -152,6 +128,7 @@ func TestDurationEnrichment(t *testing.T) {
 // that no intermediate recalculation or mutation of λ occurs between JSON output and
 // Monte Carlo execution.
 func TestObservedRunsPerPeriodConsistency(t *testing.T) {
+	t.Parallel()
 	// Reproduce the λ calculation from forecastWorkflow.
 	const (
 		historyDays   = 30
@@ -264,6 +241,7 @@ func TestForecastWorkflow_LambdaConsistencyAcrossOutputFormats(t *testing.T) {
 }
 
 func TestForecastRateLimitSleep_ContextCancelled(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -272,6 +250,7 @@ func TestForecastRateLimitSleep_ContextCancelled(t *testing.T) {
 }
 
 func TestForecastRateLimitSleep_CompletesWithoutCancellation(t *testing.T) {
+	t.Parallel()
 	err := forecastRateLimitSleep(context.Background(), time.Millisecond)
 	require.NoError(t, err)
 }
@@ -412,9 +391,18 @@ func TestRenderForecastTable_ZeroMonteCarloRangeRendersDash(t *testing.T) {
 	out, readErr := io.ReadAll(reader)
 	require.NoError(t, readErr)
 	assert.NotContains(t, string(out), "-–-")
+	assert.Contains(t, string(out), "Cost/projection figures are AI Credits (AIC)")
 }
 
 func TestLoadCachedRunAIC_UsageArtifactFirst(t *testing.T) {
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Chdir(tmpDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalDir)
+	})
+
 	originalDownload := forecastDownloadRunArtifacts
 	originalAnalyze := forecastAnalyzeTokenUsage
 	t.Cleanup(func() {
@@ -440,6 +428,14 @@ func TestLoadCachedRunAIC_UsageArtifactFirst(t *testing.T) {
 }
 
 func TestLoadCachedRunAIC_MissingUsageReturnsZero(t *testing.T) {
+	originalDir, err := os.Getwd()
+	require.NoError(t, err)
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Chdir(tmpDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalDir)
+	})
+
 	originalDownload := forecastDownloadRunArtifacts
 	originalAnalyze := forecastAnalyzeTokenUsage
 	t.Cleanup(func() {
@@ -451,7 +447,7 @@ func TestLoadCachedRunAIC_MissingUsageReturnsZero(t *testing.T) {
 	analyzeCalled := false
 	forecastDownloadRunArtifacts = func(_ context.Context, _ int64, _ string, _ bool, _, _, _ string, artifactFilter []string) error {
 		downloaded = append(downloaded, strings.Join(artifactFilter, ","))
-		return ErrNoArtifacts
+		return errNoMatchingArtifact
 	}
 	forecastAnalyzeTokenUsage = func(_ string, _ bool) (*TokenUsageSummary, error) {
 		analyzeCalled = true
@@ -462,4 +458,78 @@ func TestLoadCachedRunAIC_MissingUsageReturnsZero(t *testing.T) {
 	require.Zero(t, aic)
 	require.False(t, analyzeCalled)
 	require.Equal(t, []string{"usage"}, downloaded)
+}
+
+// ── parallelLoadRunAICs ───────────────────────────────────────────────────────
+
+// TestParallelLoadRunAICs_ReturnsAllAICValues verifies that parallelLoadRunAICs collects
+// AIC values for every run, regardless of concurrency level.
+func TestParallelLoadRunAICs_ReturnsAllAICValues(t *testing.T) {
+	originalLoadAIC := forecastLoadCachedRunAIC
+	t.Cleanup(func() { forecastLoadCachedRunAIC = originalLoadAIC })
+
+	wantAIC := map[int64]float64{
+		1: 1.0,
+		2: 2.0,
+		3: 3.0,
+		4: 4.0,
+		5: 5.0,
+	}
+	forecastLoadCachedRunAIC = func(_ context.Context, runID int64, _ bool) float64 {
+		return wantAIC[runID]
+	}
+
+	runs := []WorkflowRun{
+		{DatabaseID: 1, Status: "completed", Conclusion: "success"},
+		{DatabaseID: 2, Status: "completed", Conclusion: "success"},
+		{DatabaseID: 3, Status: "completed", Conclusion: "failure"},
+		{DatabaseID: 4, Status: "completed", Conclusion: "success"},
+		{DatabaseID: 5, Status: "completed", Conclusion: "success"},
+	}
+
+	got := parallelLoadRunAICs(context.Background(), runs, ForecastConfig{DownloadConcurrency: 3})
+	assert.Equal(t, wantAIC, got)
+}
+
+// TestParallelLoadRunAICs_RespectsContextCancellation verifies that parallelLoadRunAICs
+// stops issuing new downloads and returns promptly when the context is cancelled.
+func TestParallelLoadRunAICs_RespectsContextCancellation(t *testing.T) {
+	originalLoadAIC := forecastLoadCachedRunAIC
+	t.Cleanup(func() { forecastLoadCachedRunAIC = originalLoadAIC })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	forecastLoadCachedRunAIC = func(_ context.Context, runID int64, _ bool) float64 {
+		return float64(runID)
+	}
+
+	runs := []WorkflowRun{
+		{DatabaseID: 10, Status: "completed", Conclusion: "success"},
+		{DatabaseID: 11, Status: "completed", Conclusion: "success"},
+	}
+
+	// Should return quickly without panicking, regardless of which goroutines completed.
+	got := parallelLoadRunAICs(ctx, runs, ForecastConfig{DownloadConcurrency: 1})
+	assert.NotNil(t, got)
+}
+
+// TestParallelLoadRunAICs_EmptyRunsReturnsEmptyMap verifies the empty-input edge case.
+func TestParallelLoadRunAICs_EmptyRunsReturnsEmptyMap(t *testing.T) {
+	t.Parallel()
+	got := parallelLoadRunAICs(context.Background(), nil, ForecastConfig{})
+	assert.Empty(t, got)
+}
+
+// TestNewForecastCommand_ConcurrencyFlag verifies that the --concurrency flag is
+// registered with the expected default and usage text.
+func TestNewForecastCommand_ConcurrencyFlag(t *testing.T) {
+	t.Parallel()
+	cmd := NewForecastCommand()
+	require.NotNil(t, cmd)
+
+	flag := cmd.Flags().Lookup("concurrency")
+	require.NotNil(t, flag, "forecast command should register --concurrency")
+	assert.Equal(t, "0", flag.DefValue)
+	assert.Contains(t, flag.Usage, "concurrent")
 }

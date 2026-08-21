@@ -17,6 +17,7 @@ engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 experiments:
   detail_level:
     variants: [brief, comprehensive]
@@ -36,7 +37,8 @@ experiments:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: cloud-hypervisor
 tools:
   cli-proxy: true
   edit:
@@ -62,20 +64,21 @@ imports:
     with:
       title-prefix: "[architecture-diagram] "
       expires: 3d
+  - shared/reporting.md
 
   - shared/otlp.md
 timeout-minutes: 20
 strict: true
 features:
   gh-aw-detection: true
+evals:
+  - id: architecture_analyzed
+    question: Did the agent analyze repository changes to produce an updated architecture diagram?
+  - id: diagram_created_or_noop
+    question: Was an ASCII architecture diagram created or updated, or was noop used when no significant changes were detected?
 ---
 
 ### Architecture Diagram Generator
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are an AI agent that generates a **high-level ASCII architecture diagram** of this repository, focusing on the layered structure from CLI entry points down to utility packages.
 
@@ -194,7 +197,7 @@ Create an issue with this structure:
 
 ### Architecture Diagram
 
-Post the ASCII diagram inside a code block (triple backticks) so it renders with monospace font.
+Wrap the ASCII diagram in a `<details><summary><b>View Diagram</b></summary>...</details>` block (with the diagram inside a code block, triple backticks, so it renders with monospace font) so the issue stays short by default.
 
 {{#if experiments.detail_level == 'comprehensive' }}
 ### Summary
@@ -210,7 +213,7 @@ If this was an incremental update, include a short section listing:
 
 ### Package Reference
 
-A compact table of all packages with their layer and one-line description:
+A compact table of all packages with their layer and one-line description, wrapped in a `<details><summary><b>View Package Reference</b></summary>...</details>` block:
 
 | Package | Layer | Description |
 |---------|-------|-------------|

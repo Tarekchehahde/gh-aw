@@ -2,9 +2,10 @@
 /// <reference types="@actions/github-script" />
 
 const { validateTargetRepo, parseAllowedRepos, getDefaultTargetRepo } = require("./repo_helpers.cjs");
-const { ERR_VALIDATION } = require("./error_codes.cjs");
+const { ERR_VALIDATION, ERR_NOT_FOUND } = require("./error_codes.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { checkoutHasPersistedExtraheader } = require("./git_auth_helpers.cjs");
+const { checkoutHasPersistedExtraheader, gitExecSilent } = require("./git_auth_helpers.cjs");
+const { maskSecret } = require("./actions_secret_masking.cjs");
 
 /**
  * Dynamic repository checkout utilities for multi-repo scenarios
@@ -22,6 +23,7 @@ async function getCurrentCheckoutRepo() {
 
     // Extract repo slug from URL
     // Handle HTTPS and SSH formats
+    /** @type {any} */
     let slug = null;
 
     // Remove .git suffix if present
@@ -110,8 +112,10 @@ async function checkoutRepo(repoSlug, token, options = {}) {
     const hasPersistedAuth = await checkoutHasPersistedExtraheader(serverUrl);
     if (!hasPersistedAuth) {
       // Use extraheader to pass the token without embedding it in the URL (more secure).
+      maskSecret(token);
       const tokenBase64 = Buffer.from(`x-access-token:${token}`).toString("base64");
-      await exec.exec("git", ["config", `http.${serverUrl}/.extraheader`, `Authorization: basic ${tokenBase64}`]);
+      maskSecret(tokenBase64);
+      await gitExecSilent(["config", `http.${serverUrl}/.extraheader`, `Authorization: basic ${tokenBase64}`]);
     } else {
       core.info("Reusing persisted git credential for authentication (skipping extraheader injection)");
     }
@@ -125,7 +129,7 @@ async function checkoutRepo(repoSlug, token, options = {}) {
     try {
       await exec.exec("git", ["checkout", "-B", baseBranch, `origin/${baseBranch}`]);
     } catch {
-      throw new Error(`Base branch ${baseBranch} not found in ${repoSlug}`);
+      throw new Error(`${ERR_NOT_FOUND}: Base branch ${baseBranch} not found in ${repoSlug}`);
     }
 
     // Clean up any local changes
@@ -158,6 +162,7 @@ async function checkoutRepo(repoSlug, token, options = {}) {
  * @returns {Object} Checkout manager with switchTo method
  */
 function createCheckoutManager(token, options = {}) {
+  /** @type {any} */
   let currentRepo = null;
   const defaultBaseBranch = options.defaultBaseBranch || "main";
 

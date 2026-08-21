@@ -1,6 +1,7 @@
 // Package errorfwrapv implements a Go analysis linter that flags calls to
-// fmt.Errorf that format error arguments with %v instead of %w, which breaks
-// error-chain inspection via errors.Is and errors.As.
+// fmt.Errorf that either format error arguments with %v or otherwise pass
+// error arguments without any %w, which breaks error-chain inspection via
+// errors.Is and errors.As.
 package errorfwrapv
 
 import (
@@ -11,109 +12,145 @@ import (
 	"strconv"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 )
 
-var errorIface = universeErrorInterface()
-
-// universeErrorInterface returns the built-in error interface type, or nil if
-// it cannot be resolved from types.Universe.
-func universeErrorInterface() *types.Interface {
-	errorObj := types.Universe.Lookup("error")
-	if errorObj == nil {
-		return nil
-	}
-
-	iface, ok := errorObj.Type().Underlying().(*types.Interface)
-	if !ok {
-		return nil
-	}
-
-	return iface
-}
+var errorIface = astutil.UniverseErrorInterface()
 
 type formatVerb struct {
 	argIdx int
 	verb   rune
 }
 
+// formatArgOffset is the index of the first format argument in fmt.Errorf calls.
+// call.Args[0] is the format string; real arguments start at index 1.
+const formatArgOffset = 1
+
 // Analyzer is the errorfwrapv analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "errorfwrapv",
-	Doc:      "reports fmt.Errorf calls that format error arguments with %v instead of %w",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/errorfwrapv",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("errorfwrapv", "reports fmt.Errorf calls that pass error arguments without %w wrapping", run)
 
 func run(pass *analysis.Pass) (any, error) {
 	if errorIface == nil {
 		return nil, errors.New("failed to resolve built-in error interface from types.Universe")
 	}
 
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "errorfwrapv")
 
-	nodeFilter := []ast.Node{
-		(*ast.CallExpr)(nil),
+	nodeFilter := []ast.Node{(*ast.CallExpr)(nil)}
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
+		analyzeFmtErrorfCall(pass, n, generatedFiles, noLintIndex)
+	})
+}
+
+// analyzeFmtErrorfCall checks whether a call expression is a fmt.Errorf that
+// misuses error arguments (via %v or without %w) and reports a diagnostic.
+func analyzeFmtErrorfCall(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	position := pass.Fset.PositionFor(call.Pos(), false)
+	if filecheck.ShouldSkipFilename(position.Filename, generatedFiles) {
+		return
+	}
+	if !astutil.IsFmtErrorf(pass, call) {
+		return
+	}
+	if len(call.Args) == 0 {
+		return
+	}
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return
+	}
+
+	verbs := parseFormatVerbs(lit.Value)
+	errorArgVerbs, wrappedErrorArgs, hasVerbV := classifyErrorArgs(pass, call, verbs)
+
+	if hasVerbV {
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "errorfwrapv") {
 			return
 		}
+		pass.ReportRangef(call, "fmt.Errorf formats an error argument with %%v; use %%w to preserve the error chain")
+		return
+	}
 
-		position := pass.Fset.PositionFor(call.Pos(), false)
-		if filecheck.IsTestFile(position.Filename) {
-			return
+	if len(call.Args) <= formatArgOffset {
+		return
+	}
+
+	for i := formatArgOffset; i < len(call.Args); i++ {
+		tv, ok := pass.TypesInfo.Types[call.Args[i]]
+		if !ok || tv.Type == nil {
+			continue
 		}
-
-		if !astutil.IsFmtErrorf(pass, call) {
-			return
+		if !types.Implements(tv.Type, errorIface) {
+			continue
 		}
-
-		if len(call.Args) == 0 {
-			return
+		if wrappedErrorArgs[i] {
+			continue
 		}
-
-		lit, ok := call.Args[0].(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			return
-		}
-
-		verbs := parseFormatVerbs(lit.Value)
-		for _, fv := range verbs {
-			if fv.verb != 'v' {
+		if verbsForArg, ok := errorArgVerbs[i]; ok {
+			if !needsWrapping(verbsForArg) {
 				continue
 			}
-			callArgIdx := fv.argIdx + 1
-			if callArgIdx >= len(call.Args) {
-				continue
-			}
-			tv, ok := pass.TypesInfo.Types[call.Args[callArgIdx]]
-			if !ok || tv.Type == nil {
-				continue
-			}
-			if !types.Implements(tv.Type, errorIface) {
-				continue
-			}
-			if nolint.HasDirective(position, noLintLinesByFile) {
-				return
-			}
-			pass.ReportRangef(call, "fmt.Errorf formats an error argument with %%v; use %%w to preserve the error chain")
+		}
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "errorfwrapv") {
 			return
 		}
-	})
+		pass.ReportRangef(call, "fmt.Errorf passes an error argument without %%w; use %%w to preserve the error chain")
+		// Keep diagnostics to one per call to avoid noisy duplicate reports.
+		return
+	}
+}
 
-	return nil, nil
+// classifyErrorArgs iterates over format verbs and classifies error arguments.
+// It returns errorArgVerbs (verb list per arg index), wrappedErrorArgs (args
+// that already use %w), and hasVerbV (whether any error arg uses %v).
+func classifyErrorArgs(pass *analysis.Pass, call *ast.CallExpr, verbs []formatVerb) (errorArgVerbs map[int][]rune, wrappedErrorArgs map[int]bool, hasVerbV bool) {
+	errorArgVerbs = make(map[int][]rune)
+	wrappedErrorArgs = make(map[int]bool)
+	for _, fv := range verbs {
+		callArgIdx := fv.argIdx + formatArgOffset
+		if callArgIdx >= len(call.Args) {
+			continue
+		}
+		tv, ok := pass.TypesInfo.Types[call.Args[callArgIdx]]
+		if !ok || tv.Type == nil {
+			continue
+		}
+		if !types.Implements(tv.Type, errorIface) {
+			continue
+		}
+		errorArgVerbs[callArgIdx] = append(errorArgVerbs[callArgIdx], fv.verb)
+		if fv.verb == 'w' {
+			wrappedErrorArgs[callArgIdx] = true
+		}
+		if fv.verb == 'v' {
+			hasVerbV = true
+		}
+	}
+	return
+}
+
+// needsWrapping reports whether a slice of format verbs for an error argument
+// requires a %w replacement. Verbs %T and %p are considered display-only and
+// do not require wrapping.
+func needsWrapping(verbs []rune) bool {
+	for _, verb := range verbs {
+		if verb != 'T' && verb != 'p' {
+			return true
+		}
+	}
+	return false
 }
 
 func parseFormatVerbs(s string) []formatVerb {
@@ -137,12 +174,6 @@ func parseFormatVerbs(s string) []formatVerb {
 
 		valueArgIdx := 0
 		hasExplicitValueArg := false
-		if idx, nextPos, ok := parseFormatArgIndex(s, i); ok {
-			valueArgIdx = idx
-			nextArgIdx = idx + 1
-			hasExplicitValueArg = true
-			i = nextPos
-		}
 		for i < len(s) {
 			switch s[i] {
 			case '-', '+', '#', '0', ' ':
@@ -157,6 +188,12 @@ func parseFormatVerbs(s string) []formatVerb {
 		if i < len(s) && s[i] == '.' {
 			i++
 			i = consumeFormatWidthOrPrecision(s, i, &nextArgIdx)
+		}
+		if idx, nextPos, ok := parseFormatArgIndex(s, i); ok {
+			valueArgIdx = idx
+			nextArgIdx = idx + 1
+			hasExplicitValueArg = true
+			i = nextPos
 		}
 		if i >= len(s) {
 			break

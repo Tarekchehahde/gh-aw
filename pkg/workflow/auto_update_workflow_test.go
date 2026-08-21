@@ -102,15 +102,19 @@ func TestGenerateAutoUpdateWorkflow_DifferentReposDifferentCron(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 
+	// Per-repo schedule scattering applies in all non-dev modes.
+	// Use ActionModeAction since that is what released binaries actually detect.
 	require.NoError(t, GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
 		WorkflowDir: dir1,
 		Enabled:     true,
 		RepoSlug:    "org1/repo-alpha",
+		ActionMode:  ActionModeAction,
 	}))
 	require.NoError(t, GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
 		WorkflowDir: dir2,
 		Enabled:     true,
 		RepoSlug:    "org2/repo-beta",
+		ActionMode:  ActionModeAction,
 	}))
 
 	data1, err := os.ReadFile(filepath.Join(dir1, AutoUpdateWorkflowFileName))
@@ -125,7 +129,7 @@ func TestGenerateAutoUpdateWorkflow_DifferentReposDifferentCron(t *testing.T) {
 	assert.NotEmpty(t, cron2, "cron should be non-empty for org2/repo-beta")
 	// Schedules are scattered by hash — different repos should typically differ.
 	// This is a best-effort check; hash collisions are possible but unlikely for these slugs.
-	assert.NotEqual(t, cron1, cron2, "different repo slugs should produce different cron schedules")
+	assert.NotEqual(t, cron1, cron2, "different repo slugs should produce different cron schedules in action mode")
 }
 
 func TestGenerateAutoUpdateWorkflow_NoRepoSlug(t *testing.T) {
@@ -180,9 +184,57 @@ func TestGenerateAutoUpdateWorkflow_ReleaseModeUsesGhAwPrefix(t *testing.T) {
 	assert.NotContains(t, string(content), "Build gh-aw", "should not build gh-aw from source in release mode")
 }
 
+func TestGenerateAutoUpdateWorkflow_DevModeScheduleStable(t *testing.T) {
+	// Dev mode must produce the same schedule regardless of whether --schedule-seed /
+	// a repo slug is provided. This is the key stability property: agents and CI that
+	// call `gh aw compile` without --schedule-seed should not cause agentic-auto-upgrade.yml
+	// to differ from a build that passes --schedule-seed.
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	require.NoError(t, GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+		WorkflowDir: dir1,
+		Enabled:     true,
+		RepoSlug:    "github/gh-aw", // simulates --schedule-seed github/gh-aw
+		ActionMode:  ActionModeDev,
+	}))
+	require.NoError(t, GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+		WorkflowDir: dir2,
+		Enabled:     true,
+		RepoSlug:    "", // simulates sandbox/CI where git remote detection yields empty slug
+		ActionMode:  ActionModeDev,
+	}))
+
+	data1, err := os.ReadFile(filepath.Join(dir1, AutoUpdateWorkflowFileName))
+	require.NoError(t, err)
+	data2, err := os.ReadFile(filepath.Join(dir2, AutoUpdateWorkflowFileName))
+	require.NoError(t, err)
+
+	cron1 := extractCronLine(string(data1))
+	cron2 := extractCronLine(string(data2))
+	assert.NotEmpty(t, cron1, "cron should be present with slug in dev mode")
+	assert.NotEmpty(t, cron2, "cron should be present without slug in dev mode")
+	assert.Equal(t, cron1, cron2, "dev mode schedule must be identical regardless of repo slug")
+}
+
 func TestBuildAutoUpdateSeed(t *testing.T) {
-	assert.Equal(t, "owner/repo/agentic-auto-upgrade", buildAutoUpdateSeed("owner/repo"))
-	assert.Equal(t, "agentic-auto-upgrade", buildAutoUpdateSeed(""))
+	// Release mode: incorporates repo slug for per-repo scattering.
+	assert.Equal(t, "owner/repo/agentic-auto-upgrade", buildAutoUpdateSeed("owner/repo", ActionModeRelease))
+	assert.Equal(t, "agentic-auto-upgrade", buildAutoUpdateSeed("", ActionModeRelease))
+
+	// Action mode (used by released binaries): also incorporates repo slug for per-repo scattering.
+	assert.Equal(t, "owner/repo/agentic-auto-upgrade", buildAutoUpdateSeed("owner/repo", ActionModeAction))
+	assert.Equal(t, "agentic-auto-upgrade", buildAutoUpdateSeed("", ActionModeAction))
+
+	// Script mode: also incorporates repo slug for per-repo scattering.
+	assert.Equal(t, "owner/repo/agentic-auto-upgrade", buildAutoUpdateSeed("owner/repo", ActionModeScript))
+	assert.Equal(t, "agentic-auto-upgrade", buildAutoUpdateSeed("", ActionModeScript))
+
+	// Dev mode: always uses the stable "dev/" prefix regardless of repo slug,
+	// so that the schedule does not change depending on whether --schedule-seed
+	// is passed or whether git remote detection succeeds.
+	assert.Equal(t, "dev/agentic-auto-upgrade", buildAutoUpdateSeed("owner/repo", ActionModeDev))
+	assert.Equal(t, "dev/agentic-auto-upgrade", buildAutoUpdateSeed("", ActionModeDev))
 }
 
 // extractCronLine returns the cron expression from the first `- cron:` line in the YAML.
@@ -194,4 +246,47 @@ func extractCronLine(content string) string {
 		}
 	}
 	return ""
+}
+
+func TestGenerateAutoUpdateWorkflow_CustomCron(t *testing.T) {
+	dir := t.TempDir()
+	const customCron = "0 9 * * 1"
+
+	err := GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+		WorkflowDir: dir,
+		Enabled:     true,
+		RepoSlug:    "owner/repo",
+		CustomCron:  customCron,
+	})
+	require.NoError(t, err, "GenerateAutoUpdateWorkflow should succeed with custom cron")
+
+	content, err := os.ReadFile(filepath.Join(dir, AutoUpdateWorkflowFileName))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(content), `cron: "0 9 * * 1"`, "should use the custom cron expression verbatim")
+	assert.Contains(t, string(content), "Custom schedule (auto-upgrade)", "should use custom schedule comment for custom cron")
+	assert.NotContains(t, string(content), "Weekly (auto-upgrade)", "should not use weekly comment for custom cron")
+	assert.Contains(t, string(content), "auto_upgrade.cron is set in aw.json", "header should describe custom cron configuration")
+}
+
+func TestGenerateAutoUpdateWorkflow_CustomCronOverridesFuzzy(t *testing.T) {
+	dir := t.TempDir()
+	const customCron = "30 5 * * 1-5"
+
+	err := GenerateAutoUpdateWorkflow(GenerateAutoUpdateWorkflowOptions{
+		WorkflowDir: dir,
+		Enabled:     true,
+		RepoSlug:    "org/repo",
+		ActionMode:  ActionModeAction,
+		CustomCron:  customCron,
+	})
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(filepath.Join(dir, AutoUpdateWorkflowFileName))
+	require.NoError(t, err)
+
+	cronLine := extractCronLine(string(content))
+	assert.Contains(t, cronLine, customCron, "custom cron should override the per-repo fuzzy weekly schedule")
+	assert.Contains(t, string(content), "Custom schedule (auto-upgrade)", "should use custom schedule comment")
+	assert.NotContains(t, string(content), "Weekly (auto-upgrade)", "should not use weekly comment when custom cron is set")
 }

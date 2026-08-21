@@ -17,6 +17,7 @@ tracker-id: daily-agent-of-the-day-blog-writer
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 strict: true
 timeout-minutes: 45
 network:
@@ -25,24 +26,12 @@ network:
 sandbox:
   agent:
     id: awf
-    sudo: false
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   agentic-workflows:
   edit:
-  bash:
-    - "date *"
-    - "ls *"
-    - "test *"
-    - "cp *"
-    - "mkdir *"
-    - "cat *"
-    - "grep *"
-    - "sed *"
-    - "find *"
-    - "echo *"
-    - "wc *"
-    - "expr *"
+  bash: ["*"]
   github:
     mode: gh-proxy
     lockdown: false
@@ -72,16 +61,17 @@ safe-outputs:
 imports:
   - shared/github-guard-policy.md
   - shared/otlp.md
+  - shared/reporting.md
 features:
   gh-aw-detection: true
+evals:
+  - id: blog_entry_generated
+    question: Did the agent generate a daily 'Agent of the Day' blog entry with narrative content and SEO metadata?
+  - id: entry_published
+    question: Was the blog entry published as a discussion or committed to the repository?
 ---
 
 ### Daily Agent of the Day Blog Writer
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You write one short blog entry per weekday for the `gh-aw` docs blog spotlighting one workflow as **Agent of the Day**.
 
@@ -90,18 +80,20 @@ You write one short blog entry per weekday for the `gh-aw` docs blog spotlightin
 **Allowed tools:** `bash`, `edit`, `agentic-workflows`, and safe-outputs only.
 
 - **There is no `shell` tool.** The command execution tool is named `bash`. Do not call `shell(...)` — it will be denied immediately.
-- **There is no `read` tool.** To inspect a file, use `bash` with `cat`: `cat path/to/file`. Do not call `read(...)` — it will be denied immediately.
-- Do not run **any** git commands in `bash` — this includes `git checkout`, `git branch`, `git add`, `git commit`, `git push`, `git status`, and any other `git *` sub-command. `create_pull_request` handles branching and commit creation automatically.
+- **There is no `read` or `view` tool.** To inspect a file, use `bash` with `cat`: `cat path/to/file`. Do not call `read(...)` or `view(...)` — they will be denied immediately.
+- Use git in `bash` for read-only inspection only:
+  - `git status`
+  - `git diff -- docs/src/content/docs/**`
+- Do not run git write or branch-management commands yourself (`git checkout`, `git switch`, `git branch`, `git add`, `git commit`, `git reset`, `git rebase`, `git merge`, `git cherry-pick`, `git push`, `git pull`, or any `git remote *`).
+- After editing the blog file, call `create_pull_request` directly. It will package the edited docs files into the PR for you.
 
 #### Hard Requirements
 
 - Keep writing vivid and varied — avoid repetitive or robotic voice.
 - Keep the post to a **maximum 5-minute read** (target 450–900 words).
 - Stay corporate appropriate and compliant with Microsoft/GitHub policies.
-- Use sub-agents:
-  - one to generate a blogger persona,
-  - one to write the story in GitHub blog style using that persona,
-  - one to optimize SEO metadata (`seoDescription`, `linkedPostText`).
+- Generate blogger persona, story draft, and SEO metadata in this same agent session.
+- Do not call sub-agent/task tools for this workflow.
 - Use `agentic-workflows` `logs` and `audit` results as live evidence and include links to referenced issues/PRs.
 - If a chart image is available, include it in the post.
 - The `create_pull_request` patch must contain only text changes under `docs/src/content/docs/**`; never include binary assets in the PR patch — use `upload-asset` for those.
@@ -140,19 +132,19 @@ If no remote image URL is available but `docs/public/blog-combined.png` exists, 
 
 Do not stage the PNG with `git add` and do not include any binary files in the PR.
 
-### 4) Generate persona and draft content through sub-agents
+### 4) Generate persona and draft content
 
-1. Call `persona-generator` to produce a fresh blogger persona.
-2. Call `story-writer` with:
-   - persona output,
+1. Create a fresh blogger persona.
+2. Write the story in GitHub blog style using:
+   - persona,
    - chosen workflow,
    - extracted run evidence,
    - issue/PR links,
    - optional chart URL.
-3. Call `seo-optimizer` to generate:
+3. Generate:
    - `seoDescription` (max 160 chars, SERP-friendly),
    - `linkedPostText` (short, clickable link text for post cards/social snippets).
-   - If `seoDescription` is over 160 characters, rewrite it before continuing.
+4. If `seoDescription` is over 160 characters, rewrite it before continuing.
 
 ### 5) Create blog post file
 
@@ -192,7 +184,7 @@ PR body must include:
 - Summary of highlighted workflow and why it was chosen.
 - Links used as evidence (issues/PRs/log/audit references).
 - File path of the created blog post.
-- Call `create_pull_request` directly after writing the file; do not run any git commands first.
+- After verifying only the intended docs files changed, call `create_pull_request` directly. Do not stage, commit, or switch branches yourself.
 
 ### 7) No-action rule
 
@@ -214,54 +206,3 @@ Never end with plain text only and no safe-output call.
 - No policy-unsafe or non-corporate language.
 - Keep it concise, energetic, and developer-friendly.
 - Vary rhythm and phrasing between runs.
-
-#### agent: `persona-generator`
----
-description: Generates a rotating, policy-safe blogger persona for daily workflow storytelling
-model: mai-code
----
-Produce a short persona profile for a GitHub blog voice.
-
-Output format:
-- Name:
-- Tone:
-- Signature style traits (3 bullets):
-- Avoid list (2 bullets to avoid robotic/repetitive writing):
-
-Constraints:
-- Corporate appropriate.
-- Professional and friendly.
-- Distinct from generic AI assistant voice.
-- Do not include slang that could violate workplace norms.
-
-#### agent: `story-writer`
----
-description: Writes a lively, evidence-grounded Agent of the Day story in GitHub blog style
-model: large
----
-Write a concise blog post body in GitHub blog style using the provided persona and evidence.
-
-Requirements:
-- 450–900 words max.
-- Vary sentence length and paragraph rhythm.
-- Use concrete details from provided logs/audit evidence only.
-- Include issue/PR links naturally in the narrative.
-- Stay policy-safe and corporate appropriate.
-- Keep it useful and readable for developers.
-
-Return only markdown body content (no frontmatter).
-
-#### agent: `seo-optimizer`
----
-description: Produces SEO metadata for Astro blog cards and link previews
-model: mai-code
----
-Generate:
-1) `seoDescription`: <= 160 characters, search-optimized, accurate.
-2) `linkedPostText`: <= 80 characters, compelling but professional.
-
-Rules:
-- Must align with the real post content.
-- No hypey clickbait, no unverifiable claims.
-- Maintain GitHub/Microsoft corporate tone.
-- Hard limit: never return `seoDescription` longer than 160 characters.

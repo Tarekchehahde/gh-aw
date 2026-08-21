@@ -3,9 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
-	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
 	"github.com/github/gh-aw/pkg/setutil"
@@ -33,6 +31,13 @@ type workflowBuildContext struct {
 // ParseWorkflowFile parses a workflow markdown file and returns a WorkflowData structure.
 // This is the main orchestration function that coordinates all compilation phases.
 func (c *Compiler) ParseWorkflowFile(markdownPath string) (*WorkflowData, error) {
+	c.configureGHESCompatibility()
+
+	// Behavior-defined engines are contributed by a workflow's imports, so their
+	// registry and catalog must not affect subsequent compilations.
+	c.engineRegistry = NewEngineRegistry()
+	c.engineCatalog = NewEngineCatalog(c.engineRegistry)
+
 	orchestratorWorkflowLog.Printf("Starting workflow file parsing: %s", markdownPath)
 
 	parseResult, err := c.parseFrontmatterSection(markdownPath)
@@ -134,7 +139,7 @@ func (c *Compiler) validateWorkflowBuildContext(ctx *workflowBuildContext) error
 func (c *Compiler) validateWorkflowModelAliasMap(ctx *workflowBuildContext) error {
 	var engineModel string
 	if ctx.workflowData.EngineConfig != nil {
-		engineModel = ctx.workflowData.EngineConfig.Model
+		engineModel = ctx.workflowData.Model
 	}
 	return c.validateModelAliasMap(ctx.workflowData.ModelMappings, nil, engineModel, ctx.cleanPath)
 }
@@ -172,6 +177,9 @@ func (c *Compiler) validateWorkflowToolConfigurations(ctx *workflowBuildContext)
 	if err := validateBashToolConfig(ctx.workflowData.ParsedTools, ctx.workflowData.Name); err != nil {
 		return fmt.Errorf("%s: %w", ctx.cleanPath, err)
 	}
+	if err := validateCLIProxyBashCompatibility(ctx.workflowData.Tools, ctx.workflowData.Name); err != nil {
+		return fmt.Errorf("%s: %w", ctx.cleanPath, err)
+	}
 	if err := validateGitHubToolConfig(ctx.workflowData.ParsedTools, ctx.workflowData.Name); err != nil {
 		return fmt.Errorf("%s: %w", ctx.cleanPath, err)
 	}
@@ -182,6 +190,7 @@ func (c *Compiler) validateWorkflowToolConfigurations(ctx *workflowBuildContext)
 		return fmt.Errorf("%s: %w", ctx.cleanPath, err)
 	}
 	emitGitHubLockdownGuardPolicyWarning(c, ctx.workflowData.ParsedTools, ctx.cleanPath)
+	emitMinIntegrityNoneBashWarning(c, ctx.workflowData.ParsedTools, ctx.cleanPath)
 	var gatewayConfig *MCPGatewayRuntimeConfig
 	if ctx.workflowData.SandboxConfig != nil {
 		gatewayConfig = ctx.workflowData.SandboxConfig.MCP
@@ -221,16 +230,22 @@ func (c *Compiler) populateWorkflowBuildContext(ctx *workflowBuildContext) error
 	if err := c.mergeImportedOnFields(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.engineSetup.importsResult); err != nil {
 		return err
 	}
+	ambientFolders, err := resolveAmbientFolders(ctx.frontmatter.Frontmatter, ctx.engineSetup.importsResult)
+	if err != nil {
+		return formatCompilerError(ctx.cleanPath, "error", err.Error(), err)
+	}
+	ctx.workflowData.AmbientFolders = ambientFolders
 	return c.processOnSectionAndFilters(ctx.frontmatter.Frontmatter, ctx.workflowData, ctx.cleanPath)
 }
 
 func (c *Compiler) attachSharedActionResolver(workflowData *WorkflowData) {
-	actionCache, actionResolver := c.getSharedActionResolver()
+	actionCache, actionResolver := c.ensureSharedActionCacheAndResolver()
 	workflowData.Ctx = c.ctx
 	workflowData.ActionCache = actionCache
 	workflowData.ActionResolver = actionResolver
 	workflowData.ActionPinWarnings = c.actionPinWarnings
 	workflowData.ActionPinMappings = c.getActionPinMappings()
+	workflowData.ContainerPinMappings = c.getContainerPinMappings()
 }
 
 func (c *Compiler) mergeImportedWorkflowConfiguration(ctx *workflowBuildContext) error {
@@ -446,15 +461,8 @@ func (c *Compiler) extractAdditionalConfigurations(
 	// Use the already extracted output configuration
 	workflowData.SafeOutputs = safeOutputs
 
-	// Extract comment-memory from tools and attach to safe-outputs configuration.
-	// comment-memory now belongs under tools: next to cache-memory and repo-memory.
-	commentMemoryConfig := c.extractCommentMemoryConfig(toolsConfig)
-	if commentMemoryConfig != nil {
-		if workflowData.SafeOutputs == nil {
-			workflowData.SafeOutputs = &SafeOutputsConfig{}
-		}
-		workflowData.SafeOutputs.CommentMemory = commentMemoryConfig
-	}
+	// comment-memory belongs under tools: next to cache-memory and repo-memory.
+	workflowData.CommentMemoryConfig = c.extractCommentMemoryConfig(toolsConfig)
 
 	// Extract mcp-scripts configuration
 	workflowData.MCPScripts = c.extractMCPScriptsConfig(frontmatter)
@@ -551,11 +559,10 @@ func (c *Compiler) extractAdditionalConfigurations(
 	if err != nil {
 		return fmt.Errorf("invalid evals configuration: %w", err)
 	}
-	if evalsConfig.HasEvals() {
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage("evals support is experimental; job compilation is pending"))
-		c.IncrementWarningCount()
-	}
 	workflowData.Evals = evalsConfig
+	if err := validateExperimentMetricReferences(workflowData.ExperimentConfigs, workflowData.Evals); err != nil {
+		return fmt.Errorf("invalid experiments configuration: %w", err)
+	}
 
 	return nil
 }
@@ -668,6 +675,9 @@ func (c *Compiler) processOnSectionAndFilters(
 
 	// Apply pull request fork filter if specified
 	c.applyPullRequestForkFilter(workflowData, frontmatter)
+
+	// Apply pull request stack filter (default: latest stacked PR only)
+	c.applyPullRequestStackFilter(workflowData, frontmatter)
 
 	// Apply label filter if specified
 	c.applyLabelFilter(workflowData, frontmatter)

@@ -58,7 +58,7 @@ func TestValidateExpressions(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected validateExpressions to return an error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
 				assert.NoError(t, err, "validateExpressions should not return an error")
@@ -128,7 +128,7 @@ func TestValidateFeatureConfig(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected validateFeatureConfig to return an error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
 				assert.NoError(t, err, "validateFeatureConfig should not return an error")
@@ -142,7 +142,9 @@ func TestEmitExperimentalFeatureWarningsGHAWDetection(t *testing.T) {
 	tests := []struct {
 		name          string
 		features      map[string]any
+		batchMode     bool
 		expectWarning bool
+		expectedUsage int
 	}{
 		{
 			name: "gh-aw-detection enabled produces experimental warning",
@@ -150,6 +152,15 @@ func TestEmitExperimentalFeatureWarningsGHAWDetection(t *testing.T) {
 				"gh-aw-detection": true,
 			},
 			expectWarning: true,
+		},
+		{
+			name: "batch mode aggregates gh-aw-detection usage",
+			features: map[string]any{
+				"gh-aw-detection": true,
+			},
+			batchMode:     true,
+			expectWarning: false,
+			expectedUsage: 1,
 		},
 		{
 			name: "gh-aw-detection disabled does not produce experimental warning",
@@ -169,6 +180,7 @@ func TestEmitExperimentalFeatureWarningsGHAWDetection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			compiler := NewCompiler()
+			compiler.SetBatchMode(tt.batchMode)
 			workflowData := &WorkflowData{
 				Features: tt.features,
 			}
@@ -179,7 +191,6 @@ func TestEmitExperimentalFeatureWarningsGHAWDetection(t *testing.T) {
 			os.Stderr = w
 			t.Cleanup(func() {
 				os.Stderr = oldStderr
-				_ = w.Close()
 				_ = r.Close()
 			})
 
@@ -197,10 +208,47 @@ func TestEmitExperimentalFeatureWarningsGHAWDetection(t *testing.T) {
 				assert.Positive(t, compiler.GetWarningCount())
 			} else {
 				assert.NotContains(t, stderrOutput, expectedMessage)
-				assert.Zero(t, compiler.GetWarningCount())
+				if tt.expectedUsage == 0 {
+					assert.Zero(t, compiler.GetWarningCount())
+				}
 			}
+			assert.Equal(t, tt.expectedUsage, compiler.GetExperimentalFeatureUsage()[expectedMessage])
 		})
 	}
+}
+
+func TestEmitGeneralToolWarningsCloudHypervisorReviewTrigger(t *testing.T) {
+	compiler := NewCompiler()
+	workflowData := &WorkflowData{
+		SandboxConfig: &SandboxConfig{
+			Agent: &AgentSandboxConfig{
+				Runtime: AgentRuntimeCloudHypervisor,
+			},
+		},
+	}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = r.Close()
+	})
+
+	compiler.emitGeneralToolWarnings(workflowData, "test.md")
+
+	require.NoError(t, w.Close())
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, r)
+	require.NoError(t, err)
+	stderrOutput := buf.String()
+
+	assert.Contains(t, stderrOutput, "sandbox.agent.runtime: cloud-hypervisor uses a privileged KVM preview path")
+	assert.Contains(t, stderrOutput, "Require a human security review before merge or rollout")
+	assert.Equal(t, 1, compiler.GetWarningCount())
 }
 
 // TestValidatePermissions tests permission parsing and MCP tool constraint validation.
@@ -308,6 +356,101 @@ func TestValidatePermissions(t *testing.T) {
 			wantPermissions: true,
 		},
 		{
+			name: "http mcp github-oidc requires id-token write",
+			workflowData: &WorkflowData{
+				Name:            "Test",
+				MarkdownContent: "# Test",
+				AI:              "copilot",
+				Permissions:     "permissions:\n  contents: read\n",
+				Tools: map[string]any{
+					"oidc-server": map[string]any{
+						"type": "http",
+						"url":  "https://my-server.example.com/mcp",
+						"auth": map[string]any{
+							"type": "github-oidc",
+						},
+					},
+				},
+			},
+			shouldError:     true,
+			errorContains:   "mcp-servers.<name>.auth.type: github-oidc requires permissions.id-token: write",
+			wantPermissions: false,
+		},
+		{
+			name: "http mcp github-oidc with id-token write succeeds",
+			workflowData: &WorkflowData{
+				Name:            "Test",
+				MarkdownContent: "# Test",
+				AI:              "copilot",
+				Permissions:     "permissions:\n  contents: read\n  id-token: write\n",
+				Tools: map[string]any{
+					"oidc-server": map[string]any{
+						"type": "http",
+						"url":  "https://my-server.example.com/mcp",
+						"auth": map[string]any{
+							"type":     "github-oidc",
+							"audience": "https://my-server.example.com",
+						},
+					},
+				},
+			},
+			shouldError:     false,
+			wantPermissions: true,
+		},
+		{
+			name: "http mcp github-oidc with legacy AWF version is rejected",
+			workflowData: &WorkflowData{
+				Name:            "Test",
+				MarkdownContent: "# Test",
+				AI:              "copilot",
+				Permissions:     "permissions:\n  contents: read\n  id-token: write\n",
+				Tools: map[string]any{
+					"oidc-server": map[string]any{
+						"type": "http",
+						"url":  "https://my-server.example.com/mcp",
+						"auth": map[string]any{
+							"type": "github-oidc",
+						},
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{
+						Enabled: true,
+						Version: "v0.25.2", // older than AWFExcludeEnvMinVersion (v0.25.3)
+					},
+				},
+			},
+			shouldError:     true,
+			errorContains:   "mcp-servers.<name>.auth.type: github-oidc requires AWF v0.25.3 or newer",
+			wantPermissions: false,
+		},
+		{
+			name: "http mcp github-oidc with minimum required AWF version succeeds",
+			workflowData: &WorkflowData{
+				Name:            "Test",
+				MarkdownContent: "# Test",
+				AI:              "copilot",
+				Permissions:     "permissions:\n  contents: read\n  id-token: write\n",
+				Tools: map[string]any{
+					"oidc-server": map[string]any{
+						"type": "http",
+						"url":  "https://my-server.example.com/mcp",
+						"auth": map[string]any{
+							"type": "github-oidc",
+						},
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{
+						Enabled: true,
+						Version: "v0.25.3", // exactly AWFExcludeEnvMinVersion
+					},
+				},
+			},
+			shouldError:     false,
+			wantPermissions: true,
+		},
+		{
 			name: "observability otlp GitHub App credentials do not require id-token write",
 			workflowData: &WorkflowData{
 				Name:            "Test",
@@ -342,7 +485,7 @@ func TestValidatePermissions(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected validatePermissions to return an error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
 				require.NoError(t, err, "validatePermissions should not return an error")
@@ -416,7 +559,7 @@ func TestValidateToolConfiguration(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected validateToolConfiguration to return an error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
 				assert.NoError(t, err, "validateToolConfiguration should not return an error")
@@ -442,7 +585,7 @@ func TestValidatePermissions_UsesCachedPermissionScopeValidation(t *testing.T) {
 	compiler := NewCompiler()
 	_, err := compiler.validatePermissions(workflowData, markdownPath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), cachedErr.Error())
+	require.ErrorContains(t, err, cachedErr.Error())
 }
 
 func TestValidatePermissions_EmitsCopilotRequestsTipOncePerMarkdownPath(t *testing.T) {
@@ -561,7 +704,7 @@ func TestValidateToolConfiguration_EmitsSandboxWarningBeforeThreatDetectionError
 	})
 
 	require.Error(t, validateErr)
-	assert.Contains(t, validateErr.Error(), "threat detection requires sandbox.agent")
+	require.ErrorContains(t, validateErr, "threat detection requires sandbox.agent")
 	assert.Contains(t, stderr, "Agent sandbox disabled (sandbox.agent: false)")
 	assert.Equal(t, initialWarnings+1, compiler.GetWarningCount())
 }

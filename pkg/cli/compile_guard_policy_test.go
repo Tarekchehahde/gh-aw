@@ -17,6 +17,7 @@ import (
 // under tools.github compiles successfully without requiring an explicit repos field.
 // When repos is omitted, it should default to "all" (regression test for the fix).
 func TestGuardPolicyMinIntegrityOnly(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		workflowContent string
@@ -32,6 +33,8 @@ permissions:
   contents: read
 engine: copilot
 tools:
+  bash: false
+  cli-proxy: false
   github:
     min-integrity: none
 ---
@@ -127,6 +130,7 @@ This workflow specifies repos without min-integrity.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 
 			workflowPath := filepath.Join(tmpDir, "test-guard-policy.md")
@@ -139,10 +143,10 @@ This workflow specifies repos without min-integrity.
 			if tt.expectError {
 				require.Error(t, err, "Expected compilation to fail")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should mention %q", tt.errorContains)
+					require.ErrorContains(t, err, tt.errorContains, "Error should mention %q", tt.errorContains)
 				}
 			} else {
-				assert.NoError(t, err, "Expected compilation to succeed")
+				require.NoError(t, err, "Expected compilation to succeed")
 			}
 		})
 	}
@@ -152,6 +156,7 @@ This workflow specifies repos without min-integrity.
 // specified (without repos), the compiled lock file includes repos="all" in the guard policy.
 // This is a regression test for the MCP Gateway requirement that allow-only must include repos.
 func TestGuardPolicyMinIntegrityOnlyCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -204,6 +209,7 @@ This workflow uses min-integrity without specifying repos.
 // TestGuardPolicyBlockedUsersApprovalLabelsCompiledOutput verifies that blocked-users and
 // approval-labels are written into the compiled guard-policies allow-only block.
 func TestGuardPolicyBlockedUsersApprovalLabelsCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -259,6 +265,7 @@ This workflow uses blocked-users and approval-labels.
 // TestGuardPolicyBlockedUsersExpressionCompiledOutput verifies that blocked-users as a GitHub
 // Actions expression is passed through as a string in the compiled guard-policies block.
 func TestGuardPolicyBlockedUsersExpressionCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -308,6 +315,7 @@ This workflow passes blocked-users and approval-labels as expressions.
 // TestGuardPolicyBlockedUsersCommaSeparatedCompiledOutput verifies that a static
 // comma-separated blocked-users string is split at compile time.
 func TestGuardPolicyBlockedUsersCommaSeparatedCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -353,6 +361,7 @@ This workflow passes blocked-users as a comma-separated string.
 // compiled guard-policies allow-only block and that the parse-guard-vars step receives the
 // static values via GH_AW_TRUSTED_USERS_EXTRA.
 func TestGuardPolicyTrustedUsersCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -402,6 +411,7 @@ This workflow uses trusted-users alongside blocked-users.
 // TestGuardPolicyTrustedUsersExpressionCompiledOutput verifies that a trusted-users GitHub
 // Actions expression is passed through as a string in the compiled guard-policies block.
 func TestGuardPolicyTrustedUsersExpressionCompiledOutput(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -443,6 +453,7 @@ This workflow passes trusted-users as a GitHub Actions expression.
 // TestGuardPolicyTrustedUsersRequiresMinIntegrity verifies that trusted-users cannot be set
 // without a min-integrity guard policy.
 func TestGuardPolicyTrustedUsersRequiresMinIntegrity(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -468,12 +479,13 @@ This workflow sets trusted-users without min-integrity (should fail).
 	compiler := workflow.NewCompiler()
 	err = CompileWorkflowWithValidation(context.Background(), compiler, workflowPath, CompileValidationOptions{})
 	require.Error(t, err, "Expected compilation to fail without min-integrity")
-	assert.Contains(t, err.Error(), "min-integrity", "Error should mention min-integrity requirement")
+	require.ErrorContains(t, err, "min-integrity", "Error should mention min-integrity requirement")
 }
 
 // TestGuardPolicyToolCallLimitsCompilation verifies that max-calls entries under
 // tools.github.allowed compile successfully in CLI workflow compilation.
 func TestGuardPolicyToolCallLimitsCompilation(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -510,6 +522,7 @@ tools:
 // TestGuardPolicyAllowedColonStringDoesNotEmitToolCallLimits verifies that string
 // entries containing colons are not interpreted as per-tool call limits.
 func TestGuardPolicyAllowedColonStringDoesNotEmitToolCallLimits(t *testing.T) {
+	t.Parallel()
 	workflowContent := `---
 on:
   workflow_dispatch:
@@ -534,5 +547,5 @@ tools:
 	compiler := workflow.NewCompiler()
 	err = CompileWorkflowWithValidation(context.Background(), compiler, workflowPath, CompileValidationOptions{})
 	require.Error(t, err, "Expected compilation to fail for unknown tool name")
-	assert.Contains(t, err.Error(), "Unknown GitHub tool(s): issue_read:1", "Compiler must treat colon entry as literal tool name")
+	require.ErrorContains(t, err, "Unknown GitHub tool(s): issue_read:1", "Compiler must treat colon entry as literal tool name")
 }

@@ -20,7 +20,7 @@ func mockScanUpgradeRepo(_ context.Context, repo string, _ bool) (orgRepoPreview
 }
 
 func TestNewUpgradeCommandOrgFlags(t *testing.T) {
-	cmd := NewUpgradeCommand()
+	cmd := NewUpgradeCommand(func(string) error { return nil })
 
 	require.NotNil(t, cmd.Flags().Lookup("org"))
 	require.NotNil(t, cmd.Flags().Lookup("repos"))
@@ -77,7 +77,7 @@ func TestRunUpgradeForOrgCreateIssueRequiresYesInCI(t *testing.T) {
 
 	err := runUpgradeForOrg(context.Background(), "octo", nil, upgradeOptions{ctx: context.Background()}, false, true, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--yes")
+	require.ErrorContains(t, err, "--yes")
 }
 
 func TestRunUpgradeForOrgCreatePRRequiresYesInCI(t *testing.T) {
@@ -89,19 +89,19 @@ func TestRunUpgradeForOrgCreatePRRequiresYesInCI(t *testing.T) {
 
 	err := runUpgradeForOrg(context.Background(), "octo", nil, upgradeOptions{ctx: context.Background()}, true, false, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--yes")
+	require.ErrorContains(t, err, "--yes")
 }
 
 func TestRunUpgradeForOrgEmptyOrg(t *testing.T) {
 	err := runUpgradeForOrg(context.Background(), "  ", nil, upgradeOptions{ctx: context.Background()}, false, false, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--org cannot be empty")
+	require.ErrorContains(t, err, "--org cannot be empty")
 }
 
 func TestRunUpgradeForOrgInvalidRepoGlob(t *testing.T) {
 	err := runUpgradeForOrg(context.Background(), "octo", []string{"["}, upgradeOptions{ctx: context.Background()}, false, false, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid --repos pattern")
+	require.ErrorContains(t, err, "invalid --repos pattern")
 }
 
 func TestRunUpgradeForOrgNoReposFound(t *testing.T) {
@@ -151,7 +151,7 @@ func TestRunUpgradeForOrgDryRun(t *testing.T) {
 		return []string{"octo/api", "octo/web"}, nil
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
-	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 		t.Fatalf("unexpected upgrade call for %s", repo)
 		return nil
 	}
@@ -184,7 +184,7 @@ func TestRunUpgradeForOrgDryRunShowsVersion(t *testing.T) {
 	scanUpgradeRepoFn = func(_ context.Context, repo string, _ bool) (orgRepoPreview, bool, error) {
 		return orgRepoPreview{Repo: repo, TotalWorkflows: 2, CurrentVersion: "v1.2.3"}, true, nil
 	}
-	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 		t.Fatalf("unexpected upgrade call for %s", repo)
 		return nil
 	}
@@ -216,7 +216,7 @@ func TestRunUpgradeForOrgCreatePR(t *testing.T) {
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
 	var upgraded []string
-	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 		upgraded = append(upgraded, repo)
 		return nil
 	}
@@ -243,7 +243,7 @@ func TestRunUpgradeForOrgRepoFilter(t *testing.T) {
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
 	var upgraded []string
-	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 		upgraded = append(upgraded, repo)
 		return nil
 	}
@@ -260,6 +260,22 @@ func TestRunUpgradeForOrgRepoFilter(t *testing.T) {
 	assert.Equal(t, []string{"octo/api-service", "octo/worker-service"}, upgraded)
 }
 
+func TestSearchOrgLockWorkflowReposRejectsInvalidOrgBeforeSearch(t *testing.T) {
+	origWait := waitForOrgRateLimitFn
+	waitForOrgRateLimitFn = func(context.Context, string, bool) error {
+		t.Fatal("waitForOrgRateLimitFn should not be called for invalid org")
+		return nil
+	}
+	defer func() {
+		waitForOrgRateLimitFn = origWait
+	}()
+
+	repos, err := searchOrgLockWorkflowRepos(context.Background(), "bad org", false)
+	require.Error(t, err)
+	assert.Nil(t, repos)
+	assert.EqualError(t, err, `invalid organization name "bad org": `+orgSlugConstraintDescription)
+}
+
 func TestRunUpgradeForOrgCreateIssue(t *testing.T) {
 	origSearch := searchOrgLockWorkflowReposFn
 	origScan := scanUpgradeRepoFn
@@ -270,7 +286,7 @@ func TestRunUpgradeForOrgCreateIssue(t *testing.T) {
 		return []string{"octo/api", "octo/web"}, nil
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
-	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, verbose bool) error {
+	runUpgradeForTargetRepoFn = func(ctx context.Context, repo string, opts upgradeOptions, createPR bool, verbose bool) error {
 		t.Fatalf("unexpected upgrade call for %s", repo)
 		return nil
 	}
@@ -294,27 +310,27 @@ func TestRunUpgradeForOrgCreateIssue(t *testing.T) {
 }
 
 func TestRunUpgradeCommandCreateIssueRequiresOrg(t *testing.T) {
-	cmd := NewUpgradeCommand()
+	cmd := NewUpgradeCommand(func(string) error { return nil })
 	cmd.SetArgs([]string{"--create-issue"})
 	err := cmd.Execute()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--create-issue requires --org")
+	require.ErrorContains(t, err, "--create-issue requires --org")
 }
 
 func TestRunUpgradeCommandCreateIssueAndPRMutuallyExclusive(t *testing.T) {
-	cmd := NewUpgradeCommand()
+	cmd := NewUpgradeCommand(func(string) error { return nil })
 	cmd.SetArgs([]string{"--org", "octo", "--create-issue", "--create-pull-request"})
 	err := cmd.Execute()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot specify both --create-pull-request and --create-issue")
+	require.ErrorContains(t, err, "cannot specify both --create-pull-request and --create-issue")
 }
 
 func TestRunUpgradeCommandReposRequiresOrg(t *testing.T) {
-	cmd := NewUpgradeCommand()
+	cmd := NewUpgradeCommand(func(string) error { return nil })
 	cmd.SetArgs([]string{"--repos", "*-svc"})
 	err := cmd.Execute()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--repos requires --org")
+	require.ErrorContains(t, err, "--repos requires --org")
 }
 
 func TestRunUpgradeForOrgSkipsFailedRepos(t *testing.T) {
@@ -328,7 +344,7 @@ func TestRunUpgradeForOrgSkipsFailedRepos(t *testing.T) {
 	scanUpgradeRepoFn = mockScanUpgradeRepo
 	boom := errors.New("upgrade failed")
 	var called []string
-	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool) error {
+	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool, _ bool) error {
 		called = append(called, repo)
 		return boom
 	}
@@ -342,7 +358,7 @@ func TestRunUpgradeForOrgSkipsFailedRepos(t *testing.T) {
 
 	err := runUpgradeForOrg(context.Background(), "octo", nil, upgradeOptions{ctx: context.Background(), yes: true}, true, false, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to upgrade any repository")
+	require.ErrorContains(t, err, "failed to upgrade any repository")
 	assert.Equal(t, []string{"octo/api", "octo/web"}, called, "should attempt all repos and skip failures")
 }
 
@@ -356,7 +372,7 @@ func TestRunUpgradeForOrgCreateIssueSkipsFailedRepos(t *testing.T) {
 		return []string{"octo/api", "octo/web"}, nil
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
-	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool) error {
+	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool, _ bool) error {
 		t.Fatalf("unexpected upgrade call for %s", repo)
 		return nil
 	}
@@ -377,7 +393,7 @@ func TestRunUpgradeForOrgCreateIssueSkipsFailedRepos(t *testing.T) {
 
 	err := runUpgradeForOrg(context.Background(), "octo", nil, upgradeOptions{ctx: context.Background(), yes: true}, false, true, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create issues in any repository")
+	require.ErrorContains(t, err, "failed to create issues in any repository")
 	assert.Equal(t, []string{"octo/api", "octo/web"}, called, "should attempt all repos and skip failures")
 }
 
@@ -391,7 +407,7 @@ func TestRunUpgradeForOrgSortsAlphabetically(t *testing.T) {
 	}
 	scanUpgradeRepoFn = mockScanUpgradeRepo
 	var called []string
-	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool) error {
+	runUpgradeForTargetRepoFn = func(_ context.Context, repo string, _ upgradeOptions, _ bool, _ bool) error {
 		called = append(called, repo)
 		return nil
 	}

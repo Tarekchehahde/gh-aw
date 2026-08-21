@@ -14,9 +14,9 @@ permissions:
   actions: read
   discussions: read
 tracker-id: daily-fact-thread
+model: gpt-5.4
 engine:
   id: codex
-  model: gpt-5.4
   bare: true
 strict: true
 experiments:
@@ -47,7 +47,8 @@ network:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   github:
@@ -66,18 +67,17 @@ safe-outputs:
 imports:
   - shared/otlp.md
   - shared/mcp/mempalace.md
+  - shared/reporting.md
 features:
   gh-aw-detection: true
+evals:
+  - id: verse_posted
+    question: Did the agent post a daily poetic verse about the gh-aw project to a discussion thread?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
 
 ### Daily Fact About gh-aw
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 Your task is to post a poetic, whimsical fact about the ${{ github.repository }} project to discussion #4750.
 

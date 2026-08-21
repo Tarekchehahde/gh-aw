@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/setutil"
 )
@@ -88,13 +89,16 @@ func wrapExpressionsInTemplateConditionals(markdown string) string {
 //   - yaml: The string builder to write the YAML to
 //   - expressionMappings: Array of ExpressionMapping containing the mappings between placeholders and GitHub expressions
 //   - data: WorkflowData containing markdown content and parsed tools
+//   - hasRuntimeImports: True when any prompt chunk contains a {{#runtime-import}} macro that must
+//     be resolved by interpolate_prompt.cjs at runtime. Pass true whenever the compiled prompt
+//     includes such macros (always the case in non-inline compilation mode).
 //
 // The generated step:
 //   - Uses actions/github-script action
 //   - Sets GH_AW_PROMPT environment variable to the prompt file path
 //   - Sets GH_AW_EXPR_* environment variables with the actual GitHub expressions (${{ ... }})
 //   - Runs interpolate_prompt.cjs script to replace placeholders and render template conditionals
-func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, expressionMappings []*ExpressionMapping, data *WorkflowData) {
+func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, expressionMappings []*ExpressionMapping, data *WorkflowData, hasRuntimeImports bool) {
 	// Check if we need interpolation
 	hasExpressions := len(expressionMappings) > 0
 
@@ -102,7 +106,10 @@ func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, e
 	hasTemplatePattern := strings.Contains(data.MarkdownContent, "{{#if ")
 	hasGitHubContext := hasGitHubTool(data.ParsedTools)
 	hasInlineSubAgents := inlineSubAgentPattern.MatchString(data.MarkdownContent)
-	hasTemplates := hasTemplatePattern || hasGitHubContext || hasInlineSubAgents
+	// hasRuntimeImports is true when the compiled prompt contains {{#runtime-import}} macros that
+	// must be resolved by interpolate_prompt.cjs. The compiler always emits a self-import macro in
+	// non-inline mode, so this is true even when the markdown source contains no explicit macros.
+	hasTemplates := hasTemplatePattern || hasGitHubContext || hasInlineSubAgents || hasRuntimeImports
 
 	// Skip if neither interpolation nor template rendering is needed
 	if !hasExpressions && !hasTemplates {
@@ -110,13 +117,13 @@ func (c *Compiler) generateInterpolationAndTemplateStep(yaml *strings.Builder, e
 		return
 	}
 
-	templateLog.Printf("Generating interpolation and template step: expressions=%d, hasPattern=%v, hasGitHubContext=%v, hasInlineSubAgents=%v",
-		len(expressionMappings), hasTemplatePattern, hasGitHubContext, hasInlineSubAgents)
+	templateLog.Printf("Generating interpolation and template step: expressions=%d, hasPattern=%v, hasGitHubContext=%v, hasInlineSubAgents=%v, hasRuntimeImports=%v",
+		len(expressionMappings), hasTemplatePattern, hasGitHubContext, hasInlineSubAgents, hasRuntimeImports)
 
 	yaml.WriteString("      - name: Interpolate variables and render templates\n")
 	fmt.Fprintf(yaml, "        uses: %s\n", getCachedActionPin("actions/github-script", data))
 	yaml.WriteString("        env:\n")
-	yaml.WriteString("          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt\n")
+	fmt.Fprintf(yaml, "          GH_AW_PROMPT: %s\n", constants.AwPromptsFileExpr)
 	if data.EngineConfig != nil && data.EngineConfig.ID != "" {
 		fmt.Fprintf(yaml, "          GH_AW_ENGINE_ID: \"%s\"\n", data.EngineConfig.ID)
 	}

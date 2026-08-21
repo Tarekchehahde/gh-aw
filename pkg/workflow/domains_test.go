@@ -9,6 +9,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetDomainEcosystem(t *testing.T) {
@@ -352,7 +353,6 @@ func TestCopilotDefaultDomains(t *testing.T) {
 		"github.com",
 		"host.docker.internal",
 		"raw.githubusercontent.com",
-		"registry.npmjs.org",
 		"telemetry.enterprise.githubcopilot.com",
 	}
 
@@ -367,6 +367,12 @@ func TestCopilotDefaultDomains(t *testing.T) {
 			t.Errorf("Expected domain %q not found in CopilotDefaultDomains", expected)
 		}
 	}
+
+	// Package registries must never be part of the engine defaults: they would be
+	// reachable even when the workflow declares network: {} (see security hardening
+	// for engine default domains).
+	assert.NotContains(t, CopilotDefaultDomains, "registry.npmjs.org",
+		"CopilotDefaultDomains must not include the npm registry; it requires explicit node opt-in")
 
 	// Verify the count matches (no extra domains)
 	if len(CopilotDefaultDomains) != len(expectedDomains) {
@@ -468,7 +474,6 @@ func TestClaudeDefaultDomains(t *testing.T) {
 		"api.github.com",
 		"github.com",
 		"host.docker.internal",
-		"registry.npmjs.org",
 	}
 
 	// Create a map for O(1) lookups
@@ -481,6 +486,13 @@ func TestClaudeDefaultDomains(t *testing.T) {
 		if !domainMap[expected] {
 			t.Errorf("Expected domain %q not found in ClaudeDefaultDomains", expected)
 		}
+	}
+
+	// Package registries must never be part of the engine defaults: they would be
+	// reachable even when the workflow declares network: {}.
+	for _, registry := range []string{"registry.npmjs.org", "pypi.org", "files.pythonhosted.org"} {
+		assert.NotContains(t, ClaudeDefaultDomains, registry,
+			"ClaudeDefaultDomains must not include %q; package registries require explicit node/python opt-in", registry)
 	}
 
 	// Verify minimum count (Claude has many more domains than the critical ones)
@@ -1313,4 +1325,44 @@ func TestMergeAPITargetDomains(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractProviderFromModel(t *testing.T) {
+	t.Run("standard provider/model format", func(t *testing.T) {
+		provider, err := extractProviderFromModel("anthropic/claude-sonnet-4-20250514")
+		require.NoError(t, err)
+		assert.Equal(t, "anthropic", provider)
+
+		provider, err = extractProviderFromModel("openai/gpt-4.1")
+		require.NoError(t, err)
+		assert.Equal(t, "openai", provider)
+
+		provider, err = extractProviderFromModel("google/gemini-2.5-pro")
+		require.NoError(t, err)
+		assert.Equal(t, "google", provider)
+	})
+
+	t.Run("empty model returns empty provider", func(t *testing.T) {
+		provider, err := extractProviderFromModel("")
+		require.NoError(t, err)
+		assert.Empty(t, provider)
+	})
+
+	t.Run("no slash returns empty provider", func(t *testing.T) {
+		provider, err := extractProviderFromModel("claude-sonnet-4-20250514")
+		require.NoError(t, err)
+		assert.Empty(t, provider)
+	})
+
+	t.Run("case insensitive provider", func(t *testing.T) {
+		provider, err := extractProviderFromModel("OpenAI/gpt-4.1")
+		require.NoError(t, err)
+		assert.Equal(t, "openai", provider)
+	})
+
+	t.Run("leading slash returns error", func(t *testing.T) {
+		_, err := extractProviderFromModel("/gpt-4.1")
+		require.Error(t, err, "Leading slash (empty provider prefix) must return an error")
+		require.ErrorContains(t, err, "provider prefix is empty")
+	})
 }

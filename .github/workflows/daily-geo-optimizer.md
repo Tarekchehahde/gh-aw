@@ -16,6 +16,7 @@ tracker-id: daily-geo-optimizer
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 strict: true
 timeout-minutes: 30
 tools:
@@ -37,12 +38,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      REPOSITORY_URL: https://github.com/${{ github.repository }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.11"
 
@@ -65,20 +68,117 @@ jobs:
 
       - name: Audit README via GitHub repository page
         run: |
-          geo audit --url https://github.com/${{ github.repository }} --format json \
+          geo audit --url "$REPOSITORY_URL" --format json \
             > /tmp/gh-aw/agent/geo-optimizer/readme-audit.json 2>&1 || true
+
+      - name: Verify documentation robots.txt
+        run: |
+          # runner-guard:ignore RGS-012 -- unauthenticated GET from the public documentation site; no secrets are sent.
+          ROBOTS_URL="https://github.github.com/gh-aw/robots.txt"
+          ROBOTS_BODY="/tmp/gh-aw/agent/geo-optimizer/docs-robots.txt"
+          rm -f "$ROBOTS_BODY"
+          CURL_METADATA="$(curl --silent --show-error --location --max-time 30 \
+            --output "$ROBOTS_BODY" --write-out '%{http_code}\t%{content_type}' \
+            "$ROBOTS_URL" || true)"
+          IFS=$'\t' read -r HTTP_STATUS CONTENT_TYPE <<< "$CURL_METADATA"
+          FOUND=false
+          if [[ "$HTTP_STATUS" == "200" ]]; then
+            FOUND=true
+          else
+            rm -f "$ROBOTS_BODY"
+          fi
+          jq -n \
+            --arg url "$ROBOTS_URL" \
+            --arg http_status "${HTTP_STATUS:-000}" \
+            --arg content_type "$CONTENT_TYPE" \
+            --argjson found "$FOUND" \
+            '{url: $url, http_status: ($http_status | tonumber), content_type: $content_type, found: $found}' \
+            > /tmp/gh-aw/agent/geo-optimizer/docs-robots-verification.json
+
+      - name: Verify documentation AI discovery files
+        run: |
+          PROJECT_SITE_BASE_URL="https://github.github.com/gh-aw"
+          CHECKS_JSONL="/tmp/gh-aw/agent/geo-optimizer/docs-ai-discovery-verification.jsonl"
+          : > "$CHECKS_JSONL"
+
+          check_url() {
+            local key="$1"
+            local path="$2"
+            local body_path="$3"
+            local url="${PROJECT_SITE_BASE_URL}/${path}"
+            local curl_metadata
+            local http_status
+            local content_type
+            local found=false
+
+            rm -f "$body_path"
+            # runner-guard:ignore RGS-012 -- unauthenticated GET from the public documentation site; no secrets are sent.
+            curl_metadata="$(curl --silent --show-error --location --max-time 30 \
+              --output "$body_path" --write-out '%{http_code}\t%{content_type}' \
+              "$url" || true)"
+            IFS=$'\t' read -r http_status content_type <<< "$curl_metadata"
+            if [[ "$http_status" == "200" ]]; then
+              found=true
+            else
+              rm -f "$body_path"
+            fi
+            jq -n \
+              --arg key "$key" \
+              --arg url "$url" \
+              --arg http_status "${http_status:-000}" \
+              --arg content_type "$content_type" \
+              --arg body_path "$body_path" \
+              --argjson found "$found" \
+              '{
+                key: $key,
+                url: $url,
+                http_status: ($http_status | tonumber),
+                content_type: $content_type,
+                found: $found,
+                body_path: (if $found then $body_path else null end)
+              }' >> "$CHECKS_JSONL"
+          }
+
+          check_url "llms_txt" "llms.txt" "/tmp/gh-aw/agent/geo-optimizer/docs-llms.txt"
+          # Verify the project-scoped AI discovery signal that the docs site serves below /gh-aw.
+          check_url "ai_txt" ".well-known/ai.txt" "/tmp/gh-aw/agent/geo-optimizer/docs-ai.txt"
+          check_url "ai_summary_json" "ai/summary.json" "/tmp/gh-aw/agent/geo-optimizer/docs-ai-summary.json"
+          check_url "ai_faq_json" "ai/faq.json" "/tmp/gh-aw/agent/geo-optimizer/docs-ai-faq.json"
+          check_url "ai_service_json" "ai/service.json" "/tmp/gh-aw/agent/geo-optimizer/docs-ai-service.json"
+
+          jq -s \
+            --arg base_url "$PROJECT_SITE_BASE_URL" \
+            '{
+              base_url: $base_url,
+              checks: ((map(. as $check | {($check.key): ($check | del(.key))}) | add) // {}),
+              summary: {
+                llms_txt_found: (
+                  map(select(.key == "llms_txt")) |
+                  if length > 0 then .[0].found else false end
+                ),
+                ai_discovery_found_count: (map(select(.key | startswith("ai_"))) | map(select(.found)) | length),
+                ai_discovery_total: (map(select(.key | startswith("ai_"))) | length),
+                ai_discovery_all_found: (
+                  map(select(.key | startswith("ai_"))) as $ai_checks |
+                  (($ai_checks | length) > 0 and ($ai_checks | all(.found)))
+                )
+              }
+            }' "$CHECKS_JSONL" \
+            > /tmp/gh-aw/agent/geo-optimizer/docs-ai-discovery-verification.json
 
       - name: Write audit metadata
         run: |
           python3 - <<'EOF'
-          import json, datetime
+          import datetime
+          import json
+          import os
 
           metadata = {
             "run_id": "${{ github.run_id }}",
             "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H-%M-%S"),
             "docs_url": "https://github.github.com/gh-aw/",
-            "readme_url": "https://github.com/${{ github.repository }}",
-            "repository": "${{ github.repository }}",
+            "readme_url": os.environ["REPOSITORY_URL"],
+            "repository": os.environ["GITHUB_REPOSITORY"],
           }
           path = "/tmp/gh-aw/agent/geo-optimizer/metadata.json"
           with open(path, "w") as f:
@@ -121,7 +221,12 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+evals:
+  - id: geo_audit_performed
+    question: Did the agent audit the README and documentation site using the geo-optimizer skill?
+  - id: recommendations_or_pr_created
+    question: Were GEO improvement recommendations produced or a PR created, or was noop used when no improvements were needed?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -152,6 +257,10 @@ ls /tmp/gh-aw/agent/geo-optimizer/
 
 - `docs-site-audit.json` — full GEO audit of `https://github.github.com/gh-aw/`
 - `docs-sitemap-audit.json` — sitemap-wide audit of up to 20 documentation pages
+- `docs-robots-verification.json` — authoritative HTTP check of the GitHub Pages project-site robots.txt
+- `docs-robots.txt` — robots.txt response body when the authoritative check succeeds
+- `docs-ai-discovery-verification.json` — authoritative HTTP checks for the GitHub Pages project-site llms.txt and AI discovery files
+- `docs-llms.txt`, `docs-ai.txt`, `docs-ai-summary.json`, `docs-ai-faq.json`, `docs-ai-service.json` — response bodies when the authoritative checks succeed
 - `readme-audit.json` — GEO audit of the GitHub repository homepage (README)
 - `metadata.json` — run metadata (timestamp, URLs)
 
@@ -161,6 +270,20 @@ Use `cat` and `jq` to inspect the contents of each file. Focus on:
 - Citability score and methods
 - Negative signals detected
 - Scores broken down by area: Robots.txt, llms.txt, Schema JSON-LD, Meta Tags, Content, Brand & Entity, Signals, AI Discovery
+
+For robots.txt findings on the documentation site, treat `docs-robots-verification.json` and
+`docs-robots.txt` as authoritative. The GEO package probes the domain-root `/robots.txt`,
+which does not preserve the `/gh-aw/` base path of this GitHub Pages project site. When the
+verification reports `found: true`, do not report robots.txt as missing; inspect the response
+body before recommending changes to crawler permissions.
+
+For llms.txt and AI discovery findings on the documentation site, treat
+`docs-ai-discovery-verification.json` as authoritative. The GEO package may probe the domain
+root and miss the `/gh-aw/` base path of this GitHub Pages project site. When the authoritative
+verification reports `summary.llms_txt_found: true`, do not report llms.txt as missing. When it
+reports `summary.ai_discovery_all_found: true`, do not report AI discovery files as missing.
+Inspect the downloaded response bodies before recommending changes to llms.txt or AI discovery
+content.
 
 ## Phase 2: Analyze and Summarize
 
@@ -181,7 +304,7 @@ Use today's date derived from the metadata.json timestamp.
 ### Body
 
 ```markdown
-## GEO Audit Report — ${{ github.repository }}
+### GEO Audit Report — ${{ github.repository }}
 
 **Audit Date**: [date from metadata]
 **Run**: [link to run]
@@ -244,6 +367,11 @@ Pick the recommendation that:
 2. Is concrete and actionable (not "improve content quality" in general)
 3. Covers a gap not already tracked by an open issue
 
+If the audit's highest-impact recommendation says documentation-site robots.txt, llms.txt, or AI
+discovery files are missing, first compare it against the authoritative verification files above.
+If the project-site verification found the file or files, treat that recommendation as a scanner
+false negative and select the next actionable recommendation instead.
+
 If **all scores are already Excellent (90+/100)** and there are no actionable recommendations, use `noop` and skip issue creation.
 
 ### Issue title
@@ -253,7 +381,7 @@ If **all scores are already Excellent (90+/100)** and there are no actionable re
 ### Issue body
 
 ```markdown
-## GEO Improvement: <short title>
+### GEO Improvement: <short title>
 
 **Source audit**: [GEO Audit Report — YYYY-MM-DD](<link to the discussion you just created>)
 **Audit date**: <date from metadata>
@@ -282,5 +410,7 @@ If **all scores are already Excellent (90+/100)** and there are no actionable re
 
 
 ### Output Format
+
+Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body. Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks for progressive disclosure.
 
 Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

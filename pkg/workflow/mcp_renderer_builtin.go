@@ -5,6 +5,7 @@ import (
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
 var mcpRendererBuiltinLog = logger.New("workflow:mcp_renderer_builtin")
@@ -27,7 +28,7 @@ func (r *MCPConfigRendererUnified) RenderPlaywrightMCP(yaml *strings.Builder, pl
 	}
 
 	// JSON format
-	renderPlaywrightMCPConfigWithOptions(yaml, playwrightConfig, r.options.IsLast, r.options.IncludeCopilotFields, r.options.InlineArgs, r.options.WriteSinkGuardPolicies)
+	renderPlaywrightMCPConfigWithOptions(yaml, playwrightConfig, r.options.IsLast, r.options.IncludeCopilotFields, r.options.InlineArgs, r.options.WriteSinkGuardPolicies, r.options.ContainerPinMappings)
 }
 
 // renderPlaywrightTOML generates Playwright MCP configuration in TOML format
@@ -37,8 +38,9 @@ func (r *MCPConfigRendererUnified) renderPlaywrightTOML(yaml *strings.Builder, p
 	mcpRendererBuiltinLog.Print("Rendering Playwright MCP in TOML format")
 	customArgs := getPlaywrightCustomArgs(playwrightConfig)
 
-	// Use official Playwright MCP Docker image (no version tag - only one image)
-	playwrightImage := "mcr.microsoft.com/playwright/mcp"
+	// Use official Playwright MCP Docker image (no version tag - only one image).
+	// Apply container_pins mapping so private-cloud runners use the configured mirror.
+	playwrightImage := resolveGatewayContainerFromMappings("mcr.microsoft.com/playwright/mcp", r.options.ContainerPinMappings)
 
 	yaml.WriteString("          \n")
 	yaml.WriteString("          [mcp_servers.playwright]\n")
@@ -97,7 +99,25 @@ func (r *MCPConfigRendererUnified) renderSafeOutputsTOML(yaml *strings.Builder, 
 	yaml.WriteString("          args = [\"-w\", \"$GITHUB_WORKSPACE\"]\n")
 	yaml.WriteString("          entrypoint = \"sh\"\n")
 	yaml.WriteString("          entrypointArgs = [\"-c\", \"sh ${RUNNER_TEMP}/gh-aw/safeoutputs/start_safe_outputs_mcp.sh\"]\n")
-	yaml.WriteString("          env_vars = [\"DEBUG\", \"DEFAULT_BRANCH\", \"GH_AW_ASSETS_ALLOWED_EXTS\", \"GH_AW_ASSETS_BRANCH\", \"GH_AW_ASSETS_MAX_SIZE_KB\", \"GH_AW_MCP_LOG_DIR\", \"GH_AW_SAFE_OUTPUTS\", \"GH_AW_SAFE_OUTPUTS_CONFIG_PATH\", \"GH_AW_SAFE_OUTPUTS_TOOLS_PATH\", \"GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST\", \"GITHUB_REPOSITORY\", \"GITHUB_SHA\", \"GITHUB_TOKEN\", \"GITHUB_WORKSPACE\", \"RUNNER_TEMP\"]\n")
+
+	// Build the env_vars list: fixed vars + any GH_AW_INPUT_* vars referenced by the
+	// safe-outputs config so the nested container can resolve ${GH_AW_INPUT_…} placeholders.
+	safeOutputsEnvVars := []string{
+		"DEBUG", "DEFAULT_BRANCH",
+		"GH_AW_ASSETS_ALLOWED_EXTS", "GH_AW_ASSETS_BRANCH", "GH_AW_ASSETS_MAX_SIZE_KB",
+		"GH_AW_MCP_LOG_DIR", "GH_AW_SAFE_OUTPUTS", "GH_AW_SAFE_OUTPUTS_CONFIG_PATH",
+		"GH_AW_SAFE_OUTPUTS_TOOLS_PATH", "GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST",
+		"GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_REPOSITORY", "GITHUB_SHA",
+		"GITHUB_TOKEN", "GITHUB_WORKSPACE", "RUNNER_TEMP",
+	}
+	if workflowData != nil {
+		safeOutputsEnvVars = append(safeOutputsEnvVars, sliceutil.SortedKeys(workflowData.SafeOutputsInputEnvVars)...)
+	}
+	quoted := make([]string, len(safeOutputsEnvVars))
+	for i, v := range safeOutputsEnvVars {
+		quoted[i] = "\"" + v + "\""
+	}
+	yaml.WriteString("          env_vars = [" + strings.Join(quoted, ", ") + "]\n")
 
 	// Check if GitHub tool has guard-policies configured (or auto-lockdown will run)
 	// If so, generate a linked write-sink guard-policy for safeoutputs
@@ -165,7 +185,7 @@ func (r *MCPConfigRendererUnified) RenderAgenticWorkflowsMCP(yaml *strings.Build
 	}
 
 	// JSON format
-	renderAgenticWorkflowsMCPConfigWithOptions(yaml, r.options.IsLast, r.options.IncludeCopilotFields, r.options.ActionMode, r.options.WriteSinkGuardPolicies)
+	renderAgenticWorkflowsMCPConfigWithOptions(yaml, r.options.IsLast, r.options.IncludeCopilotFields, r.options.ActionMode, r.options.WriteSinkGuardPolicies, r.options.ContainerPinMappings)
 }
 
 // renderAgenticWorkflowsTOML generates Agentic Workflows MCP configuration in TOML format
@@ -196,6 +216,9 @@ func (r *MCPConfigRendererUnified) renderAgenticWorkflowsTOML(yaml *strings.Buil
 		// Mount gh-aw binary, gh CLI binary, workspace, and temp directory
 		mounts = []string{constants.DefaultGhAwMount, constants.DefaultGhBinaryMount, constants.DefaultWorkspaceMount, constants.DefaultTmpGhAwMount}
 	}
+
+	// Apply container_pins mapping so private-cloud runners use the configured mirror.
+	containerImage = resolveGatewayContainerFromMappings(containerImage, r.options.ContainerPinMappings)
 
 	yaml.WriteString("          container = \"" + containerImage + "\"\n")
 
@@ -263,11 +286,25 @@ func renderSafeOutputsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, i
 		{"GH_AW_SAFE_OUTPUTS_CONFIG_PATH", "GH_AW_SAFE_OUTPUTS_CONFIG_PATH", false},
 		{"GH_AW_SAFE_OUTPUTS_TOOLS_PATH", "GH_AW_SAFE_OUTPUTS_TOOLS_PATH", false},
 		{"GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST", "GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST", false},
+		{"GITHUB_EVENT_NAME", "GITHUB_EVENT_NAME", false},
+		{"GITHUB_EVENT_PATH", "GITHUB_EVENT_PATH", false},
 		{"GITHUB_REPOSITORY", "GITHUB_REPOSITORY", false},
 		{"GITHUB_SHA", "GITHUB_SHA", false},
 		{"GITHUB_TOKEN", "GITHUB_TOKEN", false},
 		{"GITHUB_WORKSPACE", "GITHUB_WORKSPACE", false},
 		{"RUNNER_TEMP", "RUNNER_TEMP", false},
+	}
+
+	// Append GH_AW_INPUT_* vars referenced by the safe-outputs config so the nested
+	// container can resolve ${GH_AW_INPUT_…} shell-style placeholders at runtime.
+	if workflowData != nil {
+		for _, name := range sliceutil.SortedKeys(workflowData.SafeOutputsInputEnvVars) {
+			envVars = append(envVars, struct {
+				name      string
+				value     string
+				isLiteral bool
+			}{name, name, false})
+		}
 	}
 
 	for i, envVar := range envVars {
@@ -312,7 +349,7 @@ func renderSafeOutputsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, i
 // renderAgenticWorkflowsMCPConfigWithOptions generates the Agentic Workflows MCP server configuration with engine-specific options
 // Per MCP Gateway Specification v1.0.0 section 3.2.1, stdio-based MCP servers MUST be containerized.
 // Uses MCP Gateway spec format: container, entrypoint, entrypointArgs, and mounts fields.
-func renderAgenticWorkflowsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, includeCopilotFields bool, actionMode ActionMode, guardPolicies map[string]any) {
+func renderAgenticWorkflowsMCPConfigWithOptions(yaml *strings.Builder, isLast bool, includeCopilotFields bool, actionMode ActionMode, guardPolicies map[string]any, containerPinMappings map[string]string) {
 	mcpRendererBuiltinLog.Printf("Rendering Agentic Workflows MCP config: isLast=%v, includeCopilotFields=%v, actionMode=%v", isLast, includeCopilotFields, actionMode)
 
 	// Environment variables: map of env var name to value (literal) or source variable (reference)
@@ -361,6 +398,9 @@ func renderAgenticWorkflowsMCPConfigWithOptions(yaml *strings.Builder, isLast bo
 		// Mount gh-aw binary, gh CLI binary, workspace, and temp directory
 		mounts = []string{constants.DefaultGhAwMount, constants.DefaultGhBinaryMount, constants.DefaultWorkspaceMount, constants.DefaultTmpGhAwMount}
 	}
+
+	// Apply container_pins mapping so private-cloud runners use the configured mirror.
+	containerImage = resolveGatewayContainerFromMappings(containerImage, containerPinMappings)
 
 	yaml.WriteString("                \"container\": \"" + containerImage + "\",\n")
 

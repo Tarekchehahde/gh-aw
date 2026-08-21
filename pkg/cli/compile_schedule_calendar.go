@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
+
+	"github.com/github/gh-aw/pkg/colorwriter"
 	"github.com/github/gh-aw/pkg/console"
 	"github.com/github/gh-aw/pkg/styles"
 	"github.com/github/gh-aw/pkg/tty"
@@ -195,14 +197,17 @@ func intensityChar(count int) string {
 	}
 }
 
-// intensityStyle returns a lipgloss style appropriate for the given trigger
-// count. Styling is TTY-gated so non-interactive output does not emit ANSI.
-func intensityStyle(count int, isTerminal bool) lipgloss.Style {
-	if !isTerminal {
-		// Keep glyph rendering unchanged while preventing ANSI escapes in piped output.
-		return lipgloss.NewStyle()
-	}
+// scheduleCalendarRenderer abstracts the shared Render method implemented by
+// both lipgloss.Style (normal builds) and styles.WasmStyle (js/wasm builds).
+// Using this interface keeps intensityStyle free of a concrete lipgloss.Style
+// return type that would fail to compile for wasm style tokens.
+type scheduleCalendarRenderer interface {
+	Render(...string) string
+}
 
+// intensityStyle returns a centralized style appropriate for the given trigger
+// count.
+func intensityStyle(count int) scheduleCalendarRenderer {
 	switch {
 	case count == 0:
 		return styles.ScheduleCalendarEmpty
@@ -215,6 +220,13 @@ func intensityStyle(count int, isTerminal bool) lipgloss.Style {
 	default:
 		return styles.ScheduleCalendarCritical
 	}
+}
+
+func renderScheduleCalendarCell(count int, text string, isTerminal bool, environ []string) string {
+	if !isTerminal || console.IsAccessibleMode() {
+		return text
+	}
+	return colorwriter.Degrade(intensityStyle(count).Render(text), environ)
 }
 
 // displayScheduleCalendar renders a text heatmap of scheduled workflow times to
@@ -231,10 +243,11 @@ func displayScheduleCalendar(statsList []*WorkflowStats) {
 	}
 
 	isTerminal := tty.IsStderrTerminal()
+	environ := os.Environ()
 
 	// Title
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, console.FormatInfoMessage("Schedule Heatmap (UTC)"))
+	fmt.Fprintln(os.Stderr, console.FormatInfoMessageStderr("Schedule Heatmap (UTC)"))
 	fmt.Fprintln(os.Stderr)
 
 	// Hour header row: each cell is 3 chars wide ("XX ").
@@ -255,7 +268,7 @@ func displayScheduleCalendar(statsList []*WorkflowStats) {
 		cronDay := calendarDayIndex[calendarIndex]
 
 		var row strings.Builder
-		label := fmt.Sprintf("%-*s", dayLabelWidth, dayLabel)
+		label := lipgloss.NewStyle().Width(dayLabelWidth).Render(dayLabel)
 		row.WriteString(console.FormatTableHeaderStderr(label))
 
 		for h := range 24 {
@@ -263,7 +276,7 @@ func displayScheduleCalendar(statsList []*WorkflowStats) {
 			ch := intensityChar(count)
 			// Pad each cell to cellWidth with a trailing space.
 			cell := ch + strings.Repeat(" ", cellWidth-len([]rune(ch)))
-			row.WriteString(intensityStyle(count, isTerminal).Render(cell))
+			row.WriteString(renderScheduleCalendarCell(count, cell, isTerminal, environ))
 		}
 
 		fmt.Fprintln(os.Stderr, row.String())
@@ -281,7 +294,7 @@ func displayScheduleCalendar(statsList []*WorkflowStats) {
 	legend.WriteString("Legend: ")
 	for _, e := range entries {
 		ch := intensityChar(e.count)
-		legend.WriteString(intensityStyle(e.count, isTerminal).Render(ch))
+		legend.WriteString(renderScheduleCalendarCell(e.count, ch, isTerminal, environ))
 		legend.WriteString(" = " + e.label + "   ")
 	}
 	fmt.Fprintln(os.Stderr, legend.String())

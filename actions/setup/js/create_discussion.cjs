@@ -355,6 +355,7 @@ async function main(config = {}) {
   const temporaryIdMap = new Map();
 
   // Initialize create_issue handler for fallback if enabled
+  /** @type {any} */
   let createIssueHandler = null;
   if (fallbackToIssue) {
     const { main: createIssueMain } = require("./create_issue.cjs");
@@ -586,7 +587,7 @@ async function main(config = {}) {
     // Generate footer with expiration using helper
     if (includeFooter) {
       const footer = addExpirationToFooter(markdownParts.footer, expiresHours, "Discussion");
-      bodyLines.push(``, ``, footer);
+      bodyLines.push(``, footer);
     }
 
     // Add standalone workflow-id marker for searchability (consistent with comments)
@@ -629,6 +630,7 @@ async function main(config = {}) {
     // (e.g., close-older-discussions search) unexpectedly escapes its own
     // try-catch and reaches the outer catch, we must NOT fall back to creating
     // an issue — the discussion already exists.
+    /** @type {any} */
     let createdDiscussion = null;
 
     try {

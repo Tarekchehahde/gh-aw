@@ -47,7 +47,13 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
+evals:
+  - id: large_files_analyzed
+    question: Did the agent analyze the largest Go source files in the repository?
+  - id: issue_created_or_noop
+    question: Was a refactoring issue created for files exceeding the healthy size threshold, or was noop used when all files were within limits?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}

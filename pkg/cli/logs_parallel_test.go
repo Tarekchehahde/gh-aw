@@ -14,7 +14,7 @@ import (
 
 func TestDownloadRunArtifactsParallel(t *testing.T) {
 	// Test with empty runs slice
-	results := downloadRunArtifactsConcurrent(context.Background(), []WorkflowRun{}, "./test-logs", false, 5, "", nil)
+	results := downloadRunArtifactsConcurrent(context.Background(), []WorkflowRun{}, runArtifactsConcurrentOptions{outputDir: "./test-logs", maxRuns: 5})
 	if len(results) != 0 {
 		t.Errorf("Expected 0 results for empty runs, got %d", len(results))
 	}
@@ -45,7 +45,7 @@ func TestDownloadRunArtifactsParallel(t *testing.T) {
 
 	// This will fail since we don't have real GitHub CLI access,
 	// but we can verify the structure and that no panics occur
-	results = downloadRunArtifactsConcurrent(context.Background(), runs, "./test-logs", false, 5, "", nil)
+	results = downloadRunArtifactsConcurrent(context.Background(), runs, runArtifactsConcurrentOptions{outputDir: "./test-logs", maxRuns: 5})
 
 	// We expect 2 results even if they fail
 	if len(results) != 2 {
@@ -85,7 +85,7 @@ func TestDownloadRunArtifactsParallelMaxRuns(t *testing.T) {
 	}
 
 	// Pass maxRuns=3 as a hint that we need 3 results, but all runs should be processed
-	results := downloadRunArtifactsConcurrent(context.Background(), runs, "./test-logs", false, 3, "", nil)
+	results := downloadRunArtifactsConcurrent(context.Background(), runs, runArtifactsConcurrentOptions{outputDir: "./test-logs", maxRuns: 3})
 
 	// All runs should be processed to account for potential caching/filtering
 	if len(results) != 5 {
@@ -117,8 +117,9 @@ func TestDownloadResult(t *testing.T) {
 		Status:     "completed",
 	}
 
-	result := DownloadResult{
-		Run:      run,
+	result := DownloadResult{RunAnalysis: RunAnalysis{
+		Run: run,
+	},
 		LogsPath: "./test-path",
 		Skipped:  false,
 		Cached:   false,
@@ -146,8 +147,9 @@ func TestDownloadResult(t *testing.T) {
 	}
 
 	// Test cached result
-	cachedResult := DownloadResult{
-		Run:      run,
+	cachedResult := DownloadResult{RunAnalysis: RunAnalysis{
+		Run: run,
+	},
 		LogsPath: "./test-path",
 		Cached:   true,
 	}
@@ -284,7 +286,7 @@ func TestDownloadRunArtifactsParallelWithCancellation(t *testing.T) {
 	}
 
 	// Download with cancelled context
-	results := downloadRunArtifactsConcurrent(ctx, runs, "./test-logs", false, 5, "", nil)
+	results := downloadRunArtifactsConcurrent(ctx, runs, runArtifactsConcurrentOptions{outputDir: "./test-logs", maxRuns: 5})
 
 	// Should get results for all runs
 	if len(results) != 2 {

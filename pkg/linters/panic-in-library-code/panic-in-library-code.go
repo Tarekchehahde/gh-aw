@@ -11,35 +11,38 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
+var pkgLog = logger.New("linters:panicinlibrarycode")
+
 // Analyzer is the panic-in-library-code analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "panicinlibrarycode",
-	Doc:      "reports panic() calls in library code under pkg/ that should return errors instead",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/panic-in-library-code",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.NewAtPath("panicinlibrarycode", "reports panic() calls in library code under pkg/ that should return errors instead", "panic-in-library-code", run)
 
 func run(pass *analysis.Pass) (any, error) {
-	pkgPath := pass.Pkg.Path()
-	// Skip packages under cmd/ entry-points — they are allowed to call panic.
-	if strings.HasSuffix(pkgPath, "/main") || strings.Contains(pkgPath, "/cmd/") {
-		return nil, nil
-	}
-
 	insp, err := astutil.Inspector(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "panicinlibrarycode")
+
+	pkgPath := pass.Pkg.Path()
+	// Skip packages under cmd/ entry-points — they are allowed to call panic.
+	if strings.HasSuffix(pkgPath, "/main") || strings.Contains(pkgPath, "/cmd/") {
+		pkgLog.Printf("skipping cmd/main package %s", pkgPath)
+		return nil, nil
+	}
+	pkgLog.Printf("analyzing package %s", pkgPath)
+
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
+	if err != nil {
+		return nil, err
+	}
 
 	for cur := range insp.Root().Preorder((*ast.CallExpr)(nil)) {
 		call, ok := cur.Node().(*ast.CallExpr)
@@ -47,7 +50,7 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 		// Skip test files
-		if strings.HasSuffix(pkgPath, ".test") || filecheck.IsTestFile(pass.Fset.Position(call.Pos()).Filename) {
+		if strings.HasSuffix(pkgPath, ".test") || filecheck.ShouldSkipFilename(pass.Fset.Position(call.Pos()).Filename, generatedFiles) {
 			continue
 		}
 
@@ -68,10 +71,11 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 		position := pass.Fset.PositionFor(call.Pos(), false)
-		if nolint.HasDirective(position, noLintLinesByFile) {
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "panicinlibrarycode") {
 			continue
 		}
 
+		pkgLog.Printf("flagging panic() call at %s", position)
 		pass.ReportRangef(call, "avoid panic in library code; return an error instead")
 	}
 
@@ -79,13 +83,13 @@ func run(pass *analysis.Pass) (any, error) {
 }
 
 func shouldSkipPanic(pass *analysis.Pass, call *ast.CallExpr, cur inspector.Cursor) bool {
-	return isInSyncOnceDoFuncLit(pass, cur) ||
+	return isInSyncOnceFuncLit(pass, cur) ||
 		panicMessageStartsWithBUG(pass, call) ||
-		isInInitFunction(cur) ||
+		astutil.IsInInitFunction(cur) ||
 		hasDocumentedPanicContract(cur)
 }
 
-func isInSyncOnceDoFuncLit(pass *analysis.Pass, cur inspector.Cursor) bool {
+func isInSyncOnceFuncLit(pass *analysis.Pass, cur inspector.Cursor) bool {
 	for encl := range cur.Enclosing((*ast.FuncLit)(nil)) {
 		funcLit, ok := encl.Node().(*ast.FuncLit)
 		if !ok {
@@ -96,15 +100,52 @@ func isInSyncOnceDoFuncLit(pass *analysis.Pass, cur inspector.Cursor) bool {
 		if !ok || !containsExpr(call.Args, funcLit) {
 			continue
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Do" {
+		sel, ok := selectorExprFromCallFun(call.Fun)
+		if !ok {
 			continue
 		}
-		if isSyncOnceType(pass.TypesInfo.TypeOf(sel.X)) {
+		if isSyncOnceDoCall(pass, sel) || isSyncOnceConstructorCall(pass, sel) {
 			return true
 		}
 	}
 	return false
+}
+
+func selectorExprFromCallFun(fun ast.Expr) (*ast.SelectorExpr, bool) {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		return f, true
+	case *ast.IndexExpr:
+		sel, ok := f.X.(*ast.SelectorExpr)
+		return sel, ok
+	case *ast.IndexListExpr:
+		sel, ok := f.X.(*ast.SelectorExpr)
+		return sel, ok
+	default:
+		return nil, false
+	}
+}
+
+func isSyncPackageFunc(pass *analysis.Pass, sel *ast.SelectorExpr, names ...string) bool {
+	if !slices.Contains(names, sel.Sel.Name) {
+		return false
+	}
+	obj := pass.TypesInfo.Uses[sel.Sel]
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+	return obj.Pkg().Path() == "sync" && slices.Contains(names, obj.Name())
+}
+
+func isSyncOnceDoCall(pass *analysis.Pass, sel *ast.SelectorExpr) bool {
+	if sel.Sel.Name != "Do" {
+		return false
+	}
+	return isSyncOnceType(pass.TypesInfo.TypeOf(sel.X))
+}
+
+func isSyncOnceConstructorCall(pass *analysis.Pass, sel *ast.SelectorExpr) bool {
+	return isSyncPackageFunc(pass, sel, "OnceValue", "OnceFunc")
 }
 
 func containsExpr(args []ast.Expr, target ast.Expr) bool {
@@ -171,26 +212,6 @@ func isFmtSprintf(pass *analysis.Pass, call *ast.CallExpr) bool {
 	}
 	if obj := pass.TypesInfo.Uses[sel.Sel]; obj != nil {
 		return obj.Pkg() != nil && obj.Pkg().Path() == "fmt"
-	}
-	return false
-}
-
-// isInInitFunction reports whether the panic is inside a top-level init()
-// function. Only top-level (no receiver) init functions are recognized;
-// methods named init are ordinary methods and are not exempt.
-func isInInitFunction(cur inspector.Cursor) bool {
-	for encl := range cur.Enclosing((*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)) {
-		if _, isFuncLit := encl.Node().(*ast.FuncLit); isFuncLit {
-			return false
-		}
-		decl, ok := encl.Node().(*ast.FuncDecl)
-		if !ok {
-			break
-		}
-		if decl.Recv == nil && decl.Name != nil && decl.Name.Name == "init" {
-			return true
-		}
-		break // only check the immediate enclosing FuncDecl
 	}
 	return false
 }

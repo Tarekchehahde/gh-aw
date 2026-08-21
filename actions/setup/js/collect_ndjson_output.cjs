@@ -18,6 +18,7 @@ async function main() {
 
     // Load validation config from file and set it in environment for the validator to read
     const validationConfigPath = process.env.GH_AW_VALIDATION_CONFIG_PATH || `${process.env.RUNNER_TEMP}/gh-aw/safeoutputs/validation.json`;
+    /** @type {any} */
     let validationConfig = null;
     try {
       if (fs.existsSync(validationConfigPath)) {
@@ -111,12 +112,12 @@ async function main() {
     }
     function validateItemWithSafeJobConfig(item, jobConfig, lineNum) {
       const errors = [];
-      const normalizedItem = { ...item };
-      if (!jobConfig.inputs) {
+      const normalizedItem = { type: item.type };
+      if (!jobConfig || typeof jobConfig !== "object" || !jobConfig.inputs) {
         return {
           isValid: true,
           errors: [],
-          normalizedItem: item,
+          normalizedItem,
         };
       }
       for (const [fieldName, inputSchema] of Object.entries(jobConfig.inputs)) {
@@ -180,6 +181,22 @@ async function main() {
       return;
     }
     if (!fs.existsSync(outputFile)) {
+      // Before treating a missing outputs file as a graceful no-op, check whether
+      // the safeoutputs MCP gateway reported 0 registered tools during setup.
+      // When that flag exists the agent could not emit any safe outputs because
+      // every safeoutputs call failed with "unknown tool" — this is a gateway
+      // infrastructure failure, not an intentional no-op, and must surface as an
+      // error rather than a silent green run.
+      const runnerTemp = process.env.RUNNER_TEMP || "/home/runner/work/_temp";
+      const gatewayEmptyFlagPath = `${runnerTemp}/gh-aw/safeoutputs/gateway_empty.flag`;
+      if (fs.existsSync(gatewayEmptyFlagPath)) {
+        core.setFailed(
+          `safeoutputs MCP gateway registered 0 tools during setup; the agent could not emit any safe outputs. ` +
+            `This is a gateway infrastructure failure, not a normal no-op. ` +
+            `Check the MCP gateway startup logs for ECONNRESET errors or delayed backend registration and re-run the workflow.`
+        );
+        return;
+      }
       core.info(`Output file does not exist: ${outputFile} — no safe-output items were emitted; treating as empty collection (graceful no-op)`);
       const emptyOutput = { items: [], errors: [] };
       const emptyOutputJson = JSON.stringify(emptyOutput);
@@ -207,6 +224,7 @@ async function main() {
     }
     core.info(`Raw output content length: ${outputContent.length}`);
     core.info(`[INGESTION] First 500 chars of output: ${outputContent.substring(0, 500)}`);
+    /** @type {any} */
     let expectedOutputTypes = {};
     if (safeOutputsConfig) {
       try {
@@ -324,6 +342,16 @@ async function main() {
 
         const typeConfig = expectedOutputTypes[itemType];
         const normalizeIssueClosingKeywords = typeConfig !== null && typeof typeConfig === "object" && typeConfig.normalize_closing_keywords === true;
+        if (itemType === "dispatch_workflow") {
+          const hasWorkflowName = typeof item.workflow_name === "string" && item.workflow_name.trim().length > 0;
+          if (!hasWorkflowName && typeConfig !== null && typeof typeConfig === "object" && Array.isArray(typeConfig.workflows)) {
+            const { workflows: configuredWorkflows } = typeConfig;
+            if (configuredWorkflows.length === 1 && typeof configuredWorkflows[0] === "string" && configuredWorkflows[0].trim().length > 0) {
+              item.workflow_name = configuredWorkflows[0].trim();
+              core.info(`[INGESTION] Line ${i + 1}: Inferred dispatch_workflow workflow_name='${item.workflow_name}' from safe-outputs config`);
+            }
+          }
+        }
 
         // Use the validation engine to validate the item
         if (hasValidationConfig(itemType)) {
@@ -331,6 +359,8 @@ async function main() {
             allowedAliases: allowedMentions,
             maxBotMentions,
             normalizeIssueClosingKeywords,
+            dataEnabled: typeConfig !== null && typeof typeConfig === "object" && typeConfig.data_enabled === true,
+            dataSchema: typeConfig !== null && typeof typeConfig === "object" ? typeConfig.data_schema : undefined,
           });
           if (!validationResult.isValid) {
             if (validationResult.error) {
@@ -350,16 +380,13 @@ async function main() {
             continue;
           }
           const safeJobConfig = jobOutputType;
-          if (safeJobConfig && safeJobConfig.inputs) {
-            const validation = validateItemWithSafeJobConfig(item, safeJobConfig, i + 1);
-            if (!validation.isValid) {
-              errors.push(...validation.errors);
-              continue;
-            }
-            Object.assign(item, validation.normalizedItem);
+          const validation = validateItemWithSafeJobConfig(item, safeJobConfig, i + 1);
+          if (!validation.isValid) {
+            errors.push(...validation.errors);
+            continue;
           }
           core.info(`Line ${i + 1}: Valid ${itemType} item`);
-          parsedItems.push(item);
+          parsedItems.push(validation.normalizedItem);
         }
       } catch (error) {
         const errorMsg = getErrorMessage(error);

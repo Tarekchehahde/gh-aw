@@ -47,7 +47,7 @@ No frontmatter here.
 
 	_, err := compiler.ParseWorkflowString(markdown, "workflow.md")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "frontmatter")
+	require.ErrorContains(t, err, "frontmatter")
 }
 
 func TestParseWorkflowString_InvalidFrontmatterYAML(t *testing.T) {
@@ -90,6 +90,46 @@ tools:
 
 	var sharedErr *SharedWorkflowError
 	assert.ErrorAs(t, err, &sharedErr, "expected SharedWorkflowError")
+}
+
+func TestParseWorkflowString_CommentOnlyFrontmatter_IsSharedWorkflow(t *testing.T) {
+	markdown := `---
+# Shared workflow guidance
+# comment-only frontmatter
+---
+
+# Shared tools component
+`
+
+	compiler := NewCompiler(
+		WithNoEmit(true),
+		WithSkipValidation(true),
+	)
+
+	_, err := compiler.ParseWorkflowString(markdown, "shared/comment-only.md")
+	require.Error(t, err)
+
+	var sharedErr *SharedWorkflowError
+	assert.ErrorAs(t, err, &sharedErr, "expected SharedWorkflowError")
+}
+
+func TestParseWorkflowString_WhitespaceOnlyFrontmatter_IsMissing(t *testing.T) {
+	markdown := `---
+   
+	
+---
+
+# Shared tools component
+`
+
+	compiler := NewCompiler(
+		WithNoEmit(true),
+		WithSkipValidation(true),
+	)
+
+	_, err := compiler.ParseWorkflowString(markdown, "shared/whitespace-only.md")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no frontmatter found")
 }
 
 func TestParseWorkflowString_RedirectOnlyDetection(t *testing.T) {
@@ -187,6 +227,37 @@ bogus-field: true
 	assert.Contains(t, errorStr, "virtual/workflow.md:3:1: error:")
 }
 
+func TestParseWorkflowString_JobsInputsValidationReportedBeforeSchemaErrors(t *testing.T) {
+	markdown := `---
+name: jobs-inputs-test
+on: push
+engine: copilot
+jobs:
+  my-job:
+    runs-on: ubuntu-latest
+    inputs:
+      greeting:
+        description: Greeting
+    steps:
+      - run: echo hi
+---
+
+# Test
+`
+
+	compiler := NewCompiler(
+		WithNoEmit(true),
+		WithSkipValidation(true),
+	)
+
+	_, err := compiler.ParseWorkflowString(markdown, "virtual/workflow.md")
+	require.Error(t, err)
+
+	errorStr := err.Error()
+	assert.Contains(t, errorStr, "jobs.my-job.inputs: inputs are not supported on jobs")
+	assert.NotContains(t, errorStr, "Unknown property: inputs")
+}
+
 func TestCompileToYAML_BasicCompilation(t *testing.T) {
 	markdown := `---
 name: compile-test
@@ -216,6 +287,39 @@ Greet the user warmly.
 	assert.Contains(t, yaml, "name:")
 	assert.Contains(t, yaml, "on:")
 	assert.Contains(t, yaml, "jobs:")
+}
+
+func TestCompileToYAML_GHESCompatPinsStringAPI(t *testing.T) {
+	markdown := `---
+name: ghes-string-api
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+engine: copilot
+strict: false
+steps:
+  - name: Upload test artifact
+    uses: actions/upload-artifact@v7
+    with:
+      name: test
+      path: test.txt
+---
+
+# GHES string API pins
+`
+
+	compiler := NewCompiler()
+	compiler.SetGHESCompat(true)
+	wd, err := compiler.ParseWorkflowString(markdown, "workflow.md")
+	require.NoError(t, err)
+
+	yaml, err := compiler.CompileToYAML(wd, "workflow.md")
+	require.NoError(t, err)
+	assert.Contains(t, yaml, "actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2")
+	assert.Contains(t, yaml, "actions/download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59 # v3.1.0")
+	assert.NotContains(t, yaml, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7")
+	assert.NotContains(t, yaml, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8")
 }
 
 func TestCompileToYAML_OutputContainsWorkflowName(t *testing.T) {

@@ -15,10 +15,9 @@ permissions:
 
 tracker-id: daily-function-namer
 
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
-
 imports:
   - uses: shared/daily-audit-base.md
     with:
@@ -37,7 +36,7 @@ safe-outputs:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
 tools:
   cli-proxy: true
   cache-memory: true
@@ -50,6 +49,11 @@ timeout-minutes: 30
 strict: true
 features:
   gh-aw-detection: true
+evals:
+  - id: package_analyzed
+    question: Did the agent analyze at least one Go package for function naming quality and discoverability?
+  - id: issue_created_or_noop
+    question: Was an issue created with function rename suggestions, or was noop used when no naming improvements were identified?
 ---
 
 # Daily Go Function Namer
@@ -436,4 +440,6 @@ Only include a rename suggestion if you are confident it would measurably improv
 
 ### Output Format
 
-Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+- Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body.
+- Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks to reduce scrolling.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

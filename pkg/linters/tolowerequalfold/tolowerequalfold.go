@@ -8,39 +8,43 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
+	"github.com/github/gh-aw/pkg/linters/internal/coverage"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
+var pkgLog = logger.New("linters:tolowerequalfold")
+
 // Analyzer is the tolower-equalfold analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "tolowerequalfold",
-	Doc:      "reports case-insensitive string comparisons using strings.ToLower/ToUpper that should use strings.EqualFold",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/tolowerequalfold",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
+var Analyzer = analyzerutil.New("tolowerequalfold", "reports case-insensitive string comparisons using strings.ToLower/ToUpper that should use strings.EqualFold", run)
+
+// hotThreshold gates findings on coverage data; see coverage package docs.
+var hotThreshold *int
+
+func init() {
+	hotThreshold = coverage.RegisterHotThresholdFlag(Analyzer)
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	insp, err := astutil.Inspector(pass)
+	pkgLog.Printf("analyzing package %s", pass.Pkg.Path())
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "tolowerequalfold")
 	caseConvAliases := collectCaseConvAliases(pass)
 
 	nodeFilter := []ast.Node{
 		(*ast.BinaryExpr)(nil),
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
 		expr, ok := n.(*ast.BinaryExpr)
 		if !ok {
 			return
@@ -49,7 +53,7 @@ func run(pass *analysis.Pass) (any, error) {
 			return
 		}
 
-		if filecheck.IsTestFile(pass.Fset.Position(expr.Pos()).Filename) {
+		if filecheck.ShouldSkipFilename(pass.Fset.Position(expr.Pos()).Filename, generatedFiles) {
 			return
 		}
 
@@ -67,9 +71,13 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 
 		if isEquivalentToEqualFold(pass, expr, caseConvAliases) {
-			if nolint.HasDirective(pass.Fset.PositionFor(expr.Pos(), false), noLintLinesByFile) {
+			if nolint.HasDirectiveForLinter(pass.Fset.PositionFor(expr.Pos(), false), noLintIndex, "tolowerequalfold") {
 				return
 			}
+			if !coverage.ShouldApply(pass, expr.Pos(), *hotThreshold) {
+				return
+			}
+			pkgLog.Printf("flagging case-insensitive comparison at %s", pass.Fset.PositionFor(expr.Pos(), false))
 			pass.Report(analysis.Diagnostic{
 				Pos:            expr.Pos(),
 				End:            expr.End(),
@@ -78,8 +86,6 @@ func run(pass *analysis.Pass) (any, error) {
 			})
 		}
 	})
-
-	return nil, nil
 }
 
 // buildEqualFoldFix returns a SuggestedFix that rewrites a direct
@@ -288,19 +294,6 @@ func caseConvFuncName(pass *analysis.Pass, n ast.Node) (string, bool) {
 	return name, ok
 }
 
-// stringLitValue returns the unquoted string value of a string-literal AST node.
-func stringLitValue(expr ast.Expr) (string, bool) {
-	lit, ok := expr.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return "", false
-	}
-	s, err := strconv.Unquote(lit.Value)
-	if err != nil {
-		return "", false
-	}
-	return s, true
-}
-
 // literalCaseMatchesConv reports whether lit is already in the correct case for
 // funcName and uses ASCII-only characters. This conservative guard avoids Unicode
 // simple-fold mismatches where ToLower/ToUpper equality and EqualFold differ.
@@ -347,7 +340,7 @@ func caseConvIsCompatible(pass *analysis.Pass, convSide ast.Node, otherSide ast.
 		return false
 	}
 	// String-literal operand: the literal must already be in the correct case.
-	if lit, ok := stringLitValue(otherSide); ok {
+	if lit, ok := astutil.StringLitValue(otherSide); ok {
 		return literalCaseMatchesConv(funcName, lit)
 	}
 	return false
@@ -368,7 +361,7 @@ func caseConvAliasIsCompatible(pass *analysis.Pass, aliasExpr ast.Expr, litExpr 
 	if !ok {
 		return false
 	}
-	lit, ok := stringLitValue(litExpr)
+	lit, ok := astutil.StringLitValue(litExpr)
 	if !ok {
 		return false
 	}

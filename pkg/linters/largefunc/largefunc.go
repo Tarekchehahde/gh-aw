@@ -6,27 +6,20 @@ import (
 	"go/ast"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 
-	"github.com/github/gh-aw/pkg/linters/internal/astutil"
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
-var log = logger.New("linters:largefunc")
+var pkgLog = logger.New("linters:largefunc")
 
 // DefaultMaxLines is the default maximum number of lines allowed in a function body.
 const DefaultMaxLines = 60
 
 // Analyzer is the large-function analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "largefunc",
-	Doc:      "reports functions whose body exceeds the line limit (default 60 lines)",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/largefunc",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("largefunc", "reports functions whose body exceeds the line limit (default 60 lines)", run)
 
 // maxLines is the configurable threshold.  It is set via the -largefunc.max-lines flag.
 var maxLines int
@@ -37,61 +30,59 @@ func init() {
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	log.Printf("analyzing package %s (max-lines=%d)", pass.Pkg.Path(), maxLines)
+	pkgLog.Printf("analyzing package %s (max-lines=%d)", pass.Pkg.Path(), maxLines)
 
-	insp, err := astutil.Inspector(pass)
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
 	if err != nil {
 		return nil, err
 	}
-	noLintLinesByFile := nolint.BuildLineIndex(pass, "largefunc")
 
-	nodeFilter := []ast.Node{
-		(*ast.FuncDecl)(nil),
-		(*ast.FuncLit)(nil),
+	nodeFilter := []ast.Node{(*ast.FuncDecl)(nil), (*ast.FuncLit)(nil)}
+	return analyzerutil.Preorder(pass, nodeFilter, func(n ast.Node) {
+		checkFuncBodyLength(pass, n, generatedFiles, noLintIndex)
+	})
+}
+
+// checkFuncBodyLength reports a diagnostic when the body of a function
+// declaration or literal exceeds maxLines.
+func checkFuncBodyLength(pass *analysis.Pass, n ast.Node, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex) {
+	var body *ast.BlockStmt
+	var name string
+	var reportNode ast.Node
+
+	switch fn := n.(type) {
+	case *ast.FuncDecl:
+		body = fn.Body
+		name = fn.Name.Name
+		reportNode = fn.Name
+	case *ast.FuncLit:
+		body = fn.Body
+		name = "func literal"
+		reportNode = body
 	}
 
-	insp.Preorder(nodeFilter, func(n ast.Node) {
-		var body *ast.BlockStmt
-		var name string
-		var reportNode ast.Node
+	if body == nil {
+		return
+	}
 
-		switch fn := n.(type) {
-		case *ast.FuncDecl:
-			body = fn.Body
-			name = fn.Name.Name
-			reportNode = fn.Name
-		case *ast.FuncLit:
-			body = fn.Body
-			name = "func literal"
-			reportNode = body
-		}
+	position := pass.Fset.PositionFor(reportNode.Pos(), false)
+	if filecheck.ShouldSkipFilename(position.Filename, generatedFiles) {
+		return
+	}
 
-		if body == nil {
+	start := pass.Fset.Position(body.Lbrace)
+	end := pass.Fset.Position(body.Rbrace)
+	lines := end.Line - start.Line - 1 // subtract 1: exclude the closing brace line, count only body lines
+
+	if lines > maxLines {
+		if nolint.HasDirectiveForLinter(position, noLintIndex, "largefunc") {
 			return
 		}
-
-		position := pass.Fset.PositionFor(reportNode.Pos(), false)
-		if filecheck.IsTestFile(position.Filename) {
-			return
-		}
-
-		start := pass.Fset.Position(body.Lbrace)
-		end := pass.Fset.Position(body.Rbrace)
-		// Subtract 1 to exclude the closing brace line itself, counting only body lines.
-		lines := end.Line - start.Line - 1
-
-		if lines > maxLines {
-			if nolint.HasDirective(position, noLintLinesByFile) {
-				return
-			}
-			log.Printf("flagging %s: %d lines exceeds limit %d", name, lines, maxLines)
-			pass.ReportRangef(
-				reportNode,
-				"%s is %d lines long (limit: %d); consider breaking it up",
-				name, lines, maxLines,
-			)
-		}
-	})
-
-	return nil, nil
+		pkgLog.Printf("flagging %s: %d lines exceeds limit %d", name, lines, maxLines)
+		pass.ReportRangef(
+			reportNode,
+			"%s is %d lines long (limit: %d); consider breaking it up",
+			name, lines, maxLines,
+		)
+	}
 }

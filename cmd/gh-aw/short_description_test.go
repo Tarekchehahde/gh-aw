@@ -15,8 +15,10 @@ import (
 // - No trailing punctuation (periods, exclamation marks, question marks)
 // - This is a common convention for CLI tools (e.g., Git, kubectl, gh)
 func TestShortDescriptionConsistency(t *testing.T) {
+	t.Parallel()
 	for _, cmd := range collectCommandTree(rootCmd) {
 		t.Run("command "+cmd.Name()+" has no trailing punctuation", func(t *testing.T) {
+			t.Parallel()
 			short := cmd.Short
 			if short == "" {
 				t.Skip("Command has no Short description")
@@ -46,6 +48,7 @@ func collectCommandTree(root *cobra.Command) []*cobra.Command {
 // sentences with punctuation, in contrast to Short descriptions.
 // This is a documentation test that logs informational messages rather than failing.
 func TestLongDescriptionHasSentences(t *testing.T) {
+	t.Parallel()
 	// Sample commands that have Long descriptions
 	commandsWithLong := []*cobra.Command{
 		rootCmd,
@@ -60,6 +63,7 @@ func TestLongDescriptionHasSentences(t *testing.T) {
 
 	for _, cmd := range commandsWithLong {
 		t.Run("command "+cmd.Name()+" Long description uses sentences", func(t *testing.T) {
+			t.Parallel()
 			long := strings.TrimSpace(cmd.Long)
 			if long == "" {
 				t.Skip("Command has no Long description")

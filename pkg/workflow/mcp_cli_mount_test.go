@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/github/gh-aw/pkg/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -215,7 +216,15 @@ func TestBuildMCPCLIPromptSection_PromptFileUsesNonHeadingLabels(t *testing.T) {
 
 	section := buildMCPCLIPromptSection(data)
 	require.NotNil(t, section)
-	assert.Equal(t, mcpCLIToolsPromptFile, section.Content)
+	assert.Equal(t, mcpCLIToolsWithSafeOutputsPromptFile, section.Content)
+	// GH_AW_MCP_CLI_SERVERS_LIST must be a compile-time static value, NOT a step output
+	// reference. Referencing steps.mount-mcp-clis (agent job) inside the activation job's
+	// env block is out of scope and triggers actionlint errors.
+	serversList := section.EnvVars["GH_AW_MCP_CLI_SERVERS_LIST"]
+	assert.NotEmpty(t, serversList, "server list must not be empty")
+	assert.NotContains(t, serversList, "${{", "server list must not use a GitHub Actions expression (step output reference is out of scope in activation job)")
+	assert.Contains(t, serversList, "safeoutputs", "server list must mention the safeoutputs server")
+	assert.Contains(t, serversList, "--help", "server list must guide agents to use --help for tool signatures")
 
 	wd, err := os.Getwd()
 	require.NoError(t, err)
@@ -225,5 +234,113 @@ func TestBuildMCPCLIPromptSection_PromptFileUsesNonHeadingLabels(t *testing.T) {
 	prompt := string(content)
 	assert.NotRegexp(t, `(?m)^\s*(>\s*)?##\s+`, prompt, "prompt must not contain H2 Markdown headings")
 	assert.NotRegexp(t, `(?m)^\s*(>\s*)?###\s+`, prompt, "prompt must not contain H3 Markdown headings")
-	assert.Contains(t, prompt, "Use `<server> --help` for tool names, parameters, and examples before calling any command.")
+	assert.Contains(t, prompt, "Use `<server> --help` and `<server> <tool> --help` for the same schema-derived signatures and examples before calling any command.")
+}
+
+func TestBuildMCPCLIPromptSection_UsesBaseTemplateWithoutSafeOutputs(t *testing.T) {
+	data := &WorkflowData{
+		MCPScripts: &MCPScriptsConfig{
+			Tools: map[string]*MCPScriptToolConfig{
+				"hello": {Name: "hello", Script: "return 'ok';"},
+			},
+		},
+	}
+
+	section := buildMCPCLIPromptSection(data)
+	require.NotNil(t, section)
+	assert.Equal(t, mcpCLIToolsPromptFile, section.Content)
+}
+
+func TestGetMCPCLIServerNames_CopilotIncludesManifestServersInPromptList(t *testing.T) {
+	t.Run("copilot adds github and custom MCP servers when CLI mounts are active", func(t *testing.T) {
+		data := &WorkflowData{
+			EngineConfig: &EngineConfig{ID: string(constants.CopilotEngine)},
+			Tools: map[string]any{
+				"github": true,
+				"azure-devops": map[string]any{
+					"command": "azure-devops-mcp",
+				},
+			},
+			ParsedTools: NewTools(map[string]any{"github": true}),
+			SafeOutputs: &SafeOutputsConfig{
+				CreateIssues: &CreateIssuesConfig{},
+			},
+		}
+
+		servers := getMCPCLIServerNames(data)
+		assert.Equal(t,
+			[]string{"azure-devops", constants.GitHubMCPServerID.String(), constants.SafeOutputsMCPServerID.String()},
+			servers,
+			"server list should contain all mounted servers in sorted order",
+		)
+	})
+
+	t.Run("copilot with cli-proxy only and github MCP (no safeoutputs) still advertises github", func(t *testing.T) {
+		// Regression: len(servers)==0 before the Copilot block because GitHub is
+		// excluded from the initial collection. The activation condition must include
+		// ParsedTools.CLIProxy so this case is not silently skipped.
+		tools := map[string]any{
+			"github":       true,
+			"cli-proxy":    true,
+			"azure-devops": map[string]any{"command": "azure-devops-mcp"},
+		}
+		data := &WorkflowData{
+			EngineConfig: &EngineConfig{ID: string(constants.CopilotEngine)},
+			Tools:        tools,
+			ParsedTools:  NewTools(tools),
+			// No SafeOutputs, no MCPScripts → servers is empty before the Copilot block
+		}
+
+		servers := getMCPCLIServerNames(data)
+		assert.Equal(t,
+			[]string{"azure-devops", constants.GitHubMCPServerID.String()},
+			servers,
+			"server list should contain all mounted servers in sorted order",
+		)
+	})
+
+	t.Run("copilot without any CLI mount trigger returns nil (github not added)", func(t *testing.T) {
+		// Boundary condition: no safeoutputs, no mcpscripts, no cli-proxy.
+		// The Copilot augmentation block must not activate and github must not appear.
+		data := &WorkflowData{
+			EngineConfig: &EngineConfig{ID: string(constants.CopilotEngine)},
+			Tools:        map[string]any{"github": true},
+			ParsedTools:  NewTools(map[string]any{"github": true}),
+			// SafeOutputs intentionally nil, CLIProxy false
+		}
+
+		servers := getMCPCLIServerNames(data)
+		assert.Nil(t, servers, "no CLI mount trigger active → Copilot block skipped, github not advertised")
+	})
+
+	t.Run("non-copilot keeps existing behavior", func(t *testing.T) {
+		data := &WorkflowData{
+			EngineConfig: &EngineConfig{ID: string(constants.ClaudeEngine)},
+			Tools: map[string]any{
+				"github": true,
+				"azure-devops": map[string]any{
+					"command": "azure-devops-mcp",
+				},
+			},
+			ParsedTools: NewTools(map[string]any{"github": true}),
+			SafeOutputs: &SafeOutputsConfig{
+				CreateIssues: &CreateIssuesConfig{},
+			},
+		}
+
+		servers := getMCPCLIServerNames(data)
+		assert.Equal(t, []string{constants.SafeOutputsMCPServerID.String()}, servers)
+	})
+}
+
+func TestBuildMCPCLIPromptSection_OmittedWhenBashDisabled(t *testing.T) {
+	data := &WorkflowData{
+		BashDisabled: true,
+		SafeOutputs: &SafeOutputsConfig{
+			AddLabels: &AddLabelsConfig{},
+		},
+	}
+
+	require.NotEmpty(t, getMCPCLIServerNames(data), "safeoutputs is still CLI-mounted")
+	assert.Nil(t, buildMCPCLIPromptSection(data), "CLI-only instructions must be omitted when the agent has no shell")
 }

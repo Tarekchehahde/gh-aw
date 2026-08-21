@@ -113,8 +113,8 @@ var defaultsGetCurrentRepoSlug = GetCurrentRepoSlug
 func NewEnvCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "env",
-		Short: "Manage compiler defaults as GitHub variables",
-		Long: `Manage compiler default variables in batch for repository, organization, or enterprise scope.
+		Short: "Manage compiler defaults as GitHub Actions variables",
+		Long: `Manage compiler default variables in bulk for a repository, organization, or enterprise scope.
 
 The YAML file is flat and uses default_-prefixed lowercase keys (e.g., default_max_turns).
 Set a field to null (or omit it) in update mode to delete the variable from the selected scope.
@@ -126,6 +126,7 @@ Any field with a non-null string value will be set or updated.`,
 
 	cmd.AddCommand(newDefaultsGetCommand())
 	cmd.AddCommand(newDefaultsUpdateCommand())
+	cmd.AddCommand(newLegacyGHGuardSubcommand())
 	return cmd
 }
 
@@ -134,7 +135,7 @@ func newDefaultsGetCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "get [file]",
-		Short: "Download defaults into a YAML file",
+		Short: "Download default compiler variables into a YAML file",
 		Long: `Download compiler defaults into a YAML file.
 
 When [file] is omitted, the command writes to file.yml in the current directory.
@@ -159,7 +160,7 @@ Scope resolution:
 	}
 
 	cmd.Flags().StringVar(&scope, "scope", "", "Variable scope (repo|org|ent). Defaults to repo")
-	cmd.Flags().StringVarP(&repo, "repo", "r", "", "Target repository in owner/repo format. When omitted, defaults to current repository")
+	cmd.Flags().StringVarP(&repo, "repo", "r", "", "Target repository (owner/repo format only; GHES host prefixes are not supported). Defaults to current repository")
 	cmd.Flags().StringVar(&org, "org", "", "Target organization (required for --scope org unless inferable from --repo/current repo)")
 	cmd.Flags().StringVar(&enterprise, "enterprise", "", "Target enterprise slug (required for --scope ent)")
 	return cmd
@@ -171,7 +172,7 @@ func newDefaultsUpdateCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "update [file]",
-		Short: "Upload defaults from a YAML file",
+		Short: "Upload default compiler variables from a YAML file",
 		Long: `Upload compiler defaults from a YAML file.
 
 When [file] is omitted, the command reads from file.yml in the current directory.
@@ -198,7 +199,7 @@ Scope and flag behavior:
 	}
 
 	cmd.Flags().StringVar(&scope, "scope", "", "Variable scope (repo|org|ent)")
-	cmd.Flags().StringVarP(&repo, "repo", "r", "", "Target repository in owner/repo format. When omitted, defaults to current repository")
+	cmd.Flags().StringVarP(&repo, "repo", "r", "", "Target repository (owner/repo format only; GHES host prefixes are not supported). Defaults to current repository")
 	cmd.Flags().StringVar(&org, "org", "", "Target organization (required for --scope org unless inferable from --repo/current repo)")
 	cmd.Flags().StringVar(&enterprise, "enterprise", "", "Target enterprise slug (required for --scope ent)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")

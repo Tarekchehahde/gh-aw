@@ -121,9 +121,9 @@ func (c *Compiler) extractSandboxConfig(frontmatter map[string]any) *SandboxConf
 		config.MCP = c.extractMCPGatewayConfig(mcpVal)
 	}
 
-	// If we found agent field, return the new format config
-	if config.Agent != nil {
-		frontmatterExtractionSecurityLog.Print("Sandbox configured with new format (agent)")
+	// Agent and MCP select the new sandbox format.
+	if config.Agent != nil || config.MCP != nil {
+		frontmatterExtractionSecurityLog.Print("Sandbox configured with new format")
 		return config
 	}
 
@@ -204,22 +204,6 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		}
 	}
 
-	// Extract sudo (AWF topology egress mode).
-	// Semantics are inverted from the frontmatter field:
-	//   sudo: false  → no sudo = network isolation mode  → NetworkIsolation=true
-	//   sudo: true   → sudo enabled = normal mode        → NetworkIsolation=false  (deprecated; error in strict mode, warning otherwise)
-	//   (omitted)    → default = network isolation mode  → NetworkIsolation=true   (same as sudo: false)
-	agentConfig.NetworkIsolation = true // Default: sudo: false (network isolation enabled)
-	if sudoVal, hasSudo := agentObj["sudo"]; hasSudo {
-		if sudoBool, ok := sudoVal.(bool); ok {
-			agentConfig.NetworkIsolation = !sudoBool
-			if sudoBool {
-				// sudo: true was explicitly set; record it so validation can warn/error.
-				agentConfig.SudoExplicitlyEnabled = true
-			}
-		}
-	}
-
 	// Extract config for SRT
 	if configVal, hasConfig := agentObj["config"]; hasConfig {
 		agentConfig.Config = c.extractSRTConfig(configVal)
@@ -266,11 +250,48 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 		}
 	}
 
+	// Extract memory (memory limit for the AWF container)
+	if memoryVal, hasMemory := agentObj["memory"]; hasMemory {
+		if memoryStr, ok := memoryVal.(string); ok {
+			agentConfig.Memory = memoryStr
+			frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.memory: %s", memoryStr)
+		}
+	}
+
 	// Extract runtime (container runtime for the agent container)
 	if runtimeVal, hasRuntime := agentObj["runtime"]; hasRuntime {
 		if runtimeStr, ok := runtimeVal.(string); ok {
 			agentConfig.Runtime = AgentRuntime(runtimeStr)
 			frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.runtime: %s", runtimeStr)
+		}
+	}
+
+	// Extract runtime-install (controls generation of runtime install steps)
+	if runtimeInstallVal, hasRuntimeInstall := agentObj["runtime-install"]; hasRuntimeInstall {
+		if runtimeInstallBool, ok := runtimeInstallVal.(bool); ok {
+			agentConfig.RuntimeInstall = &runtimeInstallBool
+			frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.runtime-install: %t", runtimeInstallBool)
+		}
+	}
+
+	// Extract allow-host-ports (additional host TCP ports for the AWF sandbox)
+	if portsVal, hasPorts := agentObj["allow-host-ports"]; hasPorts {
+		if portsSlice, ok := portsVal.([]any); ok {
+			for _, portVal := range portsSlice {
+				switch v := portVal.(type) {
+				case int:
+					agentConfig.AllowHostPorts = append(agentConfig.AllowHostPorts, v)
+				case int64:
+					agentConfig.AllowHostPorts = append(agentConfig.AllowHostPorts, int(v))
+				case uint64:
+					agentConfig.AllowHostPorts = append(agentConfig.AllowHostPorts, int(v))
+				case float64:
+					if float64(int(v)) == v {
+						agentConfig.AllowHostPorts = append(agentConfig.AllowHostPorts, int(v))
+					}
+				}
+			}
+			frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.allow-host-ports: %v", agentConfig.AllowHostPorts)
 		}
 	}
 
@@ -290,6 +311,52 @@ func (c *Compiler) extractAgentSandboxConfig(agentVal any) *AgentSandboxConfig {
 				agentConfig.ModelFallback = &value
 				frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.model-fallback")
 			}
+		}
+	}
+
+	// Extract token-steering (AWF API proxy token steering enable/disable flag).
+	if tsVal, hasTS := agentObj["token-steering"]; hasTS {
+		if value, ok := tsVal.(bool); ok {
+			agentConfig.TokenSteering = &value
+			frontmatterExtractionSecurityLog.Print("Extracted sandbox.agent.token-steering")
+		}
+	}
+
+	// Extract targets (per-provider API proxy target overrides, e.g. authHeader, extraHeaders)
+	if targetsVal, hasTargets := agentObj["targets"]; hasTargets {
+		if targetsObj, ok := targetsVal.(map[string]any); ok {
+			agentConfig.Targets = make(map[string]*AgentAPIProxyTargetConfig)
+			for provider, targetAny := range targetsObj {
+				targetObj, ok := targetAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				targetConfig := &AgentAPIProxyTargetConfig{}
+				if authHeader, ok := targetObj["authHeader"].(string); ok {
+					targetConfig.AuthHeader = authHeader
+				}
+				if extraHeaders, ok := targetObj["extraHeaders"].(map[string]any); ok {
+					targetConfig.ExtraHeaders = make(map[string]string)
+					for k, v := range extraHeaders {
+						if s, ok := v.(string); ok {
+							targetConfig.ExtraHeaders[k] = s
+						}
+					}
+				}
+				if extraBodyFields, ok := targetObj["extraBodyFields"].(map[string]any); ok {
+					targetConfig.ExtraBodyFields = make(map[string]string)
+					for k, v := range extraBodyFields {
+						if s, ok := v.(string); ok {
+							targetConfig.ExtraBodyFields[k] = s
+						}
+					}
+				}
+				if sessionId, ok := targetObj["sessionId"].(string); ok {
+					targetConfig.SessionId = sessionId
+				}
+				agentConfig.Targets[provider] = targetConfig
+			}
+			frontmatterExtractionSecurityLog.Printf("Extracted sandbox.agent.targets: %d provider(s)", len(agentConfig.Targets))
 		}
 	}
 

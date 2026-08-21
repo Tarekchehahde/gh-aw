@@ -61,8 +61,13 @@ safe-outputs:
 # Or disable entirely:
 safe-outputs:
   create-pull-request:
-  threat-detection: false  # Disable threat detection
+  threat-detection: false  # Disable threat detection entirely
 ```
+
+The `features.gh-aw-detection` flag controls the detection implementation, not
+whether threat detection runs. The external `threat-detect` implementation is
+the default; set `features.gh-aw-detection: false` to select the legacy inline
+engine implementation.
 
 > [!NOTE]
 > When a workflow explicitly sets `threat-detection: false`, that setting takes precedence over any imported fragments. Imported shared workflows that configure safe outputs without a `threat-detection` key will not re-enable threat detection in the importing workflow.
@@ -249,9 +254,9 @@ safe-outputs:
           path: /tmp/gh-aw/threat-detection/
 ```
 
-**Available Artifacts:** Custom steps have access to `/tmp/gh-aw/threat-detection/prompt.txt` (workflow prompt), `agent_output.json` (safe output items), and `aw.patch` (git patch file).
+**Available Artifacts:** Custom steps have access to `/tmp/gh-aw/threat-detection/prompt.txt` (workflow prompt), `agent_output.json` (safe output items), and `aw.patch` (git patch file). gh-aw also stages `/tmp/gh-aw/threat-detection/aw-prompts/prompt-template.txt`, `/tmp/gh-aw/threat-detection/aw-prompts/prompt-import-tree.json`, `/tmp/gh-aw/threat-detection/aw_info.json`, and any restored `/tmp/gh-aw/threat-detection/comment-memory/*.md` files so detectors can analyze prompt structure, activation context, and persisted comment memory.
 
-**Execution Order:** Download artifacts → Execute pre-steps (`steps:`) → Run AI analysis (if enabled) → Execute post-steps (`post-steps:`) → Upload detection log.
+**Execution Order:** Download artifacts → Stage detection inputs → Execute pre-steps (`steps:`) → Run AI analysis (if enabled) → Execute post-steps (`post-steps:`) → Upload detection log.
 
 ## Example: LlamaGuard Integration
 

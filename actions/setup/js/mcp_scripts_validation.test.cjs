@@ -1,6 +1,26 @@
 import { describe, it, expect } from "vitest";
+import fs from "fs";
+import { fileURLToPath } from "url";
 
 describe("mcp_scripts_validation.cjs", () => {
+  function loadUpdateIssueToolSchema() {
+    const toolsPath = fileURLToPath(new URL("./safe_outputs_tools.json", import.meta.url));
+    try {
+      const tools = JSON.parse(fs.readFileSync(toolsPath, "utf8"));
+      if (!Array.isArray(tools)) {
+        throw new Error("Expected tools schema to be a JSON array");
+      }
+      const updateIssueTool = tools.find(tool => tool.name === "update_issue");
+      if (!updateIssueTool) {
+        const availableNames = tools.map(tool => tool?.name).filter(Boolean);
+        throw new Error(`Expected a tool definition named 'update_issue' in safe_outputs_tools.json. Found tools: ${availableNames.join(", ")}`);
+      }
+      return updateIssueTool.inputSchema;
+    } catch (error) {
+      throw new Error(`Failed to load or parse safe outputs tool schema at ${toolsPath}. Expected a JSON array containing an 'update_issue' tool definition. Cause: ${error.message}`);
+    }
+  }
+
   describe("validateRequiredFields", () => {
     it("should return empty array when no required fields", async () => {
       const { validateRequiredFields } = await import("./mcp_scripts_validation.cjs");
@@ -168,7 +188,8 @@ describe("mcp_scripts_validation.cjs", () => {
 
       expect(violations).toHaveLength(1);
       expect(violations[0].field).toBe("message");
-      expect(violations[0].byteLength).toBe(MAX_STRING_INPUT_BYTES + 1);
+      expect(violations[0].actualLength).toBe(MAX_STRING_INPUT_BYTES + 1);
+      expect(violations[0].unit).toBe("bytes");
     });
 
     it("should not flag a string at exactly the 10 KB limit", async () => {
@@ -282,23 +303,23 @@ describe("mcp_scripts_validation.cjs", () => {
       expect(violations).toEqual([]);
     });
 
-    it("should skip string fields with an explicit maxLength (handler-level validation)", async () => {
+    it("should enforce explicit maxLength for string fields", async () => {
       const { validateStringInputLengths, MAX_STRING_INPUT_BYTES } = await import("./mcp_scripts_validation.cjs");
 
-      // A value that exceeds the default 10 KB limit but is within maxLength
-      const valueExceedingDefaultLimit = "a".repeat(MAX_STRING_INPUT_BYTES + 1);
-      const args = { body: valueExceedingDefaultLimit };
+      // Exceeds explicit maxLength
+      const valueExceedingExplicitMax = "a".repeat(MAX_STRING_INPUT_BYTES + 1);
+      const args = { body: valueExceedingExplicitMax };
       const schema = {
         type: "object",
-        properties: { body: { type: "string", maxLength: MAX_STRING_INPUT_BYTES + 1000 } },
+        properties: { body: { type: "string", maxLength: MAX_STRING_INPUT_BYTES } },
       };
 
-      // Should not flag — handler-level validation is responsible for this field
       const violations = validateStringInputLengths(args, schema);
-      expect(violations).toEqual([]);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].field).toBe("body");
     });
 
-    it("should still check string fields without maxLength when other fields have maxLength", async () => {
+    it("should still check string fields without maxLength when other fields have explicit maxLength", async () => {
       const { validateStringInputLengths, MAX_STRING_INPUT_BYTES } = await import("./mcp_scripts_validation.cjs");
 
       const oversizedValue = "a".repeat(MAX_STRING_INPUT_BYTES + 1);
@@ -306,16 +327,50 @@ describe("mcp_scripts_validation.cjs", () => {
       const schema = {
         type: "object",
         properties: {
-          // body has maxLength — skipped by generic check
-          body: { type: "string", maxLength: 65536 },
-          // title has no maxLength — checked by generic check
+          // body has explicit maxLength lower than value
+          body: { type: "string", maxLength: MAX_STRING_INPUT_BYTES },
+          // title has no maxLength — checked against default 10KB
           title: { type: "string" },
         },
       };
 
       const violations = validateStringInputLengths(args, schema);
+      expect(violations).toHaveLength(2);
+      expect(violations.map(v => v.field).sort()).toEqual(["body", "title"]);
+    });
+
+    it("should enforce explicit maxLength using character count", async () => {
+      const { validateStringInputLengths } = await import("./mcp_scripts_validation.cjs");
+
+      const args = { body: "🚀".repeat(3) };
+      const schema = {
+        type: "object",
+        properties: { body: { type: "string", maxLength: 3 } },
+      };
+
+      const violations = validateStringInputLengths(args, schema);
+      expect(violations).toEqual([]);
+    });
+
+    it("should allow update_issue body above 10KB when schema declares maxLength", async () => {
+      const { validateStringInputLengths, MAX_STRING_INPUT_BYTES } = await import("./mcp_scripts_validation.cjs");
+      const updateIssueSchema = loadUpdateIssueToolSchema();
+
+      expect(updateIssueSchema.properties.body.maxLength).toBe(65536);
+
+      const args = { body: "a".repeat(MAX_STRING_INPUT_BYTES + 1) };
+      const violations = validateStringInputLengths(args, updateIssueSchema);
+      expect(violations).toEqual([]);
+    });
+
+    it("should enforce update_issue body schema maxLength boundary", async () => {
+      const { validateStringInputLengths } = await import("./mcp_scripts_validation.cjs");
+      const updateIssueSchema = loadUpdateIssueToolSchema();
+
+      const args = { body: "a".repeat(65537) };
+      const violations = validateStringInputLengths(args, updateIssueSchema);
       expect(violations).toHaveLength(1);
-      expect(violations[0].field).toBe("title");
+      expect(violations[0]).toMatchObject({ field: "body", limit: 65536, unit: "characters" });
     });
   });
 
@@ -449,6 +504,80 @@ describe("mcp_scripts_validation.cjs", () => {
       };
 
       expect(validateStringMinLengths(args, schema)).toEqual([]);
+    });
+  });
+
+  describe("validateArgumentsAgainstSchema", () => {
+    it("validates nested array item objects and required fields", async () => {
+      const { validateArgumentsAgainstSchema } = await import("./mcp_scripts_validation.cjs");
+      const schema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                rationale: { type: "string" },
+                confidence: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+              },
+              required: ["name", "rationale", "confidence"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["labels"],
+      };
+
+      expect(validateArgumentsAgainstSchema({ labels: ["bug"] }, schema)).toMatchObject({
+        path: "labels[0]",
+      });
+    });
+
+    it("validates oneOf/anyOf, enum, and additionalProperties recursively", async () => {
+      const { validateArgumentsAgainstSchema } = await import("./mcp_scripts_validation.cjs");
+      const schema = {
+        type: "object",
+        properties: {
+          labels: {
+            type: "array",
+            items: {
+              oneOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    confidence: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+                  },
+                  required: ["name", "confidence"],
+                  additionalProperties: false,
+                },
+              ],
+            },
+          },
+        },
+      };
+
+      expect(validateArgumentsAgainstSchema({ labels: [{ name: "bug", confidence: "SURE" }] }, schema)).toMatchObject({
+        path: "labels[0].confidence",
+      });
+      expect(validateArgumentsAgainstSchema({ labels: [{ name: "bug", confidence: "HIGH", extra: true }] }, schema)).toMatchObject({
+        path: "labels[0].extra",
+      });
+      expect(validateArgumentsAgainstSchema({ labels: [{ name: "bug", confidence: "HIGH" }] }, schema)).toBeNull();
+    });
+  });
+
+  describe("formatSchemaValidationError", () => {
+    it("formats strict add_labels object-shape guidance", async () => {
+      const { formatSchemaValidationError } = await import("./mcp_scripts_validation.cjs");
+      const message = formatSchemaValidationError("add_labels", { labels: ["bug"] }, { path: "labels[0]", message: "must be a object" });
+      expect(message).toContain("Invalid arguments for add_labels:");
+      expect(message).toContain("labels[0] must be an object (string shorthand is not supported).");
+      expect(message).toContain("Required fields: name, rationale, confidence");
+      expect(message).toContain('Received: \"bug\"');
     });
   });
 });

@@ -218,13 +218,13 @@ func TestValidateNoTemplateInjection(t *testing.T) {
 			if tt.shouldError {
 				require.Error(t, err, "Expected validation to fail but it passed")
 				if tt.errorString != "" {
-					assert.Contains(t, err.Error(), tt.errorString,
+					require.ErrorContains(t, err, tt.errorString,
 						"Error message should contain expected string")
 				}
 				// Verify error message quality
-				assert.Contains(t, err.Error(), "template injection",
+				require.ErrorContains(t, err, "template injection",
 					"Error should mention template injection")
-				assert.Contains(t, err.Error(), "Safe Pattern",
+				assert.ErrorContains(t, err, "Safe Pattern",
 					"Error should provide safe pattern example")
 			} else {
 				assert.NoError(t, err, "Expected validation to pass but got error: %v", err)
@@ -386,9 +386,9 @@ func TestTemplateInjectionRealWorldPatterns(t *testing.T) {
 
 		err := validateNoTemplateInjection(yaml)
 		require.Error(t, err, "Should detect unsafe gateway-pid usage in run command")
-		assert.Contains(t, err.Error(), "steps.*.outputs",
+		require.ErrorContains(t, err, "steps.*.outputs",
 			"Should identify as steps.outputs context")
-		assert.Contains(t, err.Error(), "gateway-pid",
+		require.ErrorContains(t, err, "gateway-pid",
 			"Error should mention the specific expression")
 	})
 
@@ -1006,7 +1006,7 @@ func TestTemplateInjectionYAMLKeyOrdering(t *testing.T) {
 
 			if tt.shouldError {
 				require.Error(t, err, tt.description)
-				assert.Contains(t, err.Error(), "template injection",
+				require.ErrorContains(t, err, "template injection",
 					"Error should mention template injection")
 			} else {
 				assert.NoError(t, err, tt.description)
@@ -1139,7 +1139,7 @@ jobs:
 
 			if tt.shouldError {
 				require.Error(t, err, tt.description)
-				assert.Contains(t, err.Error(), "template injection",
+				require.ErrorContains(t, err, "template injection",
 					"Error should mention template injection")
 			} else {
 				assert.NoError(t, err, tt.description)
@@ -1331,7 +1331,7 @@ func TestTemplateInjectionYAMLParsingEdgeCases(t *testing.T) {
 
 			if tt.shouldError {
 				require.Error(t, err, tt.description)
-				assert.Contains(t, err.Error(), "template injection",
+				require.ErrorContains(t, err, "template injection",
 					"Error should mention template injection")
 			} else {
 				assert.NoError(t, err, tt.description)
@@ -1394,6 +1394,33 @@ func TestScanRunContentExpressions(t *testing.T) {
 			wantHasUnsafe:     false,
 			wantHasDisallowed: true,
 		},
+		{
+			name: "unsafe expression in double-quoted run key",
+			yaml: `jobs:
+  test:
+    steps:
+      - "run": echo "${{ github.event.issue.title }}"`,
+			wantHasUnsafe:     true,
+			wantHasDisallowed: true,
+		},
+		{
+			name: "unsafe expression in single-quoted run key",
+			yaml: `jobs:
+  test:
+    steps:
+      - 'run': echo "${{ github.event.issue.title }}"`,
+			wantHasUnsafe:     true,
+			wantHasDisallowed: true,
+		},
+		{
+			name: "allowed expression in double-quoted run key",
+			yaml: `jobs:
+  test:
+    steps:
+      - "run": node ${{ runner.temp }}/actions/foo.cjs`,
+			wantHasUnsafe:     false,
+			wantHasDisallowed: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1407,9 +1434,9 @@ func TestScanRunContentExpressions(t *testing.T) {
 }
 
 // TestScanRunContentExpressionsHeredoc verifies that expressions inside heredocs
-// are not flagged as disallowed – this is the core fix for the CompileSimpleWorkflow
-// performance regression where ${{ toJSON(steps.determine-automatic-lockdown...) }}
-// inside a heredoc was triggering a full yaml.Unmarshal on every compilation.
+// are not flagged as disallowed – this ensures that ${{ }} expressions inside
+// unquoted heredocs (e.g. heredoc config blocks) are exempt from template-injection
+// checks by our internal validator.
 func TestScanRunContentExpressionsHeredoc(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -1418,14 +1445,14 @@ func TestScanRunContentExpressionsHeredoc(t *testing.T) {
 		wantHasDisallowed bool
 	}{
 		{
-			name: "disallowed expression inside unquoted heredoc is not flagged",
+			name: "shell env var in unquoted heredoc is not flagged",
 			yaml: `jobs:
   test:
     steps:
       - run: |
           cat << GH_AW_MCP_CONFIG_EOF | node start_mcp.cjs
           {
-            "sink-visibility": ${{ toJSON(steps.determine-automatic-lockdown.outputs.visibility) }}
+            "sink-visibility": "${GH_AW_SINK_VISIBILITY}"
           }
           GH_AW_MCP_CONFIG_EOF`,
 			wantHasUnsafe:     false,
@@ -1589,6 +1616,45 @@ func TestDetectHeredocDelimiter(t *testing.T) {
 			assert.Equal(t, tt.wantOK, gotOK)
 			if tt.wantOK {
 				assert.Equal(t, tt.wantDelim, gotDelim)
+			}
+		})
+	}
+}
+
+func TestFindRunValueFastPath(t *testing.T) {
+	cases := []struct {
+		input   string
+		wantOk  bool
+		wantVal string
+	}{
+		// Unquoted key forms
+		{`run: echo hello`, true, "echo hello"},
+		{`  run: echo hello`, true, "echo hello"},
+		// Flow-style YAML: the trailing "}" is part of the raw value returned by
+		// findRunValue (everything after "run:"). Template-injection callers scan
+		// that raw string for ${{...}} expressions, so the brace does no harm.
+		{`{run: echo hello}`, true, "echo hello}"},
+		// Double-quoted key
+		{`"run": echo hello`, true, "echo hello"},
+		// Single-quoted key
+		{`'run': echo hello`, true, "echo hello"},
+		// Mixed-quote forms
+		{`"run': echo hello`, true, "echo hello"},
+		{`'run": echo hello`, true, "echo hello"},
+		// Non-matching cases
+		{`step: build`, false, ""},
+		{`runner: ubuntu`, false, ""},
+		{`runner:`, false, ""},
+		{`name: run something`, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.input, func(t *testing.T) {
+			val, ok := findRunValue(c.input)
+			if ok != c.wantOk {
+				t.Errorf("findRunValue(%q) ok=%v, want %v", c.input, ok, c.wantOk)
+			}
+			if ok && val != c.wantVal {
+				t.Errorf("findRunValue(%q) val=%q, want %q", c.input, val, c.wantVal)
 			}
 		})
 	}

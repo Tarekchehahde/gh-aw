@@ -36,7 +36,7 @@ func RunFix(config FixConfig) error {
 func NewFixCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "fix [workflow]...",
-		Short: "Apply automatic codemod-style fixes to agentic workflow files",
+		Short: "Auto-fix deprecated agentic workflow fields using codemods (dry-run by default)",
 		Long: `Apply automatic codemod-style fixes to agentic workflow files.
 
 This command applies a registry of codemods that automatically update deprecated fields
@@ -53,10 +53,12 @@ The command will:
 
 Without --write (dry-run mode), no files are modified. With --write, the command performs
 all steps and additionally:
-  4. Write updated files back to disk.
+  4. Writes updated files back to disk.
   5. Delete deprecated .github/aw/schemas/agentic-workflow.json file if it exists.
   6. Delete old template files from previous versions if present.
   7. Delete old workflow-specific .agent.md files from .github/agents/ if present.
+  8. Refresh the dispatcher skill and agent at .github/skills/agentic-workflows/SKILL.md
+     and .github/agents/agentic-workflows.md when they differ from the bundled templates.
 
 ` + WorkflowIDExplanation,
 		Example: `  ` + string(constants.CLIExtensionPrefix) + ` fix                     # Check all workflows (dry-run)
@@ -198,11 +200,11 @@ func runFixCommand(workflowIDs []string, write bool, verbose bool, workflowDir s
 	fixLog.Print("Updating prompt and skill files")
 
 	// Update dispatcher skill
-	if err := ensureAgenticWorkflowsDispatcher(verbose, false); err != nil {
+	if err := ensureAgenticWorkflowsDispatcher(verbose, false, write); err != nil {
 		fixLog.Printf("Failed to update dispatcher skill: %v", err)
 		fmt.Fprintf(os.Stderr, "%s\n", console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update dispatcher skill: %v", err)))
 	}
-	if err := ensureAgenticWorkflowsAgent(verbose); err != nil {
+	if err := ensureAgenticWorkflowsAgent(verbose, write); err != nil {
 		fixLog.Printf("Failed to update agentic workflows custom agent: %v", err)
 		fmt.Fprintf(os.Stderr, "%s\n", console.FormatWarningMessage(fmt.Sprintf("Warning: Failed to update agentic workflows custom agent: %v", err)))
 	}
@@ -268,7 +270,7 @@ func runFixCommand(workflowIDs []string, write bool, verbose bool, workflowDir s
 				fmt.Fprintf(os.Stderr, "  gh aw fix %s --write\n", strings.TrimSuffix(wf.File, ".md"))
 			}
 		} else if totalGuidedErrors == 0 && totalProcessingErrors == 0 {
-			fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("✓ No fixes needed"))
+			fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("✓ No workflow fixes needed"))
 		}
 	}
 
@@ -322,7 +324,12 @@ func processWorkflowFileWithInfo(filePath string, codemods []Codemod, write bool
 			continue
 		}
 
-		newContent, applied, err := codemod.Apply(currentContent, currentResult.Frontmatter)
+		newContent, applied, err := func() (string, bool, error) {
+			if codemod.ApplyWithContext != nil {
+				return codemod.ApplyWithContext(currentContent, currentResult.Frontmatter, filePath)
+			}
+			return codemod.Apply(currentContent, currentResult.Frontmatter)
+		}()
 		if err != nil {
 			fixLog.Printf("Codemod %s failed: %v", codemod.ID, err)
 			wrappedErr := fmt.Errorf("codemod %s failed: %w", codemod.ID, err)

@@ -1,5 +1,5 @@
 <safe-outputs>
-gh CLI is NOT authenticated. Use the `safeoutputs` CLI tool for GitHub writes and completion signaling — CLI commands required.
+gh CLI is NOT authenticated. Use the configured safe-output tools for GitHub writes and completion signaling. Call the tool names listed in `<safe-output-tools>` directly; if a separate `<mcp-clis>` section says `safeoutputs` is available on `PATH`, you may use that CLI form instead.
 
 **CRITICAL: You MUST call one of the safe-output tools before finishing.** You must call at least one tool from the `<safe-output-tools>` list; using non-safe-output tools does not satisfy this requirement. Multiple calls are allowed up to each tool's configured limit. If no GitHub action was taken (no issues, comments, PRs, etc. were created or updated), you MUST call `noop` with a message explaining why no action was needed. This requirement still applies even if the workflow/task prompt forgets to ask for `noop` or does not mention safe outputs at all. Failing to call any safe-output tool is the #1 cause of workflow failures. Do NOT end your response without calling at least one safe-output tool.
 
@@ -15,5 +15,5 @@ Safe-output calls are write-once declarations for real downstream side effects. 
 
 temporary_id: optional cross-reference field for future resources created by safe outputs. Canonical form: '#aw_' followed by 3–12 alphanumeric or underscore characters — e.g., '#aw_abc1', '#aw_pr_fix'. Pattern: /^#?aw_[A-Za-z0-9_]{3,12}$/i (the '#' prefix is optional; bare 'aw_abc1' is accepted and normalised to '#aw_abc1' automatically). Use this form for all field values (temporary_id, item_number, issue_number, parent, etc.). In body/markdown text, '#aw_abc1' references are replaced with the real issue/PR number after creation. Omit entirely when not needed.
 
-**Note**: safeoutputs tools do NOT support `@filename` file name expansion. Always provide content inline — do not use `@filename` references in tool arguments.
+**Note**: safeoutputs tools do NOT support `@filename` file name expansion. Always provide content inline — do not use `@filename` references in tool arguments. To inject an entire file as the `body` field, use `jq -Rs` to read it as a JSON string and pipe the resulting payload: `jq -Rs '{body: .}' file.md | safeoutputs update_discussion .`
 </safe-outputs>

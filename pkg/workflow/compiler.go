@@ -69,11 +69,25 @@ func (c *Compiler) CompileWorkflow(markdownPath string) error {
 		if isFormattedCompilerError(err) {
 			return err
 		}
+
 		// Fallback for any unformatted error that slipped through.
 		return formatCompilerError(markdownPath, "error", err.Error(), err)
 	}
 
 	return c.CompileWorkflowData(workflowData, markdownPath)
+}
+
+func (c *Compiler) configureGHESCompatibility() {
+	if c.ghesCompatConfigured {
+		return
+	}
+	c.ghesCompatConfigured = true
+	c.ghesArtifactCompat = c.ghesCompatFromCLI
+	if !c.ghesArtifactCompat {
+		if repoConfig, err := c.loadRepoConfig(); err == nil && repoConfig != nil {
+			c.ghesArtifactCompat = repoConfig.GHES
+		}
+	}
 }
 
 // validateWorkflowData orchestrates all validation of workflow configuration by
@@ -143,7 +157,7 @@ func (c *Compiler) generateAndValidateYAML(workflowData *WorkflowData, markdownP
 		// Write the invalid YAML to a .invalid.yml file for inspection
 		invalidFile := strings.TrimSuffix(lockFile, ".lock.yml") + ".invalid.yml"
 		if writeErr := os.WriteFile(invalidFile, []byte(yamlContent), constants.FilePermPublic); writeErr == nil {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Invalid workflow YAML written to: "+console.ToRelativePath(invalidFile)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Invalid workflow YAML written to: "+console.ToRelativePath(invalidFile)))
 		}
 		return "", nil, nil, formattedErr
 	}
@@ -178,7 +192,14 @@ func (c *Compiler) generateAndValidateYAML(workflowData *WorkflowData, markdownP
 	// validation disabled), the validator uses targeted text scans to avoid an unnecessary
 	// yaml.Unmarshal when all run-block expressions are in the compiler-owned allowed list.
 	if err := c.validateTemplateInjection(yamlContent, lockFile, markdownPath, parsedWorkflow); err != nil {
-		return "", nil, nil, err
+		var suppressions []ThreatDetectionSuppression
+		if workflowData.ParsedFrontmatter != nil {
+			suppressions = workflowData.ParsedFrontmatter.ThreatDetectionSuppressions
+		}
+		if !isThreatDetectionDiagnosticSuppressed(err, suppressions, time.Now()) {
+			return "", nil, nil, err
+		}
+		templateInjectionValidationLog.Print("Skipping CTR-006 diagnostic due to active threat-detection-suppress entry")
 	}
 
 	// Validate against GitHub Actions schema (unless skipped)
@@ -208,7 +229,7 @@ func (c *Compiler) generateAndValidateYAML(workflowData *WorkflowData, markdownP
 			// Write the invalid YAML to a .invalid.yml file for inspection
 			invalidFile := strings.TrimSuffix(lockFile, ".lock.yml") + ".invalid.yml"
 			if writeErr := os.WriteFile(invalidFile, []byte(yamlContent), constants.FilePermPublic); writeErr == nil {
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Invalid workflow YAML written to: "+console.ToRelativePath(invalidFile)))
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Invalid workflow YAML written to: "+console.ToRelativePath(invalidFile)))
 			}
 			return "", nil, nil, formattedErr
 		}
@@ -240,7 +261,7 @@ func (c *Compiler) generateAndValidateYAML(workflowData *WorkflowData, markdownP
 			return "", nil, nil, formatCompilerError(markdownPath, "error", fmt.Sprintf("repository feature validation failed: %v", err), err)
 		}
 	} else if c.verbose {
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Schema validation available but skipped (use SetSkipValidation(false) to enable)"))
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Schema validation available but skipped (use SetSkipValidation(false) to enable)"))
 		c.IncrementWarningCount()
 	}
 
@@ -280,7 +301,7 @@ func (c *Compiler) writeWorkflowOutput(lockFile, yamlContent string, markdownPat
 				lockSize := console.FormatFileSize(lockFileInfo.Size())
 				maxSize := console.FormatFileSize(MaxLockFileSize)
 				warningMsg := fmt.Sprintf("Generated lock file size (%s) exceeds recommended maximum size (%s)", lockSize, maxSize)
-				fmt.Fprintln(os.Stderr, console.FormatWarningMessage(warningMsg))
+				fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(warningMsg))
 			}
 		}
 	}
@@ -288,15 +309,15 @@ func (c *Compiler) writeWorkflowOutput(lockFile, yamlContent string, markdownPat
 	// Display success message with file size if we generated a lock file (unless quiet mode)
 	if !c.quiet {
 		if c.noEmit {
-			fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(console.ToRelativePath(markdownPath)))
+			fmt.Fprintln(os.Stderr, console.FormatSuccessMessageStderr(console.ToRelativePath(markdownPath)))
 		} else {
 			// Get the size of the generated lock file for display
 			if lockFileInfo, err := os.Stat(lockFile); err == nil {
 				lockSize := console.FormatFileSize(lockFileInfo.Size())
-				fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(fmt.Sprintf("%s (%s)", console.ToRelativePath(markdownPath), lockSize)))
+				fmt.Fprintln(os.Stderr, console.FormatSuccessMessageStderr(fmt.Sprintf("%s (%s)", console.ToRelativePath(markdownPath), lockSize)))
 			} else {
 				// Fallback to original display if we can't get file info
-				fmt.Fprintln(os.Stderr, console.FormatSuccessMessage(console.ToRelativePath(markdownPath)))
+				fmt.Fprintln(os.Stderr, console.FormatSuccessMessageStderr(console.ToRelativePath(markdownPath)))
 			}
 		}
 	}
@@ -374,12 +395,13 @@ func (c *Compiler) validateTemplateInjection(yamlContent, lockFile, markdownPath
 	}
 
 	if templateErr != nil {
+		diagnosticErr := &threatDetectionDiagnosticError{Rule: "CTR-006", Err: templateErr}
 		// Store error first so we can write invalid YAML before returning
-		formattedErr := formatCompilerError(markdownPath, "error", templateErr.Error(), templateErr)
+		formattedErr := formatCompilerError(markdownPath, "error", diagnosticErr.Error(), diagnosticErr)
 		// Write the invalid YAML to a .invalid.yml file for inspection
 		invalidFile := strings.TrimSuffix(lockFile, ".lock.yml") + ".invalid.yml"
 		if writeErr := os.WriteFile(invalidFile, []byte(yamlContent), constants.FilePermPublic); writeErr == nil {
-			fmt.Fprintln(os.Stderr, console.FormatWarningMessage("Workflow with template injection risks written to: "+console.ToRelativePath(invalidFile)))
+			fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr("Workflow with template injection risks written to: "+console.ToRelativePath(invalidFile)))
 		}
 		return formattedErr
 	}
@@ -433,17 +455,11 @@ func (c *Compiler) CompileWorkflowData(workflowData *WorkflowData, markdownPath 
 	}
 
 	// Enable GHES artifact compatibility from CLI flag or aw.json (CLI flag wins).
-	// c.ghesCompatFromCLI is set once per compiler instance via SetGHESCompat().
-	c.ghesArtifactCompat = c.ghesCompatFromCLI
-	if !c.ghesArtifactCompat {
-		// Fall back to aw.json ghes field when CLI flag was not passed.
-		if repoConfig, err := c.loadRepoConfig(); err == nil && repoConfig != nil {
-			c.ghesArtifactCompat = repoConfig.GHES
-		}
-	}
+	c.configureGHESCompatibility()
 	if c.ghesArtifactCompat {
-		actionPinsLog.Print("GHES compatibility mode enabled: artifact actions continue using latest non-v3 pins")
+		actionPinsLog.Print("GHES compatibility mode enabled: artifact actions will use v3-compatible pins")
 	}
+	workflowData.GHES = c.ghesArtifactCompat
 
 	// Generate lock file name
 	lockFile := stringutil.MarkdownToLockFile(markdownPath)
@@ -560,7 +576,20 @@ func (c *Compiler) CompileWorkflowData(workflowData *WorkflowData, markdownPath 
 	// file is written and the agent receives the actionable guidance embedded in the warning.
 	if safeUpdateEnabled {
 		currentHasPR, currentHasPRTarget := extractPullRequestEventPresenceFromOnField(workflowData.RawFrontmatter["on"])
-		if enforceErr := EnforceSafeUpdate(oldManifest, bodySecrets, bodyActions, workflowData.Redirect, oldHasPR, oldHasPRTarget, currentHasPR, currentHasPRTarget); enforceErr != nil {
+		prTransition := PullRequestEventTransition{
+			OldHasPullRequest:           oldHasPR,
+			OldHasPullRequestTarget:     oldHasPRTarget,
+			CurrentHasPullRequest:       currentHasPR,
+			CurrentHasPullRequestTarget: currentHasPRTarget,
+		}
+		if enforceErr := EnforceSafeUpdate(SafeUpdateOptions{
+			Manifest:                oldManifest,
+			SecretNames:             bodySecrets,
+			ActionRefs:              bodyActions,
+			CurrentRedirect:         workflowData.Redirect,
+			PullRequestTransition:   prTransition,
+			MemoryValidationScripts: collectMemoryValidationScripts(workflowData),
+		}); enforceErr != nil {
 			warningMsg := buildSafeUpdateWarningPrompt(enforceErr.Error())
 			c.AddSafeUpdateWarning(warningMsg)
 			fmt.Fprintln(os.Stderr, formatCompilerMessage(markdownPath, "warning", enforceErr.Error()))

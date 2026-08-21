@@ -342,7 +342,7 @@ tools:
 	// Should error with invalid timeout
 	require.Error(t, err, "Invalid timeout should cause error")
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "timeout")
+	require.ErrorContains(t, err, "timeout")
 }
 
 // TestProcessToolsAndMarkdown_MCPValidation tests MCP config validation
@@ -632,7 +632,7 @@ tracker-id: TEST-123
 	assert.Equal(t, "TEST-123", result.trackerID, "Tracker ID should be extracted")
 }
 
-// TestProcessToolsAndMarkdown_CustomEngineNoTools tests codex engine tool processing
+// TestProcessToolsAndMarkdown_CustomEngineNoTools tests that codex engine rejects restricted bash allowlists
 func TestProcessToolsAndMarkdown_CustomEngineNoTools(t *testing.T) {
 	tmpDir := testutil.TempDir(t, "tools-codex-engine")
 
@@ -660,6 +660,48 @@ tools:
 
 	importsResult := &parser.ImportsResult{}
 
+	_, err = compiler.processToolsAndMarkdown(
+		frontmatterResult,
+		testFile,
+		tmpDir,
+		agenticEngine,
+		"codex",
+		importsResult,
+	)
+
+	// Codex engine does not support restricted bash allowlists - should produce a compile error
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support bash command allow-listing")
+}
+
+// TestProcessToolsAndMarkdown_CodexWildcardBashSucceeds tests that codex engine with bash: ["*"] compiles cleanly
+func TestProcessToolsAndMarkdown_CodexWildcardBashSucceeds(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "tools-codex-wildcard")
+
+	testContent := `---
+on: push
+engine: codex
+tools:
+  bash:
+    - "*"
+---
+
+# Test Workflow
+`
+
+	testFile := filepath.Join(tmpDir, "test.md")
+	require.NoError(t, os.WriteFile(testFile, []byte(testContent), 0644))
+
+	compiler := NewCompiler()
+
+	frontmatterResult, err := parser.ExtractFrontmatterFromContent(testContent)
+	require.NoError(t, err)
+
+	agenticEngine, err := compiler.getAgenticEngine("codex")
+	require.NoError(t, err)
+
+	importsResult := &parser.ImportsResult{}
+
 	result, err := compiler.processToolsAndMarkdown(
 		frontmatterResult,
 		testFile,
@@ -669,11 +711,9 @@ tools:
 		importsResult,
 	)
 
+	// Codex engine with wildcard bash should compile without error
 	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// Codex engine supports tool allowlists - tools should be processed
-	assert.NotEmpty(t, result.tools)
+	assert.NotNil(t, result)
 }
 
 // TestProcessToolsAndMarkdown_IncludeExpansionError tests include expansion errors
@@ -716,7 +756,7 @@ engine: copilot
 	// Missing includes may be handled gracefully in some cases
 	// This test verifies the function completes
 	if err != nil {
-		assert.Contains(t, err.Error(), "nonexistent", "Error should mention missing file")
+		assert.ErrorContains(t, err, "nonexistent", "Error should mention missing file")
 	} else {
 		assert.NotNil(t, result)
 	}
@@ -843,4 +883,71 @@ func TestWarnDeprecatedFrontmatterFields_SafeOutputsDeprecatedAliases(t *testing
 
 	assert.Contains(t, stderr, "required-title-prefix", "warning should mention required-title-prefix replacement")
 	assert.Equal(t, 1, compiler.warningCount, "one warning for the deprecated alias")
+}
+
+func TestEnforceMCPProxyTools(t *testing.T) {
+	engine := &BaseEngine{
+		id:           "custom-engine",
+		capabilities: EngineCapabilities{MCP: false},
+	}
+
+	t.Run("enables required proxies", func(t *testing.T) {
+		tools, err := enforceMCPProxyTools(engine, map[string]any{})
+		require.NoError(t, err)
+		assert.Equal(t, true, tools["cli-proxy"])
+		assert.Equal(t, map[string]any{"mode": "gh-proxy"}, tools["github"])
+	})
+
+	t.Run("preserves github configuration", func(t *testing.T) {
+		tools, err := enforceMCPProxyTools(engine, map[string]any{
+			"github": map[string]any{"toolsets": []any{"repos"}},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"mode":     "gh-proxy",
+			"toolsets": []any{"repos"},
+		}, tools["github"])
+		assert.Equal(t, true, tools["cli-proxy"])
+	})
+
+	t.Run("normalizes default-enabled github forms", func(t *testing.T) {
+		for name, github := range map[string]any{
+			"nil":    nil,
+			"string": "enabled",
+		} {
+			t.Run(name, func(t *testing.T) {
+				tools, err := enforceMCPProxyTools(engine, map[string]any{"github": github})
+				require.NoError(t, err)
+				assert.Equal(t, map[string]any{"mode": "gh-proxy"}, tools["github"])
+				assert.Equal(t, true, tools["cli-proxy"])
+			})
+		}
+	})
+
+	t.Run("rejects disabled github proxy", func(t *testing.T) {
+		_, err := enforceMCPProxyTools(engine, map[string]any{"github": false})
+		require.ErrorContains(t, err, "tools.github cannot be disabled")
+	})
+
+	t.Run("rejects non proxy github mode", func(t *testing.T) {
+		_, err := enforceMCPProxyTools(engine, map[string]any{
+			"github": map[string]any{"mode": "remote"},
+		})
+		require.ErrorContains(t, err, "tools.github.mode must be gh-proxy")
+	})
+
+	t.Run("rejects disabled cli proxy", func(t *testing.T) {
+		_, err := enforceMCPProxyTools(engine, map[string]any{"cli-proxy": false})
+		require.ErrorContains(t, err, "tools.cli-proxy cannot be disabled")
+	})
+
+	t.Run("leaves MCP engines unchanged", func(t *testing.T) {
+		tools := map[string]any{"github": false, "cli-proxy": false}
+		actual, err := enforceMCPProxyTools(&BaseEngine{
+			id:           "mcp-engine",
+			capabilities: EngineCapabilities{MCP: true},
+		}, tools)
+		require.NoError(t, err)
+		assert.Equal(t, tools, actual)
+	})
 }

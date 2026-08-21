@@ -6,22 +6,27 @@ description: Comprehensive code quality review covering bugs, performance, style
 on:
   pull_request:
     types: [ready_for_review]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.changeset/**'
+      - 'socials/**'
+      - 'scratchpad/**'
   slash_command:
     strategy: centralized
     name: review
     events: [pull_request_comment, pull_request_review_comment]
 engine:
-  id: copilot
-  copilot-sdk: true
+  id: pi
+model: copilot/gpt-5.4
 permissions:
   contents: read
   issues: read
   pull-requests: read
   copilot-requests: write
 
-sandbox:
-  agent:
-    sudo: false
+features:
+  gh-aw-detection: true
 
 network:
   allowed:
@@ -33,45 +38,35 @@ imports:
     with:
       min-integrity: approved
   - shared/otlp.md
+  - shared/pr-diff-data-fetch.md
 tools:
   cli-proxy: true
   github:
     mode: gh-proxy
-    toolsets:
-    - default
+  comment-memory:
+    memory-id: pr-code-quality-reviewer
+cache:
+  key: pr-prefetch-${{ github.event.pull_request.head.sha || github.event.issue.number }}
+  path: /tmp/gh-aw/agent
+  restore-keys:
+    - pr-prefetch-${{ github.event.pull_request.number || github.event.issue.number }}-
 safe-outputs:
   create-pull-request-review-comment:
     max: 10
   submit-pull-request-review:
     max: 1
+    allowed-events: [COMMENT, REQUEST_CHANGES]
   messages:
     footer: "> 🔎 *Code quality review by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
     run-started: "🔎 [{workflow_name}]({run_url}) is reviewing code quality for this {event_type}..."
     run-success: "✅ [{workflow_name}]({run_url}) completed the code quality review."
     run-failure: "⚠️ [{workflow_name}]({run_url}) {status} during code quality review."
-pre-agent-steps:
-  - name: Pre-fetch PR diff
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
-      EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
-      PR_DIFF_MAX_LINES: "3000"
-    run: |
-      set -euo pipefail
-      mkdir -p /tmp/gh-aw/agent
-      { gh pr diff "$PR_NUMBER" --repo $EXPR_GITHUB_REPOSITORY \
-          --exclude '**/*.lock.yml' \
-          --exclude '**/generated/**' \
-          --exclude '**/dist/**' \
-          --exclude '**/build/**' \
-          || true; } | head -n "${PR_DIFF_MAX_LINES}" > /tmp/gh-aw/agent/pr-diff.patch
-      LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
-      gh pr view "$PR_NUMBER" \
-        --repo $EXPR_GITHUB_REPOSITORY \
-        --json number,title,body,headRefName,additions,deletions,changedFiles,files \
-        > /tmp/gh-aw/agent/pr-meta.json
-      echo "Pre-fetched PR diff (${LINES} lines) and metadata"
 timeout-minutes: 15
+evals:
+  - id: review_posted
+    question: Did the agent post a code review comment on the pull request?
+  - id: findings_scoped
+    question: Does the agent output show that the review findings are limited to changes in the pull request diff rather than unrelated code?
 
 ---
 
@@ -90,14 +85,17 @@ You are a highly critical code reviewer. Your mission is to aggressively find co
 ### Step 1: Load Pre-Fetched PR Data and Launch Sub-Agent
 
 The PR diff and metadata have already been pre-fetched and are available as local files:
-- **PR diff** (capped at 3000 lines, lock/generated/dist/build files excluded): `/tmp/gh-aw/agent/pr-diff.patch`
+- **PR diff** (capped at 2000 lines, lock/generated/dist/build files excluded): `/tmp/gh-aw/agent/pr-diff.patch`
 - **PR metadata** (files list, additions, deletions): `/tmp/gh-aw/agent/pr-meta.json`
 
-In **one parallel turn**, read those two files and also fetch:
-- Existing review comments — use `get_review_comments` (to avoid duplication)
-- (Optional) `/tmp/gh-aw/cache-memory/pr-${{ github.event.issue.number || github.event.pull_request.number }}.json` for past review themes
+In **one parallel turn**, read those three files:
+- `/tmp/gh-aw/agent/pr-diff.patch` — PR diff
+- `/tmp/gh-aw/agent/pr-meta.json` — PR metadata
+- `/tmp/gh-aw/agent/pr-review-comments.json` — existing review comments (use to avoid duplication; each entry has `id`, `path`, `line`, `body`, `user`)
 
-**Do not** call `get_diff`; use the pre-fetched `/tmp/gh-aw/agent/pr-diff.patch` instead — it is already capped to prevent token-heavy context payloads.
+If this PR has been reviewed before, also read `/tmp/gh-aw/comment-memory/pr-code-quality-reviewer.md` before Step 2 to inform theme continuity; otherwise skip.
+
+**Do not** call `get_diff` or `get_review_comments`; use the pre-fetched files instead — they are already capped to prevent token-heavy context payloads.
 
 **In the same turn**, start the `grumpy-coder` sub-agent in the background, passing the PR diff and changed-file list as input context.
 
@@ -133,28 +131,7 @@ You may use compact pseudo-language/encoding during private reasoning (examples:
 
 ### Step 4: Write Review Comments
 
-For each significant issue, create a `create-pull-request-review-comment` with:
-- **File path and line number** of the issue
-- **Immediately visible text**: one brief sentence stating the issue and its impact
-- **`<details>` block**: detailed explanation, code snippet fix, and rationale — collapsed by default
-
-Example:
-```markdown
-**Potential nil dereference**: `user.Profile` is accessed without a nil check and will panic if the user has no profile.
-
-<details>
-<summary>💡 Suggested fix</summary>
-
-```go
-if user.Profile == nil {
-    return ErrNoProfile
-}
-```
-
-Callers that pass users without profiles (e.g., in tests) will hit this panic silently.
-
-</details>
-```
+For each significant issue, create a `create-pull-request-review-comment` with the file path and line number. Each comment: one visible sentence stating the issue and its impact, then a `<details><summary>💡 …</summary>` block with explanation, fix snippet, and rationale.
 
 **Prioritization** (use your 10-comment budget aggressively):
 1. Correctness, concurrency, and security-adjacent bugs (highest priority, up to 6 comments)
@@ -167,13 +144,13 @@ Callers that pass users without profiles (e.g., in tests) will hit this panic si
 - Issues that linters already catch automatically
 - Personal style preferences without a clear rationale
 - Code that is outside the diff (unchanged lines)
+- Empty compliments, generic "looks good" notes, or friendliness padding
 
 ### Step 5: Submit the Overall Review
 
 Call `submit-pull-request-review` with:
-- `APPROVE` if there are no issues that need fixing
+- `COMMENT` if there are no actionable blocking issues
 - `REQUEST_CHANGES` if there are issues that must be fixed before merging
-- `COMMENT` for non-blocking observations only
 
 Use `REQUEST_CHANGES` when any of the following are true:
 - At least one `critical` or `high` issue is valid.
@@ -181,15 +158,20 @@ Use `REQUEST_CHANGES` when any of the following are true:
 - Any issue can cause data loss, auth bypass, panic/crash, or broken CI behavior.
 - Sub-agent output is invalid and your second pass still finds at least one clearly actionable correctness/security/performance issue.
 
-Use `COMMENT` only when all findings are non-blocking; use `APPROVE` only when no actionable issues remain. Keep the overall review body concise and focused on blocking themes.
+Use `COMMENT` when all findings are non-blocking. Keep the overall review body concise and focused on blocking themes. Use h3 (###) or lower for any headers, and structure the body as verdict + one-line summary (always visible) → themes/highlights (in `<details>`).
+
+### Step 6: Update PR Continuity Memory
+
+After submitting the review, update `/tmp/gh-aw/comment-memory/pr-code-quality-reviewer.md` so repeat reviews of this PR can load continuity context in Step 1.
+
+Include the same compact continuity fields:
+- `reviewed_at` timestamp
+- `review_event` (`COMMENT` or `REQUEST_CHANGES`)
+- `top_themes` (short list of blocking/non-blocking themes from this run)
+- `files_reviewed` (changed files you analyzed)
+- `comment_count` (number of review comments posted)
 
 ## Guidelines
-
-### Review Formatting
-
-- Use h3 (###) or lower for all headers in your review output to maintain proper document hierarchy.
-- Apply **progressive disclosure** in every comment: keep the immediately visible text to one brief sentence, then wrap detailed analysis and code suggestions in `<details><summary>💡 …</summary>` blocks.
-- Overall review body structure: verdict + one-line summary (always visible) → themes/highlights (in `<details>`)
 
 ### Review Focus
 - **Focus on changed lines only** — do not review the entire codebase
@@ -197,20 +179,17 @@ Use `COMMENT` only when all findings are non-blocking; use `APPROVE` only when n
 - **Quality over quantity** — fewer precise, high-signal blocking comments beat many vague comments
 - **Be constructive but uncompromising** — critique the code, not the author; explain the rationale
 - **Respect time** — complete within the 15-minute timeout
-- **Avoid friendliness padding** — no empty compliments, no generic "looks good"; brief praise is allowed only for clearly exceptional implementation choices
 ## agent: `grumpy-coder`
 ---
 description: Hyper-critical senior reviewer that aggressively finds merge-blocking issues in changed lines
-model: claude-haiku-4.5
+model: small
 ---
 You are a grumpy senior engineer doing a hostile first-pass code review.
 
 Rules:
 - Review only changed lines in the provided diff context.
-- Be very critical and risk-focused.
-- Prioritize correctness, security, race conditions, error handling, and perf regressions.
+- Prioritize correctness, security, race conditions, error handling, and perf regressions; be very critical and risk-focused.
 - Ignore nits unless they materially increase bug risk.
-- No compliments.
 
 Output format (strict):
 - Return JSONL only, one finding per line.
@@ -219,8 +198,3 @@ Output format (strict):
 - `line` must be an integer line number in the changed hunk.
 - `severity` must be one of: `critical`, `high`, `medium`, `low`.
 - Keep `headline` to one sentence; keep `impact` and `fix` concise and concrete.
-
-If any field is malformed, fix it before returning:
-- Coerce `line` to an integer.
-- Drop findings with invalid `path` or invalid `severity`.
-- Truncate overly long text fields to concise summaries.

@@ -12,6 +12,7 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tools:
   cli-proxy: true
   agentic-workflows:
@@ -19,6 +20,7 @@ tools:
 imports:
   - shared/charts-with-trending.md
   - shared/otlp.md
+  - shared/reporting.md
 safe-outputs:
   upload-artifact:
     max-uploads: 3
@@ -29,11 +31,9 @@ safe-outputs:
     category: "artifacts"
     max: 1
 timeout-minutes: 15
-
-
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 ---
 
 # Python Data Visualization Generator

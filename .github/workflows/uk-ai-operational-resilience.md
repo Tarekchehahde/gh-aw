@@ -43,7 +43,7 @@ tools:
 safe-outputs:
   create-issue:
     max: 2
-    labels: [security, high-priority, ai-generated]
+    labels: [security, high-priority, ai-generated, cookie]
     title-prefix: "[uk-ai-resilience] "
 pre-agent-steps:
   - name: Pre-compute recent changes governance context
@@ -90,11 +90,13 @@ pre-agent-steps:
         echo "- Open secret scanning alerts: $(jq 'length' /tmp/gh-aw/agent/open-secret-scanning-alerts.json)"
       } > /tmp/gh-aw/agent/uk-ai-governance-context.md
 imports:
+  - shared/mcp-pagination.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[uk ai resilience] "
       expires: 3d
   - shared/otlp.md
+  - shared/reporting.md
 ---
 {{#runtime-import? .github/shared-instructions.md}}
 
@@ -203,6 +205,8 @@ Create one discussion report with:
    - unsupported dependency ratio
    - exception aging
    - exposure without recovery capability
+
+Follow the `reporting` skill: use `###` (h3) or lower for section headers, and wrap long tables (asset graph, tier classification, risk-scoring) in `<details><summary><b>...</b></summary>...</details>` blocks so the executive summary stays scannable.
 
 ### Phase 6 — Create issues for high-priority items
 

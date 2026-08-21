@@ -9,9 +9,9 @@ permissions:
   discussions: read
   issues: read
   pull-requests: read
+model: copilot/gpt-5.4
 engine:
   id: pi
-  model: copilot/gpt-5.4
 max-ai-credits: 1500
 tools:
   cli-proxy: true
@@ -43,10 +43,12 @@ pre-agent-steps:
       # 1. All top-level fields in the main JSON schema
       SCHEMA_FIELDS=$(jq -r '.properties | keys[]' pkg/parser/schemas/main_workflow_schema.json 2>/dev/null | sort -u || echo "")
 
-      # 2. yaml-tagged struct fields in pkg/parser/*.go
-      PARSER_YAML_FIELDS=$(grep -rh 'yaml:"' pkg/parser/*.go 2>/dev/null \
-        | grep -o 'yaml:"[^"]*"' \
-        | sed 's/yaml:"//;s/"//' \
+      # 2. JSON/YAML-tagged fields in the top-level frontmatter type.
+      # pkg/parser/frontmatter.go is only a logger declaration; frontmatter fields
+      # are extracted and represented in pkg/workflow/frontmatter_types.go.
+      FRONTMATTER_FIELDS=$(sed -n '/^type FrontmatterConfig struct {$/,/^}$/p' pkg/workflow/frontmatter_types.go 2>/dev/null \
+        | grep -Eo '(json|yaml):"[^"]*"' \
+        | sed -E 's/^(json|yaml):"//;s/"$//' \
         | sed 's/,omitempty//' \
         | sed 's/,.*$//' \
         | grep -v '^-$' \
@@ -74,14 +76,14 @@ pre-agent-steps:
         "\(.key): \(.value.type // (.value.anyOf // .value.oneOf // [] | map(.type // "complex") | unique | join("|")) // "complex")"' \
         pkg/parser/schemas/main_workflow_schema.json 2>/dev/null | sort || echo "")
 
-      # 6. Fields in schema but absent as yaml tags in parser structs
-      IN_SCHEMA_NOT_PARSER=$(comm -23 \
+      # 6. Fields in schema but absent from the frontmatter type definitions
+      IN_SCHEMA_NOT_FRONTMATTER=$(comm -23 \
         <(echo "$SCHEMA_FIELDS") \
-        <(echo "$PARSER_YAML_FIELDS" | sort -u) 2>/dev/null || echo "")
+        <(echo "$FRONTMATTER_FIELDS" | sort -u) 2>/dev/null || echo "")
 
-      # 7. yaml tags in parser structs absent from schema
-      IN_PARSER_NOT_SCHEMA=$(comm -23 \
-        <(echo "$PARSER_YAML_FIELDS" | sort -u) \
+      # 7. Fields in frontmatter type definitions absent from schema
+      IN_FRONTMATTER_NOT_SCHEMA=$(comm -23 \
+        <(echo "$FRONTMATTER_FIELDS" | sort -u) \
         <(echo "$SCHEMA_FIELDS") 2>/dev/null || echo "")
 
       # 8. Fields in schema but absent from workflow compiler structs
@@ -98,24 +100,24 @@ pre-agent-steps:
       jq -n \
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg schema_fields "$SCHEMA_FIELDS" \
-        --arg parser_yaml_fields "$PARSER_YAML_FIELDS" \
+        --arg frontmatter_fields "$FRONTMATTER_FIELDS" \
         --arg workflow_yaml_fields "$WORKFLOW_YAML_FIELDS" \
         --arg used_in_workflows "$USED_FIELDS" \
         --arg field_types "$FIELD_TYPES" \
-        --arg in_schema_not_parser "$IN_SCHEMA_NOT_PARSER" \
-        --arg in_parser_not_schema "$IN_PARSER_NOT_SCHEMA" \
+        --arg in_schema_not_frontmatter "$IN_SCHEMA_NOT_FRONTMATTER" \
+        --arg in_frontmatter_not_schema "$IN_FRONTMATTER_NOT_SCHEMA" \
         --arg in_schema_not_workflow "$IN_SCHEMA_NOT_WORKFLOW" \
         --arg in_used_not_schema "$IN_USED_NOT_SCHEMA" \
         '{
           generated_at: $generated_at,
           schema_fields: ($schema_fields | split("\n") | map(select(. != ""))),
-          parser_yaml_fields: ($parser_yaml_fields | split("\n") | map(select(. != ""))),
+          frontmatter_fields: ($frontmatter_fields | split("\n") | map(select(. != ""))),
           workflow_yaml_fields: ($workflow_yaml_fields | split("\n") | map(select(. != ""))),
           used_in_workflows: ($used_in_workflows | split("\n") | map(select(. != ""))),
           field_types: ($field_types | split("\n") | map(select(. != ""))),
           field_gaps: {
-            in_schema_not_parser: ($in_schema_not_parser | split("\n") | map(select(. != ""))),
-            in_parser_not_schema: ($in_parser_not_schema | split("\n") | map(select(. != ""))),
+            in_schema_not_frontmatter: ($in_schema_not_frontmatter | split("\n") | map(select(. != ""))),
+            in_frontmatter_not_schema: ($in_frontmatter_not_schema | split("\n") | map(select(. != ""))),
             in_schema_not_workflow: ($in_schema_not_workflow | split("\n") | map(select(. != ""))),
             in_used_not_schema: ($in_used_not_schema | split("\n") | map(select(. != "")))
           }
@@ -125,22 +127,54 @@ pre-agent-steps:
       echo "Summary:"
       jq '{
         schema_field_count: (.schema_fields | length),
-        parser_yaml_field_count: (.parser_yaml_fields | length),
+        frontmatter_field_count: (.frontmatter_fields | length),
         workflow_yaml_field_count: (.workflow_yaml_fields | length),
         gaps: {
-          in_schema_not_parser: (.field_gaps.in_schema_not_parser | length),
-          in_parser_not_schema: (.field_gaps.in_parser_not_schema | length),
+          in_schema_not_frontmatter: (.field_gaps.in_schema_not_frontmatter | length),
+          in_frontmatter_not_schema: (.field_gaps.in_frontmatter_not_schema | length),
           in_schema_not_workflow: (.field_gaps.in_schema_not_workflow | length),
           in_used_not_schema: (.field_gaps.in_used_not_schema | length)
         }
       }' /tmp/gh-aw/agent/schema-diff.json
 
       echo "=== AWF config source drift pre-check (gh-aw-firewall) ==="
-      AWF_SNAPSHOT_DIR=/tmp/gh-aw/cache-memory/awf-config-sources
+      AWF_SNAPSHOT_CACHE_DIR=/tmp/gh-aw/cache-memory/awf-config-sources
+      if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+        AWF_SNAPSHOT_DIR="${HOME}/.cache/gh-aw/schema-consistency/last-known-snapshot"
+      else
+        AWF_SNAPSHOT_DIR=/tmp/gh-aw/agent/schema-consistency/last-known-snapshot
+      fi
       mkdir -p "$AWF_SNAPSHOT_DIR"
+      if [ -d "$AWF_SNAPSHOT_CACHE_DIR" ]; then
+        cp -a "$AWF_SNAPSHOT_CACHE_DIR/." "$AWF_SNAPSHOT_DIR/"
+      fi
       AWF_CANONICAL_FETCH_DEGRADED=false
       AWF_USING_SNAPSHOT=false
+      AWF_SNAPSHOT_EXPIRED=false
       AWF_FETCH_FAILED_SOURCES=""
+      AWF_SNAPSHOT_MAX_AGE_SECONDS=604800
+      AWF_SNAPSHOT_DELETE_AGE_SECONDS=1209600
+
+      snapshot_age_seconds() {
+        [ -s "$AWF_SNAPSHOT_DIR/detected_at" ] || return 1
+        snapshot_epoch=$(date -u -d "$(cat "$AWF_SNAPSHOT_DIR/detected_at")" +%s 2>/dev/null) || return 1
+        now_epoch=$(date -u +%s)
+        [ "$snapshot_epoch" -le "$now_epoch" ] || return 1
+        printf '%s\n' "$((now_epoch - snapshot_epoch))"
+      }
+
+      AWF_SNAPSHOT_AGE_SECONDS=$(snapshot_age_seconds || true)
+      if [ -e "$AWF_SNAPSHOT_DIR/awf-config.schema.json" ] && [ -z "$AWF_SNAPSHOT_AGE_SECONDS" ]; then
+        AWF_SNAPSHOT_EXPIRED=true
+        echo "AWF last-known snapshot has no valid refresh timestamp; stale data will not suppress drift warnings"
+      elif [ -n "$AWF_SNAPSHOT_AGE_SECONDS" ] && [ "$AWF_SNAPSHOT_AGE_SECONDS" -gt "$AWF_SNAPSHOT_MAX_AGE_SECONDS" ]; then
+        AWF_SNAPSHOT_EXPIRED=true
+        echo "AWF last-known snapshot is older than 7 days; stale data will not suppress drift warnings"
+        if [ "$AWF_SNAPSHOT_AGE_SECONDS" -gt "$AWF_SNAPSHOT_DELETE_AGE_SECONDS" ]; then
+          rm -rf "$AWF_SNAPSHOT_DIR" "$AWF_SNAPSHOT_CACHE_DIR"
+          mkdir -p "$AWF_SNAPSHOT_DIR"
+        fi
+      fi
 
       fetch_awf_source() {
         local source_path="$1"
@@ -172,17 +206,23 @@ pre-agent-steps:
           target_path=/tmp/gh-aw/agent/"$source_file"
         fi
 
-        if [ ! -s "$target_path" ] && [ -s "$AWF_SNAPSHOT_DIR/$source_file" ]; then
+        if [ ! -s "$target_path" ] && [ "$AWF_SNAPSHOT_EXPIRED" = false ] && [ -s "$AWF_SNAPSHOT_DIR/$source_file" ]; then
           cp "$AWF_SNAPSHOT_DIR/$source_file" "$target_path"
           AWF_USING_SNAPSHOT=true
-          echo "⚠️ Using last-known AWF snapshot for $source_path"
+          echo "Using last-known AWF snapshot for $source_path"
         fi
       done
 
       if [ -s /tmp/gh-aw/agent/awf-config.schema.json ] && [ -s /tmp/gh-aw/agent/awf-config-runtime.schema.json ] && [ -s /tmp/gh-aw/agent/awf-config-spec.md ]; then
-        cp /tmp/gh-aw/agent/awf-config.schema.json "$AWF_SNAPSHOT_DIR/awf-config.schema.json"
-        cp /tmp/gh-aw/agent/awf-config-runtime.schema.json "$AWF_SNAPSHOT_DIR/awf-config-runtime.schema.json"
-        cp /tmp/gh-aw/agent/awf-config-spec.md "$AWF_SNAPSHOT_DIR/awf-config-spec.md"
+        if [ "$AWF_CANONICAL_FETCH_DEGRADED" = false ]; then
+          cp /tmp/gh-aw/agent/awf-config.schema.json "$AWF_SNAPSHOT_DIR/awf-config.schema.json"
+          cp /tmp/gh-aw/agent/awf-config-runtime.schema.json "$AWF_SNAPSHOT_DIR/awf-config-runtime.schema.json"
+          cp /tmp/gh-aw/agent/awf-config-spec.md "$AWF_SNAPSHOT_DIR/awf-config-spec.md"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$AWF_SNAPSHOT_DIR/detected_at"
+          rm -rf "$AWF_SNAPSHOT_CACHE_DIR"
+          mkdir -p "$AWF_SNAPSHOT_CACHE_DIR"
+          cp -a "$AWF_SNAPSHOT_DIR/." "$AWF_SNAPSHOT_CACHE_DIR/"
+        fi
 
         jq -r '.properties | keys[]' /tmp/gh-aw/agent/awf-config.schema.json | sort -u \
           > /tmp/gh-aw/agent/awf-config-top-level.txt
@@ -202,6 +242,8 @@ pre-agent-steps:
           --arg refs_sample_count "$(wc -l < /tmp/gh-aw/agent/awf-config-ghaw-refs.txt | tr -d ' ')" \
           --arg degraded "$AWF_CANONICAL_FETCH_DEGRADED" \
           --arg using_snapshot "$AWF_USING_SNAPSHOT" \
+          --arg snapshot_expired "$AWF_SNAPSHOT_EXPIRED" \
+          --arg snapshot_path "$AWF_SNAPSHOT_DIR" \
           --argjson failed_sources "$FAILED_SOURCES_JSON" \
           '{
             generated_at: $generated_at,
@@ -214,10 +256,14 @@ pre-agent-steps:
             ghaw_reference_sample_count: ($refs_sample_count | tonumber),
             degraded: ($degraded == "true"),
             using_snapshot: ($using_snapshot == "true"),
+            snapshot_expired: ($snapshot_expired == "true"),
+            snapshot_path: $snapshot_path,
             failed_sources: $failed_sources
           }' > /tmp/gh-aw/agent/awf-config-drift.json
         if [ "$AWF_CANONICAL_FETCH_DEGRADED" = true ]; then
-          echo "⚠️ AWF canonical source fetch degraded; continuing in non-fatal mode"
+          printf 'AWF canonical source retrieval failed at %s for:\n%b' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$AWF_FETCH_FAILED_SOURCES"
+          echo "AWF canonical source fetch degraded; continuing in non-fatal mode"
         else
           echo "✓ AWF config source pre-check artifacts written under /tmp/gh-aw/agent/"
         fi
@@ -234,23 +280,25 @@ pre-agent-steps:
             warning: "canonical source retrieval failed; skipping destructive AWF drift actions",
             failed_sources: $failed_sources
           }' > /tmp/gh-aw/agent/awf-config-drift.json
-        echo "⚠️ AWF canonical source fetch failed; run marked degraded (non-fatal)"
+        printf 'AWF canonical source retrieval failed at %s for:\n%b' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$AWF_FETCH_FAILED_SOURCES"
+        echo "AWF canonical source fetch failed; run marked degraded (non-fatal)"
       fi
-sandbox:
-  agent:
-    sudo: false
 ---
+
 # Schema Consistency Checker
 
 You are an expert system that detects inconsistencies between:
 - The main JSON schema of the frontmatter (`pkg/parser/schemas/main_workflow_schema.json`)
-- The parser and compiler implementation (`pkg/parser/*.go` and `pkg/workflow/*.go`)
+- The parser and compiler implementation (`pkg/workflow/frontmatter_types.go` and `pkg/workflow/*.go`)
 - The documentation (`docs/src/content/docs/**/*.md`)
 - The workflows in the project (`.github/workflows/*.md`)
 
 ## Mission
 
 Analyze the repository to find inconsistencies across these four key areas and create a discussion report with actionable findings.
+
+Before reporting AWF config-source drift, read `/tmp/gh-aw/agent/awf-config-drift.json`. When `degraded` is true, report canonical-source unavailability as a non-authoritative warning only. Do not fail a required check, create a corrective pull request, or create a drift issue from the incomplete or stale AWF comparison.
 
 ## Cache Memory Strategy Storage
 
@@ -295,7 +343,7 @@ Strategy database structure:
 **Key files to analyze:**
 - `pkg/parser/schemas/main_workflow_schema.json`
 - `pkg/parser/schemas/mcp_config_schema.json`
-- `pkg/parser/frontmatter.go` and `pkg/parser/*.go`
+- `pkg/workflow/frontmatter_types.go` and `pkg/workflow/frontmatter_extraction_yaml.go`
 - `pkg/workflow/compiler.go` - main workflow compiler
 - `pkg/workflow/tools.go` - tools configuration processing
 - `pkg/workflow/safe_outputs.go` - safe-outputs configuration
@@ -350,7 +398,7 @@ Strategy database structure:
 - Validation rules not documented
 
 **Focus on:**
-- `pkg/parser/*.go` - frontmatter parsing
+- `pkg/workflow/frontmatter_types.go` - frontmatter field definitions
 - `pkg/workflow/*.go` - workflow compilation and feature processing
 
 ## Detection Strategies
@@ -416,12 +464,12 @@ echo "=== STRATEGIES ===" && \
 
 The schema diff contains:
 - `schema_fields`: All top-level field names in the main JSON schema
-- `parser_yaml_fields`: All yaml-tagged struct fields in `pkg/parser/*.go`
+- `frontmatter_fields`: All JSON/YAML-tagged fields in `pkg/workflow/frontmatter_types.go`
 - `workflow_yaml_fields`: All yaml-tagged struct fields in `pkg/workflow/*.go`
 - `used_in_workflows`: All top-level frontmatter keys used in `.github/workflows/*.md`
 - `field_types`: Schema field types for all top-level fields
-- `field_gaps.in_schema_not_parser`: Fields in schema absent from parser yaml tags
-- `field_gaps.in_parser_not_schema`: Fields as parser yaml tags absent from schema
+- `field_gaps.in_schema_not_frontmatter`: Fields in schema absent from frontmatter type definitions
+- `field_gaps.in_frontmatter_not_schema`: Fields in frontmatter type definitions absent from schema
 - `field_gaps.in_schema_not_workflow`: Fields in schema absent from workflow compiler yaml tags
 - `field_gaps.in_used_not_schema`: Fields used in workflow files but not in schema
 

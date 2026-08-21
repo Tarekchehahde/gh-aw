@@ -10,9 +10,6 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 imports:
   - shared/otlp.md
@@ -22,6 +19,9 @@ tools:
     toolsets: [repos, issues, pull_requests]
 strict: false
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Example: Properly Provisioned Permissions

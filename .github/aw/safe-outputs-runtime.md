@@ -4,7 +4,14 @@ description: Safe-output reference for runtime defaults, custom jobs, scripts, a
 
 # Safe Outputs: Runtime and Extensibility
 
+See [jobs.md](jobs.md) for the full compiler-generated job graph and which job each credential (`github-token`, `github-app`) configures.
+
 The `report-incomplete` safe-output is enabled by default and is distinct from `noop`. Use it when required tools or data are unavailable and the task cannot be meaningfully performed (e.g., MCP server crash, missing authentication, inaccessible repository). When an agent emits `report_incomplete`, gh-aw activates failure handling even when the agent process exits 0 — preventing empty outputs from being classified as successful, so every unrecoverable failure is tracked.
+
+**Per-handler modifiers** — most handlers accept `max`, `github-token`, `github-app`, and `staged` to override the global equivalents for that one output type. Two extras:
+
+- `issue-intent:` (boolean) on `close-issue`, `set-issue-type`, `set-issue-field`, `assign-to-user`, and `assign-to-agent` — enables issue-intent metadata (rationale/confidence/suggest) fields and their schema requirements on that tool's payload.
+- `normalize-closing-keywords:` (boolean) on body-carrying handlers (`create-issue`, `add-comment`, `create-pull-request`, …) — strips backticks around recognized issue-closing keywords so they stay active.
 
 - `jobs:` - Custom safe-output jobs registered as MCP tools for third-party integrations
 
@@ -86,6 +93,21 @@ The `report-incomplete` safe-output is enabled by default and is distinct from `
 - `allowed-domains:` - Allowed domains for URLs in safe output content (array)
   - URLs from unlisted domains are replaced with `(redacted)`
   - GitHub domains are always included by default
+- `data:` - Structured data configuration for body-based safe outputs (boolean, object, or GitHub Actions expression)
+  - Applies to `create-issue`, `add-comment`, `create-pull-request`, `create-pull-request-review-comment`, `submit-pull-request-review`, and `reply-to-pull-request-review-comment`
+  - `false` or omitted (default) - no structured `data` field accepted
+  - `true` - accept any object as the `data` field alongside `body`
+  - Inline schema object - enforce shape; supports full JSON Schema keywords (`type`, `properties`, `required`, `items`, `enum`, etc.) or shorthand (`{ verdict: string, score: number }`)
+  - `${{ ... }}` expression - resolves to one of the above at runtime
+  - Example:
+
+    ```yaml
+    safe-outputs:
+      data:
+        verdict: string
+        score: number
+      add-comment:
+    ```
 - `allowed-github-references:` - Allowed repositories for GitHub-style references (array)
   - Controls which GitHub references (`#123`, `owner/repo#456`) are allowed in workflow output
   - References to unlisted repositories are escaped with backticks to prevent timeline items
@@ -195,7 +217,7 @@ safe-outputs:
     expires: ${{ inputs.expires-days }}
 ```
 
-Fields that influence permission computation (`add-comment.discussions`, `create-pull-request.fallback-as-issue`) remain literal booleans.
+Fields that influence permission computation (`add-comment.discussions`, `hide-comment.discussions`, `create-pull-request.fallback-as-issue`) remain literal booleans.
 
 - `timeout-minutes:` - Timeout for the safe-outputs job in minutes (integer, default: `45`)
   - Increase for workflows with many sequential safe-output operations (e.g. `push-to-pull-request-branch` against large repositories)
@@ -213,6 +235,8 @@ Fields that influence permission computation (`add-comment.discussions`, `create
 - `failure-issue-repo:` - Repository to create failure tracking issues in (string, format: `"owner/repo"`)
   - Defaults to the current repository when not specified
   - Use when the current repository has issues disabled: `failure-issue-repo: "myorg/infra-alerts"`
+- `report-failed-jobs:` - Controls whether failed non-builtin jobs (custom `jobs:` entries) are reported as issues (boolean, default: `true`)
+  - Set to `false` to disable failure-issue creation for custom job failures while keeping agent-failure reporting
 - `id-token:` - Override the id-token permission for the safe-outputs job (string: `"write"` or `"none"`)
   - `"write"`: force-enable `id-token: write` permission (required for OIDC authentication with cloud providers)
   - `"none"`: suppress automatic detection and prevent adding `id-token: write` even when vault/OIDC actions are detected in steps

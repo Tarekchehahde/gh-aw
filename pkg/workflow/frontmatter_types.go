@@ -228,6 +228,13 @@ type OTLPGitHubAppConfig struct {
 	Audience string `json:"audience,omitempty"`
 }
 
+// OTLPWorkloadIdentityConfig configures cloud workload identity federation for OTLP export.
+type OTLPWorkloadIdentityConfig struct {
+	Provider       string `json:"provider,omitempty"`
+	Audience       string `json:"audience,omitempty"`
+	ServiceAccount string `json:"service-account,omitempty"`
+}
+
 // OTLPConfig holds configuration for OTLP (OpenTelemetry Protocol) trace export.
 type OTLPConfig struct {
 	// Endpoint accepts one of three forms:
@@ -290,6 +297,10 @@ type OTLPConfig struct {
 	// When configured, gh-aw mints an OIDC token before actions/setup and passes
 	// it to setup so OTLP requests can include an Authorization bearer token.
 	GitHubApp *OTLPGitHubAppConfig `json:"github-app,omitempty"`
+
+	// WorkloadIdentity exchanges a GitHub Actions OIDC token for a cloud access
+	// token before OTLP export. Google is currently the supported provider.
+	WorkloadIdentity *OTLPWorkloadIdentityConfig `json:"workload-identity,omitempty"`
 }
 
 // ObservabilityConfig represents workflow observability options.
@@ -308,21 +319,26 @@ type FrontmatterConfig struct {
 	// configuration (e.g. {id: copilot, max-continuations: 2}).  Using any prevents
 	// JSON unmarshal failures when the engine is an object, which would otherwise cause
 	// ParseFrontmatterConfig to return nil and break features that depend on it (e.g. OTLP).
-	Engine             any               `json:"engine,omitempty"`
-	Source             string            `json:"source,omitempty"`
-	Redirect           string            `json:"redirect,omitempty"`
-	TrackerID          string            `json:"tracker-id,omitempty"`
-	Version            string            `json:"version,omitempty"`
-	TimeoutMinutes     *TemplatableInt32 `json:"timeout-minutes,omitempty"`
-	MaxAICredits       *TemplatableInt32 `json:"max-ai-credits,omitempty"`
-	MaxTurnCacheMisses *int32            `json:"max-turn-cache-misses,omitempty"`
-	MaxDailyAICredits  *TemplatableInt32 `json:"max-daily-ai-credits,omitempty"`
-	MaxToolDenials     *TemplatableInt32 `json:"max-tool-denials,omitempty"`
-	Strict             *bool             `json:"strict,omitempty"`  // Pointer to distinguish unset from false
-	Private            *bool             `json:"private,omitempty"` // If true, workflow cannot be added to other repositories
-	Labels             []string          `json:"labels,omitempty"`
-	Skills             []any             `json:"skills,omitempty"`
-	SkillReferences    []SkillReference  `json:"-"`
+	Engine                      any                          `json:"engine,omitempty"`
+	Source                      string                       `json:"source,omitempty"`
+	Redirect                    string                       `json:"redirect,omitempty"`
+	TrackerID                   string                       `json:"tracker-id,omitempty"`
+	ThreatDetectionSuppressions []ThreatDetectionSuppression `json:"threat-detection-suppress,omitempty"`
+	TimeoutMinutes              *TemplatableInt32            `json:"timeout-minutes,omitempty"`
+	MaxTurns                    *TemplatableInt32            `json:"max-turns,omitempty"`
+	MaxRuns                     *TemplatableInt32            `json:"max-runs,omitempty"` // Deprecated: top-level legacy alias for max-turns; migrate with 'gh aw fix'
+	MaxAICredits                *TemplatableInt32            `json:"max-ai-credits,omitempty"`
+	MaxTurnCacheMisses          *int32                       `json:"max-turn-cache-misses,omitempty"`
+	MaxDailyAICredits           *TemplatableInt32            `json:"max-daily-ai-credits,omitempty"`
+	MaxToolDenials              *TemplatableInt32            `json:"max-tool-denials,omitempty"`
+	Strict                      *bool                        `json:"strict,omitempty"`  // Pointer to distinguish unset from false
+	Private                     *bool                        `json:"private,omitempty"` // If true, workflow cannot be added to other repositories
+	Labels                      []string                     `json:"labels,omitempty"`
+	Skills                      []any                        `json:"skills,omitempty"`
+	SkillReferences             []SkillReference             `json:"-"`
+	Plugins                     []string                     `json:"plugins,omitempty"`
+	AmbientFolders              []string                     `json:"ambient-folders,omitempty"`
+	GitHubApp                   *GitHubAppConfig             `json:"github-app,omitempty"`
 
 	// Configuration sections - using strongly-typed structs
 	Tools            *ToolsConfig               `json:"tools,omitempty"`
@@ -333,6 +349,7 @@ type FrontmatterConfig struct {
 	Jobs             map[string]any             `json:"jobs,omitempty"`        // Custom workflow jobs (too dynamic to type)
 	SafeOutputs      *SafeOutputsConfig         `json:"safe-outputs,omitempty"`
 	MCPScripts       *MCPScriptsConfig          `json:"mcp-scripts,omitempty"`
+	Enclaves         EnclavesConfig             `json:"enclaves,omitempty"`
 	PermissionsTyped *PermissionsConfig         `json:"-"` // New typed field (not in JSON to avoid conflict)
 
 	// Event and trigger configuration
@@ -368,7 +385,6 @@ type FrontmatterConfig struct {
 	// Import and inclusion
 	Imports        any            `json:"imports,omitempty"`         // Can be string or array
 	ImportSchema   map[string]any `json:"import-schema,omitempty"`   // Schema for validating 'with' values when this workflow is imported
-	Include        any            `json:"include,omitempty"`         // Can be string or array
 	InlinedImports bool           `json:"inlined-imports,omitempty"` // If true, inline all imports at compile time instead of using runtime-import macros
 	Resources      []string       `json:"resources,omitempty"`       // Additional workflow .md or action .yml files to fetch alongside this workflow
 
@@ -410,12 +426,24 @@ type FrontmatterConfig struct {
 	// Controls how actions/checkout is invoked.
 	// Can be a single CheckoutConfig object or an array of CheckoutConfig objects.
 	// Set to false to disable the default checkout step entirely.
-	Checkout         any               `json:"checkout,omitempty"` // Raw value (object, array, or false)
-	CheckoutConfigs  []*CheckoutConfig `json:"-"`                  // Parsed checkout configs (not in JSON)
-	CheckoutDisabled bool              `json:"-"`                  // true when checkout: false is set in frontmatter
+	Checkout                   any               `json:"checkout,omitempty"` // Raw value (object, array, or false)
+	CheckoutConfigs            []*CheckoutConfig `json:"-"`                  // Parsed checkout configs (not in JSON)
+	CheckoutDisabled           bool              `json:"-"`                  // true when checkout: false is set in frontmatter
+	CheckoutExplicitlyDisabled bool              `json:"-"`                  // true only when checkout: false is explicitly written by the user in frontmatter
+
+	// Model is the top-level LLM model override. When set, it takes precedence over
+	// engine.model. Use this field instead of engine.model.
+	// Example: model: gpt-5.4
+	Model string `json:"model,omitempty"`
 
 	// BinEval evaluations: list of binary questions evaluated after safe-outputs.
 	// Can be a plain list (shorthand) or an object with a questions list and optional
 	// engine-config / runs-on overrides.
 	Evals any `json:"evals,omitempty"`
+
+	// ExcludedEnv lists additional environment variable names that must be excluded from
+	// the agent container via AWF's --exclude-env flag.  Use this when an env var is set
+	// from a source that the compiler cannot automatically detect as credential-bearing
+	// (e.g. a workflow_dispatch input that carries a token).
+	ExcludedEnv []string `json:"excluded-env,omitempty"`
 }

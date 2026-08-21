@@ -52,7 +52,7 @@ const KIND_AGENT_TOOL_DONE = "agent_tool_done";
 /**
  * Parses a JSONL string into an array of objects, skipping blank/malformed lines.
  * @param {string} content
- * @returns {object[]}
+ * @returns {any[]}
  */
 function parseJsonl(content) {
   const results = [];
@@ -79,10 +79,10 @@ function parseTimestamp(value) {
     // Unix float seconds (AWF firewall audit.jsonl uses this)
     const ms = Math.round(value * 1000);
     const d = new Date(ms);
-    return isNaN(d.getTime()) ? null : d;
+    return Number.isNaN(d.getTime()) ? null : d;
   }
   const d = new Date(String(value));
-  return isNaN(d.getTime()) ? null : d;
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 /**
@@ -211,9 +211,17 @@ function collectGatewayEvents(opts = {}) {
   let isRpc = false;
 
   if (fs.existsSync(gwPath)) {
-    content = fs.readFileSync(gwPath, "utf8");
+    try {
+      content = fs.readFileSync(gwPath, "utf8");
+    } catch (err) {
+      throw new Error(`Failed to read file ${gwPath}: ${String(err)}`, { cause: err });
+    }
   } else if (fs.existsSync(rpcPath)) {
-    content = fs.readFileSync(rpcPath, "utf8");
+    try {
+      content = fs.readFileSync(rpcPath, "utf8");
+    } catch (err) {
+      throw new Error(`Failed to read file ${rpcPath}: ${String(err)}`, { cause: err });
+    }
     isRpc = true;
   } else {
     return [];
@@ -294,7 +302,12 @@ function collectFirewallEvents(opts = {}) {
 
   if (!fs.existsSync(auditPath)) return [];
 
-  const content = fs.readFileSync(auditPath, "utf8");
+  let content;
+  try {
+    content = fs.readFileSync(auditPath, "utf8");
+  } catch (err) {
+    throw new Error(`Failed to read file ${auditPath}: ${String(err)}`, { cause: err });
+  }
   const events = [];
 
   for (const entry of parseJsonl(content)) {
@@ -372,7 +385,12 @@ function collectAgentEvents(opts = {}) {
   }
   if (!eventsPath || !fs.existsSync(eventsPath)) return [];
 
-  const content = fs.readFileSync(eventsPath, "utf8");
+  let content;
+  try {
+    content = fs.readFileSync(eventsPath, "utf8");
+  } catch (err) {
+    throw new Error(`Failed to read file ${eventsPath}: ${String(err)}`, { cause: err });
+  }
   const events = [];
   let turnIndex = 0;
 

@@ -117,12 +117,21 @@ func getAgentConfig(workflowData *WorkflowData) *AgentSandboxConfig {
 
 // getAgentContainerRuntime returns the container runtime string for the AWF config,
 // or an empty string if no custom runtime is configured.
+// docker-sbx and cloud-hypervisor are excluded because they are not OCI runtimes;
+// they pass --container-runtime via CLI flags in BuildAWFArgs instead.
 func getAgentContainerRuntime(workflowData *WorkflowData) string {
 	agentConfig := getAgentConfig(workflowData)
 	if agentConfig == nil || agentConfig.Disabled {
 		return ""
 	}
-	return string(agentConfig.Runtime)
+	// Only gVisor is an OCI runtime that AWF passes through as
+	// container.containerRuntime. The docker/docker-sudo-iptables profiles use the
+	// default Docker runtime, and docker-sbx/cloud-hypervisor pass
+	// --container-runtime via CLI flags in BuildAWFArgs instead.
+	if agentConfig.Runtime != AgentRuntimeGVisor {
+		return ""
+	}
+	return string(AgentRuntimeGVisor)
 }
 
 // isGVisorRuntime returns true when the agent container should use gVisor (runsc).
@@ -134,12 +143,56 @@ func isGVisorRuntime(workflowData *WorkflowData) bool {
 	return agentConfig.Runtime == AgentRuntimeGVisor
 }
 
+// isDockerSbxRuntime returns true when the agent should run inside a Docker sbx
+// microVM (KVM-based hypervisor isolation).
+func isDockerSbxRuntime(workflowData *WorkflowData) bool {
+	agentConfig := getAgentConfig(workflowData)
+	if agentConfig == nil || agentConfig.Disabled {
+		return false
+	}
+	return agentConfig.Runtime == AgentRuntimeDockerSbx
+}
+
+// isCloudHypervisorRuntime returns true when the agent should run inside a Cloud
+// Hypervisor microVM (preview).
+func isCloudHypervisorRuntime(workflowData *WorkflowData) bool {
+	agentConfig := getAgentConfig(workflowData)
+	if agentConfig == nil || agentConfig.Disabled {
+		return false
+	}
+	return agentConfig.Runtime == AgentRuntimeCloudHypervisor
+}
+
+// isRuntimeInstallEnabled returns true when runtime installation steps should be
+// generated (the default). Returns false only when sandbox.agent.runtime-install is
+// explicitly set to false AND a runtime (gVisor or docker-sbx) is configured.
+// When no runtime is set, the field has no effect and true is returned.
+func isRuntimeInstallEnabled(workflowData *WorkflowData) bool {
+	agentConfig := getAgentConfig(workflowData)
+	if agentConfig == nil || agentConfig.Disabled {
+		return true
+	}
+	// Noop when the runtime does not provision anything on the runner.
+	if !resolveSandboxRuntimeProfile(agentConfig).SupportsRuntimeInstall {
+		return true
+	}
+	if agentConfig.RuntimeInstall != nil && !*agentConfig.RuntimeInstall {
+		return false
+	}
+	return true
+}
+
 func isAWFNetworkIsolationEnabled(workflowData *WorkflowData) bool {
 	agentConfig := getAgentConfig(workflowData)
 	if agentConfig == nil || agentConfig.Disabled {
 		return false
 	}
-	return agentConfig.NetworkIsolation
+	// Inline threat detection and evals run a standalone AWF with no MCP sidecars, so
+	// there is nothing to attach to the isolated topology.
+	if workflowData != nil && (workflowData.IsDetectionRun || workflowData.IsEvalsRun) {
+		return false
+	}
+	return resolveSandboxRuntimeProfile(agentConfig).NetworkIsolation
 }
 
 // enableFirewallByDefaultForCopilot enables firewall by default for copilot and codex engines
@@ -186,6 +239,22 @@ func enableFirewallByDefaultForClaude(engineID string, networkPermissions *Netwo
 func enableFirewallByDefaultForPi(engineID string, networkPermissions *NetworkPermissions, sandboxConfig *SandboxConfig) {
 	// Only apply to pi engine
 	if engineID != string(constants.PiEngine) {
+		return
+	}
+
+	enableFirewallByDefaultForEngine(engineID, networkPermissions, sandboxConfig)
+}
+
+// enableFirewallByDefaultForGemini enables firewall by default for Gemini engine
+// when network restrictions are present but no explicit firewall configuration exists
+// and sandbox.agent is not explicitly set to false
+//
+// The firewall is enabled by default for Gemini UNLESS:
+// - allowed contains "*" (unrestricted network access)
+// - sandbox.agent is explicitly set to false
+func enableFirewallByDefaultForGemini(engineID string, networkPermissions *NetworkPermissions, sandboxConfig *SandboxConfig) {
+	// Only apply to gemini engine
+	if engineID != string(constants.GeminiEngine) {
 		return
 	}
 

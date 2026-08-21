@@ -83,9 +83,9 @@ This is a test workflow with cache-memory enabled.
 		t.Error("Expected GH_AW_CACHE_DIR in substitution step")
 	}
 
-	// Test 3: Verify the template file is used (not inline text)
-	if !strings.Contains(lockStr, "${RUNNER_TEMP}/gh-aw/prompts/cache_memory_prompt.md") {
-		t.Error("Expected '${RUNNER_TEMP}/gh-aw/prompts/cache_memory_prompt.md' reference in generated workflow")
+	// Test 3: Verify the template file is rendered by the JavaScript action.
+	if !strings.Contains(lockStr, "create_prompt.cjs") {
+		t.Error("Expected JavaScript prompt renderer in generated workflow")
 	}
 
 	// Test 4: Verify the instruction mentions persistent cache
@@ -276,6 +276,34 @@ func TestDailyFunctionNamerUsesConcreteClaudeModelsForExperiment(t *testing.T) {
 	}
 }
 
+func TestGoLoggerDefinesSingleTerminalSafeOutputContract(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatalf("Failed to find repo root: %v", err)
+	}
+
+	workflowFile := filepath.Join(repoRoot, ".github", "workflows", "go-logger.md")
+	content, err := os.ReadFile(workflowFile)
+	if err != nil {
+		t.Fatalf("Failed to read workflow file: %v", err)
+	}
+
+	workflow := string(content)
+	for _, keyword := range []string{
+		"exactly one terminal outcome",
+		"`create_pull_request`",
+		"`noop`",
+		"`report_incomplete`",
+		"exactly once, as your final action",
+		"Do not probe safe outputs",
+		"Do not retry the call or switch to another terminal safe output",
+	} {
+		if !strings.Contains(workflow, keyword) {
+			t.Fatalf("Expected go-logger workflow to include safe-output contract keyword %q", keyword)
+		}
+	}
+}
+
 func TestDailyCavemanOptimizerUsesConcreteClaudeModelsForExperiment(t *testing.T) {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
@@ -415,6 +443,52 @@ func TestLayoutSpecMaintainerHasToolBudgetAwareness(t *testing.T) {
 	} {
 		if !strings.Contains(workflow, expected) {
 			t.Fatalf("Expected layout-spec-maintainer workflow to contain %q", expected)
+		}
+	}
+}
+
+func TestDailyAgentOfTheDayBlogWriterHasGitDenialMitigationAllowlist(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatalf("Failed to find repo root: %v", err)
+	}
+
+	workflowFile := filepath.Join(repoRoot, ".github", "workflows", "daily-agent-of-the-day-blog-writer.md")
+	content, err := os.ReadFile(workflowFile)
+	if err != nil {
+		t.Fatalf("Failed to read workflow file: %v", err)
+	}
+
+	workflow := string(content)
+	// The workflow uses bash: ["*"] to allow all bash commands (including git),
+	// which covers the git denial mitigation pattern without needing an explicit allowlist.
+	if !strings.Contains(workflow, `bash: ["*"]`) {
+		t.Fatalf("Expected Daily Agent of the Day Blog Writer workflow to allow all bash commands via bash: [\"*\"]")
+	}
+}
+
+func TestLayoutSpecMaintainerHasGitDenialMitigationAllowlist(t *testing.T) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		t.Fatalf("Failed to find repo root: %v", err)
+	}
+
+	workflowFile := filepath.Join(repoRoot, ".github", "workflows", "layout-spec-maintainer.md")
+	content, err := os.ReadFile(workflowFile)
+	if err != nil {
+		t.Fatalf("Failed to read workflow file: %v", err)
+	}
+
+	workflow := string(content)
+	for _, expected := range []string{
+		"  - cd * && git status",
+		"  - cd * && git checkout -b *",
+		"  - git -C * checkout -b *",
+		"  - cd * && git add * && git diff --cached --stat",
+		"  - cd * && git add * && git status",
+	} {
+		if !strings.Contains(workflow, expected) {
+			t.Fatalf("Expected Layout Specification Maintainer workflow to contain %q", expected)
 		}
 	}
 }
@@ -579,9 +653,9 @@ This is a test workflow with playwright enabled.
 		t.Error("Expected 'Create prompt with built-in context' step in generated workflow")
 	}
 
-	// Test 2: Verify the cat command for playwright prompt file is included
-	if !strings.Contains(lockStr, "cat \"${RUNNER_TEMP}/gh-aw/prompts/playwright_prompt.md\"") {
-		t.Error("Expected cat command for playwright prompt file in generated workflow")
+	// Test 2: Verify the renderer configuration includes the playwright prompt file.
+	if !strings.Contains(lockStr, `\"file\":\"playwright_prompt.md\"`) {
+		t.Error("Expected playwright prompt file in renderer configuration")
 	}
 
 	t.Logf("Successfully verified playwright output directory instructions are included in generated workflow")
@@ -756,9 +830,9 @@ This is a test workflow with issue_comment trigger.
 		t.Error("Expected 'Create prompt with built-in context' step in generated workflow")
 	}
 
-	// Test 2: Verify the cat command for PR context prompt file is included
-	if !strings.Contains(lockStr, "cat \"${RUNNER_TEMP}/gh-aw/prompts/pr_context_prompt.md\"") {
-		t.Error("Expected cat command for PR context prompt file in generated workflow")
+	// Test 2: Verify the renderer configuration includes the PR context prompt file.
+	if !strings.Contains(lockStr, `\"file\":\"pr_context_prompt.md\"`) {
+		t.Error("Expected PR context prompt file in renderer configuration")
 	}
 
 	t.Logf("Successfully verified PR context instructions are included for issue_comment trigger")

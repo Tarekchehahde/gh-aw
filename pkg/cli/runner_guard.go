@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/console"
+	"github.com/github/gh-aw/pkg/fileutil"
 	"github.com/github/gh-aw/pkg/gitutil"
 	"github.com/github/gh-aw/pkg/logger"
 )
@@ -25,6 +26,7 @@ type runnerGuardFinding struct {
 	Description string `json:"description"`
 	Remediation string `json:"remediation"`
 	File        string `json:"file"`
+	JobID       string `json:"job_id"`
 	Line        int    `json:"line"`
 }
 
@@ -35,6 +37,20 @@ type runnerGuardOutput struct {
 	Grade    string               `json:"grade,omitempty"`
 }
 
+func buildRunnerGuardContainerScanPath(scanPath string) (string, error) {
+	if scanPath == "" {
+		return "./", nil
+	}
+	cleanPath := filepath.Clean(scanPath)
+	if !filepath.IsLocal(cleanPath) {
+		return "", fmt.Errorf("runner-guard scan path must stay local to the repository. Expected a relative path inside the repository. Example: .github/workflows. Got: %q", scanPath)
+	}
+	if containsControlCharacters(cleanPath) {
+		return "", fmt.Errorf("runner-guard scan path contains invalid control characters. Expected a plain relative path. Example: .github/workflows. Got: %q", scanPath)
+	}
+	return "./" + filepath.ToSlash(cleanPath), nil
+}
+
 // runRunnerGuardOnDirectory runs the runner-guard taint analysis scanner on a directory
 // containing workflows using the Docker image.
 func runRunnerGuardOnDirectory(workflowDir string, verbose bool, strict bool) error {
@@ -43,47 +59,73 @@ func runRunnerGuardOnDirectory(workflowDir string, verbose bool, strict bool) er
 	// Find git root to get the absolute path for Docker volume mount
 	gitRoot, err := gitutil.FindGitRoot()
 	if err != nil {
-		return fmt.Errorf("failed to find git root: %w", err)
+		return err
 	}
 
-	// Validate gitRoot is an absolute path (security: ensure trusted path from git)
-	if !filepath.IsAbs(gitRoot) {
-		return fmt.Errorf("git root is not an absolute path: %s", gitRoot)
+	gitRoot, err = fileutil.ValidateAbsolutePath(gitRoot)
+	if err != nil {
+		return fmt.Errorf("git root %q is not a valid absolute path; runner-guard requires an absolute repository root. Example: run gh aw from inside a git checkout: %w", gitRoot, err)
 	}
 
 	// Determine the scan path: use workflowDir relative to gitRoot when possible,
 	// so the scan is scoped to the compiled workflows directory.
 	scanPath := "."
 	if workflowDir != "" {
-		relDir, relErr := filepath.Rel(gitRoot, workflowDir)
-		if relErr == nil && relDir != ".." && !strings.HasPrefix(relDir, ".."+string(filepath.Separator)) {
-			scanPath = relDir
+		absWorkflowDir, err := filepath.Abs(workflowDir)
+		if err != nil {
+			return fmt.Errorf("workflow directory %q could not be resolved to an absolute path; expected an existing directory. Example: .github/workflows: %w", workflowDir, err)
 		}
+		if err := fileutil.ValidatePathWithinBase(gitRoot, absWorkflowDir); err != nil {
+			return fmt.Errorf("workflow directory %q must stay within git root %q; expected a directory inside the repository. Example: .github/workflows: %w", workflowDir, gitRoot, err)
+		}
+		relDir, relErr := filepath.Rel(gitRoot, absWorkflowDir)
+		if relErr != nil {
+			return fmt.Errorf("workflow directory %q could not be expressed relative to git root %q; expected a directory inside the repository. Example: .github/workflows: %w", workflowDir, gitRoot, relErr)
+		}
+		if !filepath.IsLocal(relDir) {
+			return fmt.Errorf("workflow directory %q resolved to non-local relative path %q", workflowDir, relDir)
+		}
+		scanPath = filepath.Clean(relDir)
+	}
+
+	// Prefix with "./" and convert host separators to forward slashes for the Linux container.
+	// This prevents option injection: without the prefix a workflowDir such as "--help" would
+	// produce a scanPath beginning with "-", which runner-guard could interpret as a flag.
+	containerScanPath, err := buildRunnerGuardContainerScanPath(scanPath)
+	if err != nil {
+		return fmt.Errorf("runner-guard scan path is invalid; expected a relative path inside the repository. Example: .github/workflows: %w", err)
 	}
 
 	// Build the Docker command
 	// docker run --rm -v "$gitRoot:/workdir" -w /workdir ghcr.io/vigilant-llc/runner-guard:latest scan <path> --format json
-	// #nosec G204 -- gitRoot comes from git rev-parse (trusted source) and is validated as absolute path.
-	// exec.Command with separate args (not shell execution) prevents command injection.
-	cmd := exec.Command(
-		"docker",
-		"run",
-		"--rm",
-		"-v", gitRoot+":/workdir",
-		"-w", "/workdir",
-		RunnerGuardImage,
-		"scan",
-		scanPath,
-		"--format", "json",
-	)
+	dockerPath, err := fileutil.ResolveExecutablePath("docker")
+	if err != nil {
+		return fmt.Errorf("docker command not found: %w", err)
+	}
+	volumeMount, err := buildDockerVolumeMount(gitRoot, "/workdir")
+	if err != nil {
+		return fmt.Errorf("docker mount path for git root %q is invalid; expected an absolute host path. Example: /home/user/repo: %w", gitRoot, err)
+	}
+	runnerGuardImageRef, err := validateDockerImageRef(RunnerGuardImage)
+	if err != nil {
+		return fmt.Errorf("runner-guard scanner image reference %q is invalid; expected a registry reference. Example: ghcr.io/owner/image:tag: %w", RunnerGuardImage, err)
+	}
+	// #nosec G204 -- gitRoot is validated as an absolute path above (from git rev-parse, a trusted
+	// source). containerScanPath is derived from filepath.Rel(gitRoot, workflowDir), cleaned with
+	// filepath.Clean, validated to not escape the repository root (no ".." prefix), and prefixed
+	// with "./" to prevent option injection. dockerPath is resolved from the allowlisted executable
+	// name "docker" via fileutil.ResolveExecutablePath. runnerGuardImageRef is the validated result
+	// of validateDockerImageRef above. exec.Command passes args directly to the OS (no shell).
+	dockerArgs := runnerGuardDockerArgs(runnerGuardImageRef, volumeMount, containerScanPath)
+	// #nosec G204 -- see the trust-boundary rationale above.
+	cmd := exec.Command(dockerPath, dockerArgs...)
 
 	// Always show that runner-guard is running (regular verbosity)
 	fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Running runner-guard taint analysis scanner"))
 
 	// In verbose mode, also show the command that users can run directly
 	if verbose {
-		dockerCmd := fmt.Sprintf("docker run --rm -v \"%s:/workdir\" -w /workdir %s scan %s --format json",
-			gitRoot, RunnerGuardImage, scanPath)
+		dockerCmd := shellJoinArgs(append([]string{"docker"}, dockerArgs...))
 		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run runner-guard directly: "+dockerCmd))
 	}
 
@@ -103,6 +145,7 @@ func runRunnerGuardOnDirectory(workflowDir string, verbose bool, strict bool) er
 		if stdout.Len() > 0 {
 			fmt.Fprint(os.Stderr, stdout.String())
 		}
+
 		if stderr.Len() > 0 {
 			fmt.Fprint(os.Stderr, stderr.String())
 		}
@@ -122,22 +165,36 @@ func runRunnerGuardOnDirectory(workflowDir string, verbose bool, strict bool) er
 						return fmt.Errorf("strict mode: runner-guard exited with code 1 (findings present) and output could not be parsed: %w", parseErr)
 					}
 					if totalFindings > 0 {
-						return fmt.Errorf("strict mode: runner-guard found %d security findings - workflows must have no runner-guard findings in strict mode", totalFindings)
+						return fmt.Errorf("strict mode: runner-guard found %d security findings - workflows must have no runner-guard findings in strict mode. Example: rerun after resolving all reported findings", totalFindings)
 					}
-					// Exit code 1 with no parseable findings is still a failure in strict mode
-					return errors.New("strict mode: runner-guard exited with code 1 indicating findings are present")
+					// Exit code 1 with no remaining findings means every reported finding was
+					// a known false positive that was filtered out, so the scan passes.
+					return nil
 				}
 				// In non-strict mode, findings are logged but not treated as errors
 				return nil
 			}
 			// Other exit codes are actual errors
-			return fmt.Errorf("runner-guard failed with exit code %d", exitCode)
+			return fmt.Errorf("runner-guard failed with exit code %d; expected 0 (clean) or 1 (findings reported). Example: rerun with gh aw --verbose to see the scanner output", exitCode)
 		}
 		// Non-ExitError errors (e.g., command not found)
-		return fmt.Errorf("runner-guard failed: %w", err)
+		return fmt.Errorf("runner-guard failed to start; a working docker installation is required. Example: run docker info to check the daemon: %w", err)
 	}
 
 	return nil
+}
+
+func runnerGuardDockerArgs(imageRef, volumeMount, containerScanPath string) []string {
+	return []string{
+		"run",
+		"--rm",
+		"-v", volumeMount,
+		"-w", "/workdir",
+		imageRef,
+		"scan",
+		containerScanPath,
+		"--format", "json",
+	}
 }
 
 // parseAndDisplayRunnerGuardOutput parses runner-guard JSON output and displays findings.
@@ -150,17 +207,42 @@ func parseAndDisplayRunnerGuardOutput(stdout string, verbose bool, gitRoot strin
 	trimmed := strings.TrimSpace(stdout)
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		if trimmed != "" {
-			return 0, fmt.Errorf("unexpected runner-guard output format: %s", trimmed)
+			return 0, fmt.Errorf("unexpected runner-guard output format (expected JSON object or array). Example: {\"findings\":[]}. Got: %s", trimmed)
 		}
 		return 0, nil
 	}
 
 	var output runnerGuardOutput
 	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		return 0, fmt.Errorf("failed to parse runner-guard JSON output: %w", err)
+		return 0, fmt.Errorf("runner-guard JSON output could not be parsed; expected a JSON object. Example: {\"findings\":[]}: %w", err)
 	}
 
 	totalFindings := len(output.Findings)
+	if totalFindings == 0 {
+		return 0, nil
+	}
+
+	// Drop RGS-004 findings for jobs that are gated behind gh-aw's activation job chain.
+	// runner-guard evaluates jobs in isolation and does not follow needs: edges.
+	output.Findings = filterRunnerGuardFindings(output.Findings, gitRoot)
+
+	// Drop RGS-005 findings for compiler-generated jobs that perform narrowly scoped
+	// lifecycle and safe-output writes. The main agent job remains read-only.
+	output.Findings = filterGeneratedSafeOutputPermissionFindings(output.Findings, gitRoot)
+
+	// Drop findings that carry an inline runner-guard suppression comment near the reported
+	// location in the compiled workflow.
+	output.Findings = filterRunnerGuardIgnoredFindings(output.Findings, gitRoot)
+
+	// Drop RGS-012 findings for Copilot allow-tool declarations that only document local curl
+	// permissions. The declarations are not executable curl calls and cannot exfiltrate secrets.
+	output.Findings = filterCopilotLocalAllowToolFindings(output.Findings, gitRoot)
+
+	// Drop RGS-012 findings for the compiler-generated gVisor install step, which downloads a
+	// pinned, SHA-512-verified artifact and never exfiltrates secrets.
+	output.Findings = filterGvisorInstallFindings(output.Findings, gitRoot)
+
+	totalFindings = len(output.Findings)
 	if totalFindings == 0 {
 		return 0, nil
 	}

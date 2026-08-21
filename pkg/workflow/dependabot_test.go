@@ -653,6 +653,121 @@ func TestGenerateDependabotManifests_StrictMode(t *testing.T) {
 	}
 }
 
+func TestGeneratePackageLock_DisablesNpmScripts(t *testing.T) {
+	compiler := NewCompiler()
+	workflowDir := testutil.TempDir(t, "workflow-*")
+	fakeBinDir := testutil.TempDir(t, "fake-bin-*")
+
+	argsFile := filepath.Join(workflowDir, "npm-args.txt")
+	envFile := filepath.Join(workflowDir, "npm-ignore-scripts-env.txt")
+
+	fakeNpm := filepath.Join(fakeBinDir, "npm")
+	script := `#!/bin/sh
+printf "%s\n" "$@" > "$GH_AW_TEST_ARGS_FILE"
+printf "%s" "$NPM_CONFIG_IGNORE_SCRIPTS" > "$GH_AW_TEST_ENV_FILE"
+touch package-lock.json
+`
+	if err := os.WriteFile(fakeNpm, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake npm binary: %v", err)
+	}
+
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GH_AW_TEST_ARGS_FILE", argsFile)
+	t.Setenv("GH_AW_TEST_ENV_FILE", envFile)
+
+	if err := compiler.generatePackageLock(workflowDir); err != nil {
+		t.Fatalf("generatePackageLock() error = %v", err)
+	}
+
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded npm args: %v", err)
+	}
+	args := string(argsData)
+	if !strings.Contains(args, "install\n") {
+		t.Fatalf("expected npm args to contain install, got: %q", args)
+	}
+	if !strings.Contains(args, "--package-lock-only\n") {
+		t.Fatalf("expected npm args to contain --package-lock-only, got: %q", args)
+	}
+	if !strings.Contains(args, "--ignore-scripts\n") {
+		t.Fatalf("expected npm args to contain --ignore-scripts, got: %q", args)
+	}
+
+	envData, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded NPM_CONFIG_IGNORE_SCRIPTS: %v", err)
+	}
+	if string(envData) != "true" {
+		t.Fatalf("expected NPM_CONFIG_IGNORE_SCRIPTS=true, got: %q", string(envData))
+	}
+}
+
+func TestGeneratePackageLock_UsesNormalizedWorkflowDir(t *testing.T) {
+	compiler := NewCompiler()
+	parentDir := testutil.TempDir(t, "parent-*")
+	workflowDir := filepath.Join(parentDir, "workflow")
+	fakeBinDir := testutil.TempDir(t, "fake-bin-*")
+
+	if err := os.Mkdir(workflowDir, 0o755); err != nil {
+		t.Fatalf("failed to create workflow directory: %v", err)
+	}
+
+	pwdFile := filepath.Join(parentDir, "npm-pwd.txt")
+	fakeNpm := filepath.Join(fakeBinDir, "npm")
+	script := `#!/bin/sh
+pwd > "$GH_AW_TEST_PWD_FILE"
+touch package-lock.json
+`
+	if err := os.WriteFile(fakeNpm, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake npm binary: %v", err)
+	}
+
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GH_AW_TEST_PWD_FILE", pwdFile)
+	t.Chdir(parentDir)
+
+	if err := compiler.generatePackageLock("workflow"); err != nil {
+		t.Fatalf("generatePackageLock() error = %v", err)
+	}
+
+	pwdData, err := os.ReadFile(pwdFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded npm working directory: %v", err)
+	}
+	if strings.TrimSpace(string(pwdData)) != workflowDir {
+		t.Fatalf("expected npm to run in %q, got %q", workflowDir, strings.TrimSpace(string(pwdData)))
+	}
+	if _, err := os.Stat(filepath.Join(workflowDir, "package-lock.json")); err != nil {
+		t.Fatalf("expected package-lock.json in normalized workflow directory: %v", err)
+	}
+}
+
+func TestGeneratePackageLock_RejectsInvalidWorkflowDir(t *testing.T) {
+	compiler := NewCompiler()
+
+	tests := []struct {
+		name        string
+		workflowDir string
+	}{
+		{name: "empty", workflowDir: ""},
+		{name: "whitespace", workflowDir: "   "},
+		{name: "control character", workflowDir: "bad\nworkflow-dir"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := compiler.generatePackageLock(tt.workflowDir)
+			if err == nil {
+				t.Fatal("expected error for invalid workflow directory")
+			}
+			if !strings.Contains(err.Error(), "invalid workflow directory") {
+				t.Fatalf("expected invalid workflow directory error, got: %v", err)
+			}
+		})
+	}
+}
+
 // Tests for Python (pip) support
 
 func TestParsePipPackage(t *testing.T) {
@@ -978,6 +1093,34 @@ func TestGenerateGoMod(t *testing.T) {
 	}
 	if !strings.Contains(content, "golang.org/x/tools v0.1.0") {
 		t.Error("go.mod should contain golang.org/x/tools v0.1.0")
+	}
+}
+
+func TestGenerateGoMod_SkipsEmptyRequireBlock(t *testing.T) {
+	compiler := NewCompiler()
+	tempDir := testutil.TempDir(t, "test-*")
+	goModPath := filepath.Join(tempDir, "go.mod")
+
+	deps := []GoDependency{
+		{Path: "github.com/user/tool", Version: "latest"},
+		{Path: "golang.org/x/tools"},
+	}
+
+	if err := compiler.generateGoMod(goModPath, deps, false); err != nil {
+		t.Fatalf("failed to generate go.mod: %v", err)
+	}
+
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatalf("failed to read go.mod: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "module github.com/github/gh-aw-workflows-deps") {
+		t.Fatalf("go.mod should contain the generated module declaration:\n%s", content)
+	}
+	if strings.Contains(content, "require (") {
+		t.Fatalf("go.mod should not contain a require block when all dependencies are skipped:\n%s", content)
 	}
 }
 

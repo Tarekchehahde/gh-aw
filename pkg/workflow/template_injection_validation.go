@@ -50,9 +50,11 @@ package workflow
 import (
 	"regexp"
 	"strings"
+
+	"github.com/github/gh-aw/pkg/logger"
 )
 
-var templateInjectionValidationLog = newValidationLogger("template_injection")
+var templateInjectionValidationLog = logger.New("workflow:template_injection_validation")
 
 // Pre-compiled regex patterns for template injection detection
 var (
@@ -80,6 +82,14 @@ func mayContainInlineExpression(s string) bool {
 }
 
 func findRunValue(keyPart string) (string, bool) {
+	// Fast pre-check: every regex alternative embeds "run:" (unquoted),
+	// "run\":" (double-quoted close), or "run':" (single-quoted close), so
+	// skip the regex entirely when none of those substrings is present.
+	if !strings.Contains(keyPart, "run:") &&
+		!strings.Contains(keyPart, `run":`) &&
+		!strings.Contains(keyPart, "run':") {
+		return "", false
+	}
 	loc := runKeyPattern.FindStringIndex(keyPart)
 	if loc == nil {
 		return "", false
@@ -104,13 +114,13 @@ func detectHeredocDelimiter(trimmed string) (string, bool) {
 		return "", false
 	}
 	// Reject bash here-strings (<<<): the character immediately after << is another <.
-	if len(after) > 0 && after[0] == '<' {
+	if after != "" && after[0] == '<' {
 		return "", false
 	}
 	// Handle <<- (strip-tab variant): the dash must immediately follow << with no
 	// intervening whitespace. Strip exactly one dash; <<-- and similar are not valid
 	// shell and are treated conservatively as non-heredoc.
-	if len(after) > 0 && after[0] == '-' {
+	if after != "" && after[0] == '-' {
 		after = after[1:]
 	}
 	rest := strings.TrimSpace(after)

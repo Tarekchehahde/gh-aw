@@ -24,12 +24,10 @@ func registerAddTool(server *mcp.Server, execCmd execCmdFunc) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "add",
 		Annotations: &mcp.ToolAnnotations{
-			OpenWorldHint: new(true),
+			OpenWorldHint: boolPtr(true),
 		},
 		Description: "Add workflows from remote repositories to .github/workflows",
-		Icons: []mcp.Icon{
-			{Source: "➕"},
-		},
+		Icons:       mcpToolIcons("➕"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args addArgs) (*mcp.CallToolResult, any, error) {
 		// Check for cancellation before starting
 		select {
@@ -105,7 +103,7 @@ func registerUpdateTool(server *mcp.Server, execCmd execCmdFunc) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "update",
 		Annotations: &mcp.ToolAnnotations{
-			OpenWorldHint: new(true),
+			OpenWorldHint: boolPtr(true),
 		},
 		Description: `Update workflows from their source repositories and check for gh-aw updates.
 
@@ -123,9 +121,7 @@ Returns formatted text output showing:
 - Extension update status
 - Updated workflows with their new versions
 - Compilation status for each updated workflow`,
-		Icons: []mcp.Icon{
-			{Source: "🔄"},
-		},
+		Icons: mcpToolIcons("🔄"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args updateArgs) (*mcp.CallToolResult, any, error) {
 		// Check for cancellation before starting
 		select {
@@ -178,8 +174,8 @@ func registerFixTool(server *mcp.Server, execCmd execCmdFunc) {
 		Name: "fix",
 		Annotations: &mcp.ToolAnnotations{
 			IdempotentHint:  true,
-			DestructiveHint: new(false),
-			OpenWorldHint:   new(false),
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(false),
 		},
 		Description: `Apply automatic codemod-style fixes to agentic workflow files.
 
@@ -204,9 +200,7 @@ Returns formatted text output showing:
 - List of workflow files processed
 - Which codemods were applied to each file
 - Summary of fixes applied`,
-		Icons: []mcp.Icon{
-			{Source: "🔧"},
-		},
+		Icons: mcpToolIcons("🔧"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args fixArgs) (*mcp.CallToolResult, any, error) {
 		// Check for cancellation before starting
 		select {

@@ -14,11 +14,11 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
+    id: awf
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 strict: true
 tracker-id: daily-performance-summary
 tools:
@@ -32,17 +32,23 @@ safe-outputs:
     allowed-exts: [.png, .jpg, .jpeg, .svg]
   close-discussion:
     required-title-prefix: "[daily performance] "
-timeout-minutes: 30
+timeout-minutes: 40
 imports:
   - uses: shared/daily-audit-charts.md
     with:
       title-prefix: "[daily performance] "
   - shared/github-queries-mcp-script.md
+  - shared/reporting.md
 
 
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: performance_data_collected
+    question: Did the agent collect performance data for the 90-day window?
+  - id: summary_with_charts_created
+    question: Was a daily performance summary with trend charts produced?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -400,8 +406,6 @@ Before creating the new discussion, find and close previous daily performance di
 Create a new discussion with the comprehensive performance report.
 
 ### Discussion Format
-
-- **Report Formatting**: Use h3 (###) or lower for all headers in your report to maintain proper document hierarchy. Wrap long sections in `<details><summary>Section Name</summary>` tags to improve readability and reduce scrolling.
 
 **Title**: `[daily performance] Daily Performance Summary - YYYY-MM-DD`
 

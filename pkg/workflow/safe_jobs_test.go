@@ -70,7 +70,7 @@ func TestParseSafeJobsConfig(t *testing.T) {
 	}
 
 	// Test runs-on
-	if deployJob.RunsOn != "ubuntu-latest" {
+	if deployJob.RunsOn != "runs-on: ubuntu-latest" {
 		t.Errorf("Expected runs-on to be 'ubuntu-latest', got %v", deployJob.RunsOn)
 	}
 
@@ -145,6 +145,30 @@ func TestParseSafeJobsConfig(t *testing.T) {
 	// Test steps
 	if len(deployJob.Steps) != 1 {
 		t.Fatalf("Expected 1 step, got %d", len(deployJob.Steps))
+	}
+}
+
+func TestBuildSafeJobsDefaultsEmptyRunsOn(t *testing.T) {
+	for name, runsOn := range map[string]any{
+		"empty scalar": "",
+		"empty array":  []any{},
+		"empty label":  []any{""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewCompiler()
+			safeJobs := c.parseSafeJobsConfig(map[string]any{
+				"notify": map[string]any{"runs-on": runsOn},
+			})
+			_, err := c.buildSafeJobs(&WorkflowData{
+				Name:        "test-workflow",
+				SafeOutputs: &SafeOutputsConfig{Jobs: safeJobs},
+			}, false)
+
+			require.NoError(t, err)
+			job, exists := c.jobManager.GetJob("notify")
+			require.True(t, exists)
+			require.Equal(t, "runs-on: ubuntu-latest", job.RunsOn)
+		})
 	}
 }
 
@@ -232,7 +256,7 @@ func TestBuildSafeJobs(t *testing.T) {
 		SafeOutputs: &SafeOutputsConfig{
 			Jobs: map[string]*SafeJobConfig{
 				"deploy": {
-					RunsOn: "ubuntu-latest",
+					RunsOn: "runs-on: ubuntu-latest",
 					If:     "github.event.issue.number",
 					Env: map[string]string{
 						"DEPLOY_ENV": "production",
@@ -366,6 +390,171 @@ safe-outputs:
 	require.Less(t, alphaIdx, zebraIdx, "conclusion job should list safe-jobs in deterministic sorted order")
 }
 
+func TestParseAndBuildSafeJobsRunsOnList(t *testing.T) {
+	c := NewCompiler()
+
+	safeJobs := c.parseSafeJobsConfig(map[string]any{
+		"deploy": map[string]any{
+			"runs-on": []any{"self-hosted", "linux"},
+			"steps": []any{
+				map[string]any{"run": "echo 'Deploying'"},
+			},
+		},
+	})
+
+	require.Equal(t, "runs-on:\n      - self-hosted\n      - linux", safeJobs["deploy"].RunsOn)
+
+	workflowData := &WorkflowData{
+		Name:        "test-workflow",
+		SafeOutputs: &SafeOutputsConfig{Jobs: safeJobs},
+	}
+
+	_, err := c.buildSafeJobs(workflowData, false)
+	require.NoError(t, err)
+
+	jobs := c.jobManager.GetAllJobs()
+	require.Len(t, jobs, 1)
+
+	var job *Job
+	for _, j := range jobs {
+		job = j
+		break
+	}
+
+	// Multiple labels parsed as a list are rendered as a YAML list.
+	require.Equal(t, "runs-on:\n      - self-hosted\n      - linux", job.RunsOn)
+}
+
+func TestParseAndBuildSafeJobsRunsOnObject(t *testing.T) {
+	tests := []struct {
+		name     string
+		runsOn   map[string]any
+		expected string
+	}{
+		{
+			name:     "group only",
+			runsOn:   map[string]any{"group": "safe-job-runners"},
+			expected: "runs-on:\n      group: safe-job-runners",
+		},
+		{
+			name: "group and labels",
+			runsOn: map[string]any{
+				"group":  "safe-job-runners",
+				"labels": []any{"linux", "x64"},
+			},
+			expected: "runs-on:\n      group: safe-job-runners\n      labels:\n      - linux\n      - x64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCompiler()
+			safeJobs := c.parseSafeJobsConfig(map[string]any{
+				"deploy": map[string]any{
+					"runs-on": tt.runsOn,
+					"steps":   []any{map[string]any{"run": "echo 'Deploying'"}},
+				},
+			})
+
+			_, err := c.buildSafeJobs(&WorkflowData{
+				Name:        "test-workflow",
+				SafeOutputs: &SafeOutputsConfig{Jobs: safeJobs},
+			}, false)
+			require.NoError(t, err)
+
+			jobs := c.jobManager.GetAllJobs()
+			require.Len(t, jobs, 1)
+			for _, job := range jobs {
+				require.Equal(t, tt.expected, job.RunsOn)
+			}
+		})
+	}
+}
+
+func TestBuildSafeJobsRejectsEmptyRunsOnObject(t *testing.T) {
+	c := NewCompiler()
+	safeJobs := c.parseSafeJobsConfig(map[string]any{
+		"deploy": map[string]any{
+			"runs-on": map[string]any{},
+			"steps":   []any{map[string]any{"run": "echo 'Deploying'"}},
+		},
+	})
+
+	_, err := c.buildSafeJobs(&WorkflowData{
+		Name:        "test-workflow",
+		SafeOutputs: &SafeOutputsConfig{Jobs: safeJobs},
+	}, false)
+	require.ErrorContains(t, err, "invalid runs-on for safe-job 'deploy'")
+	require.ErrorContains(t, err, "runs-on object is empty")
+}
+
+func TestCompileSafeJobRunsOnObject(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "safe-job-runs-on-object")
+	workflowPath := filepath.Join(tmpDir, "safe-job-runs-on-object.md")
+	content := `---
+on: workflow_dispatch
+permissions: read-all
+engine: copilot
+safe-outputs:
+  jobs:
+    notify:
+      runs-on:
+        group: safe-job-runners
+        labels: [linux]
+      inputs:
+        message:
+          description: Message
+      steps:
+        - run: echo hi
+---
+
+# Test
+`
+	require.NoError(t, os.WriteFile(workflowPath, []byte(content), 0o644))
+
+	compiler := NewCompiler()
+	require.NoError(t, compiler.CompileWorkflow(workflowPath))
+
+	compiled, err := os.ReadFile(filepath.Join(tmpDir, "safe-job-runs-on-object.lock.yml"))
+	require.NoError(t, err)
+	notifyJob := extractJobSection(string(compiled), "notify")
+	require.Contains(t, notifyJob, "    runs-on:\n      group: safe-job-runners\n      labels:\n      - linux")
+}
+
+func TestParseAndBuildSafeJobsSingleRunsOnList(t *testing.T) {
+	c := NewCompiler()
+
+	safeJobs := c.parseSafeJobsConfig(map[string]any{
+		"deploy": map[string]any{
+			"runs-on": []any{"self-hosted"},
+			"steps": []any{
+				map[string]any{"run": "echo 'Deploying'"},
+			},
+		},
+	})
+
+	require.Equal(t, "runs-on:\n      - self-hosted", safeJobs["deploy"].RunsOn)
+
+	workflowData := &WorkflowData{
+		Name:        "test-workflow",
+		SafeOutputs: &SafeOutputsConfig{Jobs: safeJobs},
+	}
+
+	_, err := c.buildSafeJobs(workflowData, false)
+	require.NoError(t, err)
+
+	jobs := c.jobManager.GetAllJobs()
+	require.Len(t, jobs, 1)
+
+	var job *Job
+	for _, j := range jobs {
+		job = j
+		break
+	}
+
+	require.Equal(t, "runs-on:\n      - self-hosted", job.RunsOn)
+}
+
 func TestBuildSafeJobsWithNoConfiguration(t *testing.T) {
 	c := NewCompiler()
 
@@ -403,7 +592,7 @@ func TestBuildSafeJobsWithoutCustomIfCondition(t *testing.T) {
 		SafeOutputs: &SafeOutputsConfig{
 			Jobs: map[string]*SafeJobConfig{
 				"notify": {
-					RunsOn: "ubuntu-latest",
+					RunsOn: "runs-on: ubuntu-latest",
 					// No custom 'if' condition
 					Inputs: map[string]*InputDefinition{
 						"message": {
@@ -454,7 +643,7 @@ func TestBuildSafeJobsWithDashesInName(t *testing.T) {
 		SafeOutputs: &SafeOutputsConfig{
 			Jobs: map[string]*SafeJobConfig{
 				"send-notification": {
-					RunsOn: "ubuntu-latest",
+					RunsOn: "runs-on: ubuntu-latest",
 					Steps: []any{
 						map[string]any{
 							"name": "Send notification",
@@ -578,21 +767,21 @@ func TestExtractSafeJobsFromFrontmatter(t *testing.T) {
 		t.Error("Expected 'deploy' job to exist")
 	}
 
-	if deployJob.RunsOn != "ubuntu-latest" {
-		t.Errorf("Expected runs-on to be 'ubuntu-latest', got '%s'", deployJob.RunsOn)
+	if deployJob.RunsOn != "runs-on: ubuntu-latest" {
+		t.Errorf("Expected runs-on to be 'ubuntu-latest', got '%v'", deployJob.RunsOn)
 	}
 }
 
 func TestMergeSafeJobs(t *testing.T) {
 	base := map[string]*SafeJobConfig{
 		"deploy": {
-			RunsOn: "ubuntu-latest",
+			RunsOn: "runs-on: ubuntu-latest",
 		},
 	}
 
 	additional := map[string]*SafeJobConfig{
 		"test": {
-			RunsOn: "ubuntu-latest",
+			RunsOn: "runs-on: ubuntu-latest",
 		},
 	}
 
@@ -609,7 +798,7 @@ func TestMergeSafeJobs(t *testing.T) {
 	// Test conflict detection
 	conflicting := map[string]*SafeJobConfig{
 		"deploy": {
-			RunsOn: "windows-latest",
+			RunsOn: "runs-on: windows-latest",
 		},
 	}
 
@@ -631,7 +820,7 @@ func TestMergeSafeJobsFromIncludedConfigs(t *testing.T) {
 	topSafeJobs := map[string]*SafeJobConfig{
 		"deploy": {
 			Name:   "Deploy Application",
-			RunsOn: "ubuntu-latest",
+			RunsOn: "runs-on: ubuntu-latest",
 		},
 	}
 
@@ -682,8 +871,8 @@ func TestMergeSafeJobsFromIncludedConfigs(t *testing.T) {
 		t.Error("Expected 'test' job from includes to exist")
 	}
 
-	if testJob.RunsOn != "ubuntu-latest" {
-		t.Errorf("Expected test job runs-on to be 'ubuntu-latest', got '%s'", testJob.RunsOn)
+	if testJob.RunsOn != "runs-on: ubuntu-latest" {
+		t.Errorf("Expected test job runs-on to be 'ubuntu-latest', got '%v'", testJob.RunsOn)
 	}
 
 	notifyJob, exists := result["notify"]
@@ -727,7 +916,7 @@ func TestBuildSafeJobsEnvExpressionHoisting(t *testing.T) {
 		SafeOutputs: &SafeOutputsConfig{
 			Jobs: map[string]*SafeJobConfig{
 				"publish": {
-					RunsOn: "ubuntu-latest",
+					RunsOn: "runs-on: ubuntu-latest",
 					Env: map[string]string{
 						"GH_TOKEN":   "${{ github.token }}",
 						"STATIC_VAR": "literal-value",
@@ -909,4 +1098,18 @@ func TestSafeJobsInputTypes(t *testing.T) {
 	if envInput.Type != "environment" {
 		t.Errorf("Expected type 'environment', got %s", envInput.Type)
 	}
+}
+
+func TestMergeSafeJobsFromIncludedConfigsRejectsMacOSRunner(t *testing.T) {
+	c := NewCompiler()
+
+	_, err := c.mergeSafeJobsFromIncludedConfigs(nil, []string{`{
+"jobs": {
+"notify": {
+"runs-on": "macos-latest"
+}
+}
+}`})
+
+	require.ErrorContains(t, err, "safe-outputs.jobs.notify.runs-on")
 }

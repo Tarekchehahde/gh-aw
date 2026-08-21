@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -26,10 +27,11 @@ const (
 	MaxIterations = 20
 	// BatchSize is the number of runs to fetch in each iteration
 	BatchSize = 100
-	// BatchSizeForAllWorkflows is the larger batch size when searching for agentic workflows
-	// There can be a really large number of workflow runs in a repository, so
-	// we are generous in the batch size when used without qualification.
-	BatchSizeForAllWorkflows = 250
+	// BatchSizeForAllWorkflows is the batch size when searching across all agentic workflows.
+	// We cap this at 100 (the GitHub API max per_page) so each batch requires only a single
+	// API call.  Using 250 previously caused three API round-trips per batch, making the
+	// unfiltered list slow enough to exceed the MCP gateway's default 60-second tool timeout.
+	BatchSizeForAllWorkflows = 100
 	// MaxConcurrentDownloads limits the number of parallel artifact downloads
 	MaxConcurrentDownloads = 10
 	// APICallCooldown is the minimum pause between successive batch-fetch iterations to
@@ -72,12 +74,13 @@ type WorkflowRun struct {
 	ActionMinutes       float64 // Billable Actions minutes estimated from wall-clock time
 	TokenUsage          int
 	Turns               int
+	TurnsAvailable      bool // True when turn count was successfully read from artifact logs
 	ErrorCount          int
 	WarningCount        int
 	MissingToolCount    int
 	MissingDataCount    int
 	NoopCount           int
-	SafeItemsCount      int
+	SafeItemsCount      int           `json:"safe_items_count,omitempty"` // Count of safe-output items actually written to GitHub
 	EffectiveTokens     int           // Cost-normalized token count computed from per-model multipliers
 	AvgTimeBetweenTurns time.Duration // Average time between consecutive LLM API calls (from per-turn timestamps when available)
 	LogsPath            string
@@ -106,6 +109,7 @@ type ProcessedRun struct {
 	MissingData             []MissingDataReport
 	Noops                   []NoopReport
 	MCPFailures             []MCPFailureReport
+	SkillActivations        []SkillActivation
 	MCPToolUsage            *MCPToolUsageData
 	TokenUsage              *TokenUsageSummary
 	GitHubRateLimitUsage    *GitHubRateLimitUsage
@@ -151,6 +155,17 @@ type MCPFailureReport struct {
 	ReportProvenance
 }
 
+// SkillActivation records a detected skill invocation from agent logs.
+// Source indicates where the invocation was detected: "agent_output" for
+// items emitted by the workflow via safe-output, or "log_parse" for
+// patterns extracted from raw agent log files.
+type SkillActivation struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`           // "invoked"
+	Source string `json:"source,omitempty"` // "agent_output" or "log_parse"
+	ReportProvenance
+}
+
 // AggregatedSummaryBase holds the shared tail fields that appear byte-for-byte identically
 // in MissingToolSummary and MissingDataSummary (and as a subset in MCPFailureSummary).
 // Embedding this struct removes copy-paste drift risk across the aggregated-report types.
@@ -163,6 +178,21 @@ type AggregatedSummaryBase struct {
 	RunIDs             []int64  `json:"run_ids" console:"-"`                       // List of run IDs
 }
 
+// MCPServerStatsBase holds the per-server identity and volume fields shared by the MCP
+// server health/stats report types (MCPServerStats, MCPServerHealthDetail and
+// MCPServerCrossRunHealth). Those types previously spelled the same concepts four
+// different ways (TotalCalls/ToolCalls/ToolCallCount and TotalErrors/ErrorCount);
+// embedding this struct standardizes the Go field names and removes copy-paste drift
+// risk, following the same approach as AggregatedSummaryBase. Types whose serialized
+// schema differs from these tags keep it via a MarshalJSON override.
+type MCPServerStatsBase struct {
+	ServerName    string `json:"server_name" console:"header:Server"`
+	ToolCallCount int    `json:"tool_call_count" console:"header:Tool Calls"`
+	// ErrorCount keeps the omitempty tags of MCPServerStats, the only embedder that
+	// serializes/renders these tags directly; the other embedders override MarshalJSON.
+	ErrorCount int `json:"error_count,omitempty" console:"header:Errors,omitempty"`
+}
+
 // MissingToolSummary aggregates missing tool reports across runs
 type MissingToolSummary struct {
 	Tool string `json:"tool" console:"header:Tool"`
@@ -171,11 +201,24 @@ type MissingToolSummary struct {
 
 // MCPFailureSummary aggregates MCP server failure reports across runs
 type MCPFailureSummary struct {
-	ServerName       string   `json:"server_name" console:"header:Server"`
-	Count            int      `json:"count" console:"header:Failures"`
-	Workflows        []string `json:"workflows" console:"-"`                  // List of workflow names that had this server fail
-	WorkflowsDisplay string   `json:"-" console:"header:Workflows,maxlen:60"` // Formatted display of workflows
-	RunIDs           []int64  `json:"run_ids" console:"-"`                    // List of run IDs where this server failed
+	ServerName            string `json:"server_name" console:"header:Server"`
+	AggregatedSummaryBase `console:"-"`
+}
+
+// MarshalJSON preserves the MCP failure JSON schema while sharing aggregation state with
+// the other summary types.
+func (s MCPFailureSummary) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ServerName string   `json:"server_name"`
+		Count      int      `json:"count"`
+		Workflows  []string `json:"workflows"`
+		RunIDs     []int64  `json:"run_ids"`
+	}{
+		ServerName: s.ServerName,
+		Count:      s.Count,
+		Workflows:  s.Workflows,
+		RunIDs:     s.RunIDs,
+	})
 }
 
 // MissingDataSummary aggregates missing data reports across runs
@@ -195,6 +238,30 @@ type MCPToolUsageSummary struct {
 // ErrNoArtifacts indicates that a workflow run has no artifacts
 var ErrNoArtifacts = errors.New("no artifacts found for this run")
 
+// RunAnalysis holds the run metadata, metrics and analysis reports extracted from a
+// workflow run's logs and artifacts. It is embedded by both RunSummary and DownloadResult
+// so both carriers share a single definition of the analysis surface.
+type RunAnalysis struct {
+	Run                     WorkflowRun              `json:"run"`                               // Full workflow run metadata
+	Metrics                 LogMetrics               `json:"metrics"`                           // Extracted log metrics
+	AwContext               *AwContext               `json:"context,omitempty"`                 // aw_context data from aw_info.json
+	TaskDomain              *TaskDomainInfo          `json:"task_domain,omitempty"`             // Inferred workflow task domain
+	BehaviorFingerprint     *BehaviorFingerprint     `json:"behavior_fingerprint,omitempty"`    // Compact execution profile
+	AgenticAssessments      []AgenticAssessment      `json:"agentic_assessments,omitempty"`     // Derived agentic judgments
+	AccessAnalysis          *DomainAnalysis          `json:"access_analysis"`                   // Network access analysis
+	FirewallAnalysis        *FirewallAnalysis        `json:"firewall_analysis"`                 // Firewall log analysis
+	RedactedDomainsAnalysis *RedactedDomainsAnalysis `json:"redacted_domains_analysis"`         // Redacted URL domains analysis
+	MissingTools            []MissingToolReport      `json:"missing_tools"`                     // Missing tool reports
+	MissingData             []MissingDataReport      `json:"missing_data"`                      // Missing data reports
+	Noops                   []NoopReport             `json:"noops"`                             // Noop messages
+	MCPFailures             []MCPFailureReport       `json:"mcp_failures"`                      // MCP server failures
+	SkillActivations        []SkillActivation        `json:"skill_activations,omitempty"`       // Detected skill invocations
+	MCPToolUsage            *MCPToolUsageData        `json:"mcp_tool_usage,omitempty"`          // MCP tool usage data
+	TokenUsage              *TokenUsageSummary       `json:"token_usage_summary,omitempty"`     // Token usage from firewall proxy
+	GitHubRateLimitUsage    *GitHubRateLimitUsage    `json:"github_rate_limit_usage,omitempty"` // GitHub API quota consumption
+	JobDetails              []JobInfoWithDuration    `json:"job_details"`                       // Job execution details
+}
+
 // RunSummary represents a complete summary of a workflow run's artifacts and metrics.
 // This file is written to each run folder as "run_summary.json" to cache processing results
 // and avoid re-downloading and re-processing already analyzed runs.
@@ -209,53 +276,21 @@ var ErrNoArtifacts = errors.New("no artifacts found for this run")
 // - If the CLI version in the summary doesn't match the current version, the run is reprocessed
 // - This ensures that bug fixes and improvements in log parsing are automatically applied
 type RunSummary struct {
-	CLIVersion              string                   `json:"cli_version"`                       // CLI version used to process this run
-	RunID                   int64                    `json:"run_id"`                            // Workflow run database ID
-	ProcessedAt             time.Time                `json:"processed_at"`                      // When this summary was created
-	Run                     WorkflowRun              `json:"run"`                               // Full workflow run metadata
-	Metrics                 LogMetrics               `json:"metrics"`                           // Extracted log metrics
-	AwContext               *AwContext               `json:"context,omitempty"`                 // aw_context data from aw_info.json
-	TaskDomain              *TaskDomainInfo          `json:"task_domain,omitempty"`             // Inferred workflow task domain
-	BehaviorFingerprint     *BehaviorFingerprint     `json:"behavior_fingerprint,omitempty"`    // Compact execution profile
-	AgenticAssessments      []AgenticAssessment      `json:"agentic_assessments,omitempty"`     // Derived agentic judgments
-	AccessAnalysis          *DomainAnalysis          `json:"access_analysis"`                   // Network access analysis
-	FirewallAnalysis        *FirewallAnalysis        `json:"firewall_analysis"`                 // Firewall log analysis
-	PolicyAnalysis          *PolicyAnalysis          `json:"policy_analysis,omitempty"`         // Firewall policy rule attribution
-	RedactedDomainsAnalysis *RedactedDomainsAnalysis `json:"redacted_domains_analysis"`         // Redacted URL domains analysis
-	MissingTools            []MissingToolReport      `json:"missing_tools"`                     // Missing tool reports
-	MissingData             []MissingDataReport      `json:"missing_data"`                      // Missing data reports
-	Noops                   []NoopReport             `json:"noops"`                             // Noop messages
-	MCPFailures             []MCPFailureReport       `json:"mcp_failures"`                      // MCP server failures
-	MCPToolUsage            *MCPToolUsageData        `json:"mcp_tool_usage,omitempty"`          // MCP tool usage data
-	TokenUsage              *TokenUsageSummary       `json:"token_usage_summary,omitempty"`     // Token usage from firewall proxy
-	GitHubRateLimitUsage    *GitHubRateLimitUsage    `json:"github_rate_limit_usage,omitempty"` // GitHub API quota consumption
-	ArtifactsList           []string                 `json:"artifacts_list"`                    // List of downloaded artifact files
-	JobDetails              []JobInfoWithDuration    `json:"job_details"`                       // Job execution details
+	CLIVersion  string    `json:"cli_version"`  // CLI version used to process this run
+	RunID       int64     `json:"run_id"`       // Workflow run database ID
+	ProcessedAt time.Time `json:"processed_at"` // When this summary was created
+	RunAnalysis
+	PolicyAnalysis *PolicyAnalysis `json:"policy_analysis,omitempty"` // Firewall policy rule attribution
+	ArtifactsList  []string        `json:"artifacts_list"`            // List of downloaded artifact files
 }
 
 // DownloadResult represents the result of downloading and processing a workflow run
 type DownloadResult struct {
-	Run                     WorkflowRun
-	Metrics                 LogMetrics
-	AwContext               *AwContext
-	TaskDomain              *TaskDomainInfo
-	BehaviorFingerprint     *BehaviorFingerprint
-	AgenticAssessments      []AgenticAssessment
-	AccessAnalysis          *DomainAnalysis
-	FirewallAnalysis        *FirewallAnalysis
-	RedactedDomainsAnalysis *RedactedDomainsAnalysis
-	MissingTools            []MissingToolReport
-	MissingData             []MissingDataReport
-	Noops                   []NoopReport
-	MCPFailures             []MCPFailureReport
-	MCPToolUsage            *MCPToolUsageData
-	TokenUsage              *TokenUsageSummary
-	GitHubRateLimitUsage    *GitHubRateLimitUsage
-	JobDetails              []JobInfoWithDuration
-	Error                   error
-	Skipped                 bool
-	Cached                  bool // True if loaded from cached summary
-	LogsPath                string
+	RunAnalysis
+	Error    error
+	Skipped  bool
+	Cached   bool // True if loaded from cached summary
+	LogsPath string
 }
 
 // JobInfo represents basic information about a workflow job
@@ -313,10 +348,12 @@ type AwInfo struct {
 	Staged          bool                `json:"staged"`
 	AwfVersion      string              `json:"awf_version,omitempty"`      // AWF firewall version (new name)
 	FirewallVersion string              `json:"firewall_version,omitempty"` // AWF firewall version (old name, for backward compatibility)
+	AgentRuntime    string              `json:"agent_runtime,omitempty"`    // sandbox.agent.runtime value (e.g., "gvisor", "docker-sbx", "cloud-hypervisor"); empty when unset
+	CacheMemory     bool                `json:"cache_memory"`               // true when the workflow declares tools.cache-memory
 	Steps           AwInfoSteps         `json:"steps,omitzero"`             // Steps metadata
 	CreatedAt       string              `json:"created_at"`
 	Context         *AwContext          `json:"context,omitempty"`       // aw_context data passed via workflow_dispatch inputs
-	TokenWeights    *types.TokenWeights `json:"token_weights,omitempty"` // Custom model cost data (from engine.token-weights)
+	TokenWeights    *types.TokenWeights `json:"token_weights,omitempty"` // Historical/custom model cost data stored in aw_info.json
 	// Additional fields that might be present
 	RunID      any    `json:"run_id,omitempty"`
 	RunNumber  any    `json:"run_number,omitempty"`
@@ -347,4 +384,13 @@ func isFailureConclusion(conclusion string) bool {
 		logsModelsLog.Printf("Checking failure conclusion: conclusion=%s, is_failure=%t", conclusion, isFailure)
 	}
 	return isFailure
+}
+
+// isDriverExitFailure returns true when a failed run shows no agent turns, which
+// indicates the CLI wrapper or a pre/post-agent infrastructure step exited non-zero
+// before the agent had a chance to run.  Runs with Turns > 0 are classified as
+// agent-logic failures instead because the agent did execute.
+// TurnsAvailable must be true to confirm the zero is real rather than missing data.
+func isDriverExitFailure(run WorkflowRun) bool {
+	return isFailureConclusion(run.Conclusion) && run.TurnsAvailable && run.Turns == 0
 }

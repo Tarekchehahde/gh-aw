@@ -14,6 +14,7 @@ imports:
     with:
       min-integrity: approved
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:
@@ -37,9 +38,11 @@ concurrency:
   cancel-in-progress: true
 
 
-sandbox:
-  agent:
-    sudo: false
+evals:
+  - id: pr_analyzed
+    question: Did the agent analyze the pull request for code style alignment, security issues, and test improvements?
+  - id: refinement_pr_or_noop
+    question: Was a refinement pull request created with improvements, or was a comment or noop used when no changes were needed?
 ---
 
 # Code Refiner

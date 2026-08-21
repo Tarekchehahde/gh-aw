@@ -1,5 +1,14 @@
 ### {workflow_name}
 
-**Conclusion:** {conclusion} | **Reason:** {reason}
+Threat detection produced a **{conclusion}** result for this run.
 
-> Generated from [{workflow_name}]({run_url})
+<details>
+<summary>Run details</summary>
+
+| Field | Value |
+|---|---|
+| Conclusion | `{conclusion}` |
+| Reason | `{reason}` |
+| Run | [View run]({run_url}) |
+
+</details>

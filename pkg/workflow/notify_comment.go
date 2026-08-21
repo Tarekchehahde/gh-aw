@@ -41,6 +41,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		return nil, err
 	}
 	steps = append(steps, agentFailureSteps...)
+	steps = append(steps, c.buildConclusionReportFailedJobsStep(data, mainJobName)...)
 	customEnvVars := c.buildConclusionScriptEnvVars(data, mainJobName, safeOutputJobNames, messagesJSON)
 	var token string
 	if data.SafeOutputs != nil && data.SafeOutputs.AddComments != nil {
@@ -58,6 +59,7 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 			CustomToken:   token,
 		})...)
 	}
+	steps = append(steps, c.buildConclusionPreCreatedCheckRunStep(data)...)
 	if c.actionMode.IsScript() {
 		steps = append(steps, c.generateScriptModeCleanupStep())
 	}
@@ -74,12 +76,36 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 		}
 	}
 	notifyCommentLog.Printf("Job built successfully: dependencies_count=%d", len(needs))
+	conclusionPerms := ComputePermissionsForSafeOutputs(data.SafeOutputs)
+	// When observability.otlp.github-app is configured without app-id/private-key
+	// credentials, id-token: write is needed so the conclusion job can mint the OTLP
+	// OIDC token via core.getIDToken(audience) (mirrors threat_detection_job.go).
+	if hasOTLPGitHubOIDCAuth(data.ParsedFrontmatter, data.RawFrontmatter) {
+		conclusionPerms.Set(PermissionIdToken, PermissionWrite)
+	}
+	// The daily-AIC usage cache save step must not run with a fully read-only GITHUB_TOKEN.
+	// If safe-outputs already granted some writable scope (for example issues: write for
+	// comment updates), reuse that existing write access instead of broadening the job.
+	if needsDailyAICCachePermission(data) && !conclusionPerms.HasAnyWriteScope() {
+		conclusionPerms.Set(PermissionActions, PermissionWrite)
+	}
+	// The report-failed-jobs step lists workflow run jobs (actions: read) and creates issues
+	// (issues: write). Ensure the conclusion job has at least those permissions when the
+	// feature is enabled (default: true).
+	if data.SafeOutputs == nil || data.SafeOutputs.ReportFailedJobs == nil || *data.SafeOutputs.ReportFailedJobs {
+		if level, ok := conclusionPerms.Get(PermissionActions); !ok || level == PermissionNone {
+			conclusionPerms.Set(PermissionActions, PermissionRead)
+		}
+		if level, ok := conclusionPerms.Get(PermissionIssues); !ok || level == PermissionNone {
+			conclusionPerms.Set(PermissionIssues, PermissionWrite)
+		}
+	}
 	return &Job{
 		Name:        "conclusion",
-		If:          RenderCondition(buildConclusionJobCondition(data, mainJobName, safeOutputJobNames)),
+		If:          RenderCondition(c.buildConclusionJobCondition(data, mainJobName, safeOutputJobNames)),
 		RunsOn:      c.formatFrameworkJobRunsOn(data),
 		Environment: c.indentYAMLLines(resolveSafeOutputsEnvironment(data), "    "),
-		Permissions: ComputePermissionsForSafeOutputs(data.SafeOutputs).RenderToYAML(),
+		Permissions: conclusionPerms.RenderToYAML(),
 		Concurrency: c.buildConclusionJobConcurrency(data),
 		Steps:       steps,
 		Needs:       needs,
@@ -88,14 +114,15 @@ func (c *Compiler) buildConclusionJob(data *WorkflowData, mainJobName string, sa
 }
 
 // buildUsageArtifactUploadSteps creates steps that collect and upload a compact usage artifact.
-// The artifact includes aw_info.json, aw-info.jsonl, agent_usage.json, agent_usage.jsonl, detection_usage.jsonl, and agent/detection token usage JSONL files (when present).
+// The artifact includes aw_info.json, aw-info.jsonl, agent_usage.json, agent_usage.jsonl, detection_usage.jsonl,
+// evals.jsonl, and agent/detection token usage JSONL files (when present).
 // It also downloads the safe-outputs-items artifact so that generate_usage_activity_summary.cjs
 // can include safe-output item counts in the activity summary without requiring a separate artifact download.
-func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string) []string {
+func buildUsageArtifactUploadSteps(prefix string, hasEvals bool, pinAction func(string) string) []string {
 	usageArtifactName := prefix + "usage"
 	safeOutputsItemsArtifactName := prefix + constants.SafeOutputItemsArtifactName
-	return []string{
-		"      - name: Download safe outputs items manifest\n",
+	steps := []string{
+		"      - name: Download Safe Outputs Items Manifest\n",
 		"        id: download-safe-outputs-manifest\n",
 		"        if: always()\n",
 		"        continue-on-error: true\n",
@@ -103,37 +130,25 @@ func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string)
 		"        with:\n",
 		fmt.Sprintf("          name: %s\n", safeOutputsItemsArtifactName),
 		"          path: /tmp/gh-aw/\n",
+	}
+	if hasEvals {
+		evalsArtifactName := prefix + constants.EvalsArtifactName
+		steps = append(steps,
+			"      - name: Download evals artifact\n",
+			"        id: download-evals-artifact\n",
+			"        if: always()\n",
+			"        continue-on-error: true\n",
+			fmt.Sprintf("        uses: %s\n", pinAction("actions/download-artifact")),
+			"        with:\n",
+			fmt.Sprintf("          name: %s\n", evalsArtifactName),
+			"          path: /tmp/gh-aw/evals/\n",
+		)
+	}
+	steps = append(steps,
 		"      - name: Collect usage artifact files\n",
 		"        if: always()\n",
 		"        continue-on-error: true\n",
-		"        run: |\n",
-		"          mkdir -p /tmp/gh-aw/usage/agent /tmp/gh-aw/usage/detection\n",
-		"          echo \"Usage artifact source file status:\"\n",
-		"          for file in /tmp/gh-aw/aw_info.json /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/agent_usage.json /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl; do\n",
-		"            [ -f \"$file\" ] && echo \"FOUND: $file\" || echo \"MISSING: $file\"\n",
-		"          done\n",
-		"          [ -f /tmp/gh-aw/aw_info.json ] && cp /tmp/gh-aw/aw_info.json /tmp/gh-aw/usage/aw_info.json || true\n",
-		"          [ -f /tmp/gh-aw/aw-info.jsonl ] && cp /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/usage/aw-info.jsonl || true\n",
-		"          [ -f /tmp/gh-aw/agent_usage.json ] && cp /tmp/gh-aw/agent_usage.json /tmp/gh-aw/usage/agent_usage.json || true\n",
-		"          [ -f /tmp/gh-aw/agent_usage.jsonl ] && cp /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/usage/agent_usage.jsonl || true\n",
-		"          [ -f /tmp/gh-aw/detection_usage.jsonl ] && cp /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/usage/detection_usage.jsonl || true\n",
-		"          [ -f /tmp/gh-aw/github_rate_limits.jsonl ] && cp /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/usage/github_rate_limits.jsonl || true\n",
-		// Agent token usage: copy in ascending priority order (last non-empty source wins).
-		// firewall/logs/ is the authoritative proxy-logs dir and goes last so it always wins
-		// over the legacy firewall-audit-logs/ path and the AWF audit dir (firewall/audit/).
-		// Using [ -s ] (non-empty) prevents an empty stub file from zeroing out valid data.
-		"          [ -s /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
-		"          [ -s /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
-		"          [ -s /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true\n",
-		// Detection token usage: same priority ordering as agent.
-		"          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true\n",
-		"          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true\n",
-		"          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true\n",
-		"          [ -f /tmp/gh-aw/usage/agent/token_usage.jsonl ] || : > /tmp/gh-aw/usage/agent/token_usage.jsonl\n",
-		"          [ -f /tmp/gh-aw/usage/detection/token_usage.jsonl ] || : > /tmp/gh-aw/usage/detection/token_usage.jsonl\n",
-		"          mkdir -p /tmp/gh-aw/usage/activity\n",
-		fmt.Sprintf("          node \"%s/generate_usage_activity_summary.cjs\"\n", SetupActionDestinationShell),
-		"          find /tmp/gh-aw/usage -type f -print | sort\n",
+		fmt.Sprintf("        run: bash \"%s/collect_usage_artifact_files.sh\"\n", SetupActionDestinationShell),
 		"      - name: Upload usage artifact\n",
 		"        if: always()\n",
 		"        continue-on-error: true\n",
@@ -146,12 +161,14 @@ func buildUsageArtifactUploadSteps(prefix string, pinAction func(string) string)
 		"            /tmp/gh-aw/usage/agent_usage.json\n",
 		"            /tmp/gh-aw/usage/agent_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/detection_usage.jsonl\n",
+		"            /tmp/gh-aw/usage/evals.jsonl\n",
 		"            /tmp/gh-aw/usage/github_rate_limits.jsonl\n",
 		"            /tmp/gh-aw/usage/agent/token_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/detection/token_usage.jsonl\n",
 		"            /tmp/gh-aw/usage/activity/summary.json\n",
 		"          if-no-files-found: ignore\n",
-	}
+	)
+	return steps
 }
 
 // buildDailyAICUsageCacheSteps creates steps that compute AIC for the current run and persist

@@ -7,7 +7,7 @@ sidebar:
 
 # MCP Gateway Specification
 
-**Version**: 1.15.0  
+**Version**: 1.16.0
 **Status**: Draft Specification  
 **Latest Version**: [mcp-gateway](/gh-aw/reference/mcp-gateway/)  
 **JSON Schema**: [mcp-gateway-config.schema.json](/gh-aw/schemas/mcp-gateway-config.schema.json)  
@@ -501,7 +501,7 @@ The optional `opentelemetry` object in the gateway configuration enables the gat
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `endpoint` | string | Yes (when `opentelemetry` is present) | OTLP/HTTP endpoint URL for the OpenTelemetry collector (e.g., `https://collector.example.com:4318/v1/traces`). MUST use HTTPS. Supports variable expressions. |
+| `endpoint` | string | Yes (when `opentelemetry` is present) | OTLP/HTTP endpoint URL for the OpenTelemetry collector (e.g., `https://collector.example.com:4318/v1/traces` or `http://127.0.0.1:4318/v1/traces`). MUST use HTTP or HTTPS. Supports variable expressions. |
 | `traceId` | string | No | Parent trace ID for context propagation. When set, the gateway attaches all emitted spans as children of this trace, enabling correlation with an existing distributed trace. MUST be a 32-character lowercase hex string (128-bit W3C trace ID format). Supports variable expressions. |
 | `spanId` | string | No | Parent span ID for context propagation. When set together with `traceId`, the gateway sets this span as the direct parent of its root span. MUST be a 16-character lowercase hex string (64-bit W3C span ID format). Ignored when `traceId` is not set. Supports variable expressions. |
 | `serviceName` | string | No | Logical service name reported in the `service.name` resource attribute of all emitted spans. Identifies the gateway in the tracing backend. Defaults to `"mcp-gateway"` when not specified. |
@@ -549,7 +549,7 @@ The gateway MUST NOT fail to start if the OpenTelemetry collector endpoint is un
 **Requirements**:
 
 - `endpoint` MUST be present when the `opentelemetry` object is configured
-- `endpoint` MUST be an HTTPS URL
+- `endpoint` MUST be an HTTP or HTTPS URL
 - `traceId`, when provided, MUST be a 32-character lowercase hex string
 - `spanId`, when provided, MUST be a 16-character lowercase hex string
 - `spanId` SHOULD only be set when `traceId` is also set; if `spanId` is provided without `traceId` the gateway SHOULD log a warning and ignore `spanId`
@@ -1462,6 +1462,30 @@ Guard policy fields are passed to the gateway as part of the GitHub MCP server c
 | `approval-labels` | array or expression | No | `[]` | GitHub label names that promote items to `approved` integrity |
 | `refusal-labels` | array or expression | No | `[]` | GitHub label names that downgrade items to `none` integrity, overriding any promotion |
 
+Compiler-emitted gateway shape for the built-in GitHub server:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "guard-policies": {
+        "allow-only": {
+          "repos": "all",
+          "min-integrity": "approved",
+          "blocked-users": "${{ steps.parse-guard-vars.outputs.blocked_users }}",
+          "trusted-users": "${{ steps.parse-guard-vars.outputs.trusted_users }}",
+          "approval-labels": "${{ steps.parse-guard-vars.outputs.approval_labels }}"
+        }
+      }
+    }
+  }
+}
+```
+
+:::caution
+When `tools.github.lockdown: true` is set, guard-policy fields (`allowed-repos`, `min-integrity`, `blocked-users`, `trusted-users`, `approval-labels`) are ignored at runtime. Lockdown takes precedence and the compiler emits a warning for this combination.
+:::
+
 ### 10.4 Effective Integrity Computation
 
 The gateway MUST compute each item's effective integrity in the following order:
@@ -1647,7 +1671,7 @@ As a defense-in-depth measure, the gateway forces `sink-visibility="public"` for
 
 ### 10.9 Cross-Visibility Opt-Out (`private-to-public-flows`)
 
-Workflow authors who intentionally allow private→public data flows can opt out of cross-visibility protections by declaring `private-to-public-flows` in workflow frontmatter. It accepts either `allow` for a blanket opt-out that disables both `forcePublicRepos` and sink-visibility enforcement, or a list of server IDs to exempt only those servers from default sink-visibility enforcement.
+Workflow authors who intentionally allow private→public data flows can opt out of cross-visibility protections by declaring `private-to-public-flows` under `tools.github` in workflow frontmatter. It accepts either `allow` for a blanket opt-out that disables both `forcePublicRepos` and sink-visibility enforcement, or a list of server IDs to exempt only those servers from default sink-visibility enforcement.
 
 #### 10.9.1 Workflow Frontmatter
 
@@ -1655,9 +1679,8 @@ Workflow authors who intentionally allow private→public data flows can opt out
 ```yaml
 ---
 tools:
-  - github
-  - safe-outputs
-private-to-public-flows: allow
+  github:
+    private-to-public-flows: allow
 ---
 ```
 
@@ -1665,25 +1688,28 @@ private-to-public-flows: allow
 ```yaml
 ---
 tools:
-  - github
-  - safe-outputs
-  - playwright
-private-to-public-flows:
-  - playwright
+  github:
+    private-to-public-flows:
+      - github
+      - my-custom-server
+mcp-servers:
+  my-custom-server:
+    type: http
+    url: "http://localhost:9000/mcp"
 ---
 ```
 
 #### 10.9.2 Constraints
 
-Blanket `allow` is incompatible with `guards_mode: strict`, so the compiler MUST reject that combination at compile time. The list form remains compatible with `strict` because it relaxes only the default sink-visibility for named servers while leaving other protections in place. In list form, every server ID MUST map to an actual MCP server declared in the workflow's `tools` list; unknown IDs MUST be rejected at compile time. With non-strict mode (`filter` or `propagate`), the blanket form disables both the forced `repos="public"` override (Section 4.1.3.8) and the `sink-visibility` runtime-verification override (Section 10.8.4).
+Blanket `allow` is incompatible with `guards_mode: strict`, so the compiler MUST reject that combination at compile time. The list form remains compatible with `strict` because it relaxes only the default sink-visibility for named servers while leaving other protections in place. In list form, every server ID MUST map to an actual MCP server declared in the workflow's `tools` or `mcp-servers` list; unknown IDs MUST be rejected at compile time. With non-strict mode (`filter` or `propagate`), the blanket form disables both the forced `repos="public"` override (Section 4.1.3.8) and the `sink-visibility` runtime-verification override (Section 10.8.4).
 
 #### 10.9.3 Compiler Responsibilities
 
 When the compiler encounters `private-to-public-flows`, it MUST validate the chosen form, emit the matching gateway configuration, and record the opt-out in the audit trail.
 
-For blanket `allow`, the compiler MUST reject `guards_mode: strict`, set `gateway.forcePublicRepos: false` in the generated JSON stdin config, and skip setting `sink-visibility: "public"` even if the target repo is public at compile time.
+For blanket `allow`, the compiler MUST reject `guards_mode: strict`, set `gateway.forcePublicRepos: false` in the generated JSON stdin config, and skip setting `sink-visibility` in write-sink guard policies even if the target repo is public at compile time.
 
-For list form, the compiler MUST verify that every listed server ID exists in the workflow's declared `tools` list, set `gateway.sinkVisibilityExemptServers` to that list in the generated JSON stdin config, and leave `forcePublicRepos` unchanged.
+For list form, the compiler MUST verify that every listed server ID exists in the workflow's declared `tools` or `mcp-servers` list, set `gateway.sinkVisibilityExemptServers` to that list in the generated JSON stdin config, and leave `forcePublicRepos` unchanged.
 
 #### 10.9.4 Interaction Matrix
 
@@ -1818,7 +1844,7 @@ A conforming implementation MUST pass the following test categories:
 - **T-OTEL-001**: Gateway starts successfully when `opentelemetry` is omitted
 - **T-OTEL-002**: Gateway starts successfully when `opentelemetry` is configured with a valid endpoint
 - **T-OTEL-003**: Reject `opentelemetry` configuration with missing `endpoint` field
-- **T-OTEL-004**: Reject `opentelemetry` configuration with a non-HTTPS endpoint
+- **T-OTEL-004**: Reject `opentelemetry` configuration with a non-HTTP(S) endpoint
 - **T-OTEL-005**: Span emitted for each MCP tool invocation with required attributes (`mcp.server`, `mcp.method`, `mcp.tool`, `http.status_code`)
 - **T-OTEL-006**: When `OTEL_EXPORTER_OTLP_HEADERS` env var is set, headers are sent with every OTLP export request
 - **T-OTEL-007**: W3C `traceparent` context propagated when both `traceId` and `spanId` are configured
@@ -2204,6 +2230,13 @@ Content-Type: application/json
 ---
 
 ## Change Log
+
+### Version 1.16.0 (Draft)
+
+- **Changed**: `opentelemetry.endpoint` now accepts HTTP or HTTPS OTLP/HTTP collector URLs (Section 4.1.3.7)
+  - Enables runner-local OTLP collectors such as `http://127.0.0.1:4318` for gateway self-telemetry
+  - **Updated**: T-OTEL-004 — now rejects non-HTTP(S) endpoints instead of all non-HTTPS endpoints
+  - **Updated**: JSON Schema — `opentelemetryConfig.endpoint` pattern now accepts `http://` and `https://` URLs in both canonical schema copies
 
 ### Version 1.15.0 (Draft)
 

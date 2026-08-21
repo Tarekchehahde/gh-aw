@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
@@ -27,7 +28,7 @@ func detectOrgCopilotCLIBillingWithClient(ctx context.Context, orgLogin string, 
 	var result struct {
 		CLI string `json:"cli"`
 	}
-	if err := client.DoWithContext(ctx, "GET", fmt.Sprintf("orgs/%s/copilot/billing", orgLogin), nil, &result); err != nil {
+	if err := client.DoWithContext(ctx, http.MethodGet, fmt.Sprintf("orgs/%s/copilot/billing", orgLogin), nil, &result); err != nil {
 		return "", err
 	}
 	return result.CLI, nil
@@ -78,11 +79,16 @@ func probeCopilotBillingForOrgWithClient(ctx context.Context, orgLogin string, c
 			BillingStatus: cliStatus,
 			LabelSuffix:   " [recommended — org Copilot CLI billing enabled]",
 		}
-	default: // "disabled" or any other policy value
+	case cliStatus == "disabled":
 		return orgCopilotBillingProbeResult{
 			BillingStatus: cliStatus,
 			LabelSuffix:   fmt.Sprintf(" [not available — org Copilot CLI billing: %s]", cliStatus),
 			Disabled:      true,
+		}
+	default: // Unknown policy values are treated as inconclusive.
+		return orgCopilotBillingProbeResult{
+			BillingStatus: cliStatus,
+			InfoNote:      copilotBillingInconclusiveNote,
 		}
 	}
 }

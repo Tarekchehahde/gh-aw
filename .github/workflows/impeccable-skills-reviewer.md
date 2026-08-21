@@ -6,18 +6,23 @@ description: Reviews pull requests using Impeccable skills and applies the most 
 on:
   pull_request:
     types: [ready_for_review]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.changeset/**'
+      - 'socials/**'
+      - 'scratchpad/**'
   workflow_dispatch:
 permissions:
   contents: read
   pull-requests: read
   copilot-requests: write
-sandbox:
-  agent:
-    sudo: false
+features:
+  gh-aw-detection: true
 
+model: claude-sonnet-4.6
 engine:
   id: copilot
-  model: claude-sonnet-4.6
   max-continuations: 6
 imports:
   - uses: shared/pr-review-base.md
@@ -25,32 +30,16 @@ imports:
       min-integrity: approved
   - shared/reporting.md
   - shared/otlp.md
-pre-agent-steps:
-  - name: Pre-fetch PR diff
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
-      PR_DIFF_MAX_LINES: "3000"
-    run: |
-      set -euo pipefail
-      mkdir -p /tmp/gh-aw/agent
-      { gh pr diff "$PR_NUMBER" --repo $EXPR_GITHUB_REPOSITORY \
-          --exclude '**/*.lock.yml' \
-          --exclude '**/generated/**' \
-          --exclude '**/dist/**' \
-          --exclude '**/build/**' \
-          || true; } | head -n "${PR_DIFF_MAX_LINES}" > /tmp/gh-aw/agent/pr-diff.patch
-      LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
-      gh pr view "$PR_NUMBER" \
-        --repo $EXPR_GITHUB_REPOSITORY \
-        --json number,title,body,headRefName,additions,deletions,changedFiles,files \
-        > /tmp/gh-aw/agent/pr-meta.json
-      echo "Pre-fetched PR diff (${LINES} lines) and metadata"
+  - shared/pr-diff-data-fetch.md
 tools:
   cli-proxy: true
   github:
     mode: gh-proxy
+cache:
+  key: pr-prefetch-${{ github.event.pull_request.head.sha }}
+  path: /tmp/gh-aw/agent
+  restore-keys:
+    - pr-prefetch-${{ github.event.pull_request.number }}-
 safe-outputs:
   add-comment:
     hide-older-comments: true
@@ -97,30 +86,41 @@ A successful review:
 
 ## Process
 
-1. Read pre-fetched PR files only:
+1. Verify the required pre-fetched PR files exist and are non-empty before reviewing:
+
+   ```bash
+   test -s /tmp/gh-aw/agent/pr-meta.json && test -s /tmp/gh-aw/agent/pr-diff.patch
+   ```
+
+   If either file is missing or empty, call `noop` with the message: `pre-fetch step failed: required PR metadata or diff file is missing or empty`, then stop.
+
+2. Read pre-fetched PR files only:
 
    - `/tmp/gh-aw/agent/pr-meta.json`
    - `/tmp/gh-aw/agent/pr-diff.patch`
+   - `/tmp/gh-aw/agent/pr-review-comments.json` — existing review comments (each: `id`, `path`, `line`, `body`, `user`); use to avoid duplication before adding new comments
 
-2. List installed skills and inspect the skill docs you need:
+   **Do not** call `gh pr diff`, `gh pr view`, or `get_review_comments` — all data is pre-fetched and available on disk.
+
+3. List installed skills and inspect the skill docs you need:
 
    ```bash
    find /tmp/gh-aw/.github/skills "${RUNNER_TEMP}/gh-aw/.github/skills" -name "SKILL.md" 2>/dev/null | head -40
    ```
 
-3. Select the most relevant skills for the detected change type and risk areas.
+4. Select the most relevant skills for the detected change type and risk areas.
 
    If no external skills are installed, perform a normal high-signal review focused on correctness and security.
 
-4. Add up to 10 high-impact inline review comments using `create-pull-request-review-comment`.
+5. Add up to 10 high-impact inline review comments using `create-pull-request-review-comment`.
 
-5. Submit an overall review using `submit-pull-request-review`:
+6. Submit an overall review using `submit-pull-request-review`:
 
    - `REQUEST_CHANGES` when blocking issues exist
    - `COMMENT` when only non-blocking suggestions exist
    - `APPROVE` when no actionable issues are found
 
-6. Optionally post one concise summary via `add-comment` for large or complex reviews.
+7. Optionally post one concise summary via `add-comment` for large or complex reviews.
 
 ## Review Constraints
 

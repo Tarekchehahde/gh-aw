@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 
 // TestMissingToolSummaryDisplayFields verifies that Display fields are used by console rendering
 func TestMissingToolSummaryDisplayFields(t *testing.T) {
+	t.Parallel()
 	// Create a MissingToolSummary with populated Display fields
 	summaries := []MissingToolSummary{
 		{
@@ -53,21 +55,23 @@ func TestMissingToolSummaryDisplayFields(t *testing.T) {
 	}
 }
 
-// TestMCPFailureSummaryDisplayFields verifies that Display fields are used by console rendering
+// TestMCPFailureSummaryDisplayFields verifies that MCP display fields retain their specific tags.
 func TestMCPFailureSummaryDisplayFields(t *testing.T) {
+	t.Parallel()
 	// Create a MCPFailureSummary with populated Display field
 	summaries := []MCPFailureSummary{
 		{
-			ServerName:       "github-mcp-server",
-			Count:            3,
-			Workflows:        []string{"workflow-a", "workflow-b"},
-			WorkflowsDisplay: "workflow-a, workflow-b", // This should be rendered
-			RunIDs:           []int64{1, 2, 3},
+			ServerName: "github-mcp-server",
+			AggregatedSummaryBase: AggregatedSummaryBase{
+				Count:            3,
+				Workflows:        []string{"workflow-a", "workflow-b"},
+				WorkflowsDisplay: "workflow-a, workflow-b", // This should be rendered
+				RunIDs:           []int64{1, 2, 3},
+			},
 		},
 	}
 
-	// Render using console.RenderStruct
-	output := console.RenderStruct(summaries)
+	output := console.RenderStruct(mcpFailureSummaryDisplays(summaries))
 
 	// Verify that Display field is included in output
 	if !strings.Contains(output, "workflow-a, workflow-b") {
@@ -83,5 +87,40 @@ func TestMCPFailureSummaryDisplayFields(t *testing.T) {
 	}
 	if !strings.Contains(output, "Workflows") {
 		t.Errorf("Workflows header not found in console output")
+	}
+}
+
+// TestMCPFailureSummaryJSONFields verifies that embedding AggregatedSummaryBase keeps
+// the shared JSON fields flattened at the MCP failure summary level.
+func TestMCPFailureSummaryJSONFields(t *testing.T) {
+	t.Parallel()
+	summary := MCPFailureSummary{
+		ServerName: "github-mcp-server",
+		AggregatedSummaryBase: AggregatedSummaryBase{
+			Count:       3,
+			Workflows:   []string{"workflow-a", "workflow-b"},
+			FirstReason: "not part of the MCP failure schema",
+			RunIDs:      []int64{1, 2, 3},
+		},
+	}
+
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	output := string(data)
+	for _, expected := range []string{
+		`"server_name":"github-mcp-server"`,
+		`"count":3`,
+		`"workflows":["workflow-a","workflow-b"]`,
+		`"run_ids":[1,2,3]`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Errorf("Expected %s in JSON output: %s", expected, output)
+		}
+	}
+	if strings.Contains(output, "first_reason") {
+		t.Errorf("first_reason must not be added to the MCP failure JSON schema: %s", output)
 	}
 }

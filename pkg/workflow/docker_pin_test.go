@@ -14,6 +14,17 @@ import (
 // TestApplyContainerPins verifies that applyContainerPins substitutes
 // cached digest references while leaving unpinned images unchanged.
 func TestApplyContainerPins(t *testing.T) {
+	imageTag := strings.TrimPrefix(string(constants.DefaultFirewallVersion), "v")
+	defaultFirewallAgentImage := constants.DefaultFirewallRegistry + "/agent:" + imageTag
+	defaultFirewallAgentPin, ok := getEmbeddedContainerPin(defaultFirewallAgentImage)
+	require.True(t, ok, "embedded pin must exist for %s", defaultFirewallAgentImage)
+
+	nodeLtsAlpinePin, ok := getEmbeddedContainerPin("node:lts-alpine")
+	require.True(t, ok, "embedded pin must exist for node:lts-alpine")
+
+	ghAwNodePin, ok := getEmbeddedContainerPin(constants.DefaultGhAwNodeImage)
+	require.True(t, ok, "embedded pin must exist for %s", constants.DefaultGhAwNodeImage)
+
 	tests := []struct {
 		name            string
 		images          []string
@@ -32,22 +43,22 @@ func TestApplyContainerPins(t *testing.T) {
 			name:            "embedded pin used when cache is absent",
 			images:          []string{"node:lts-alpine"},
 			pins:            nil,
-			expectedRefs:    []string{"node:lts-alpine@sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14"},
-			expectedDigests: []string{"sha256:2bdb65ed1dab192432bc31c95f94155ca5ad7fc1392fb7eb7526ab682fa5bf14"},
+			expectedRefs:    []string{nodeLtsAlpinePin.PinnedImage},
+			expectedDigests: []string{nodeLtsAlpinePin.Digest},
 		},
 		{
 			name:            "embedded firewall pin used when cache is absent",
-			images:          []string{"ghcr.io/github/gh-aw-firewall/agent:0.27.0"},
+			images:          []string{defaultFirewallAgentImage},
 			pins:            nil,
-			expectedRefs:    []string{"ghcr.io/github/gh-aw-firewall/agent:0.27.0@sha256:3816d1692e6d96887b27f1e4f1d64b8d7edb43ed9d7506b8f203913cbb81c248"},
-			expectedDigests: []string{"sha256:3816d1692e6d96887b27f1e4f1d64b8d7edb43ed9d7506b8f203913cbb81c248"},
+			expectedRefs:    []string{defaultFirewallAgentPin.PinnedImage},
+			expectedDigests: []string{defaultFirewallAgentPin.Digest},
 		},
 		{
 			name:            "embedded gh-aw-node pin used when cache is absent",
 			images:          []string{constants.DefaultGhAwNodeImage},
 			pins:            nil,
-			expectedRefs:    []string{"ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b"},
-			expectedDigests: []string{"sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b"},
+			expectedRefs:    []string{ghAwNodePin.PinnedImage},
+			expectedDigests: []string{ghAwNodePin.Digest},
 		},
 		{
 			name:   "pinned image replaced with digest reference",
@@ -170,13 +181,15 @@ func TestCollectDockerImages_SafeOutputsAddsGhAwNodeImage(t *testing.T) {
 	images := collectDockerImages(map[string]any{}, workflowData, ActionModeRelease)
 
 	pinnedGhAwNodeImage := resolveContainerImage(constants.DefaultGhAwNodeImage, nil)
+	ghAwNodePin, ok := getEmbeddedContainerPin(constants.DefaultGhAwNodeImage)
+	require.True(t, ok, "embedded pin must exist for %s", constants.DefaultGhAwNodeImage)
 	assert.Contains(t, images, pinnedGhAwNodeImage,
 		"safe-outputs should add the gh-aw-node container image to the Docker pull list")
 	require.NotEmpty(t, workflowData.DockerImagePins, "DockerImagePins should be populated")
 	assert.Contains(t, workflowData.DockerImagePins, GHAWManifestContainer{
 		Image:       constants.DefaultGhAwNodeImage,
-		Digest:      "sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b",
-		PinnedImage: pinnedGhAwNodeImage,
+		Digest:      ghAwNodePin.Digest,
+		PinnedImage: ghAwNodePin.PinnedImage,
 	}, "safe-outputs should add gh-aw-node to manifest container pins")
 
 	for _, img := range images {
@@ -213,4 +226,137 @@ func TestMergeDockerImagePins(t *testing.T) {
 	assert.Equal(t, "image-b", result[1].Image)
 	assert.Equal(t, "image-c", result[2].Image)
 	assert.Equal(t, "sha256:ccc", result[2].Digest)
+}
+
+// TestApplyContainerPins_ContainerPinMappings verifies that applyContainerPins
+// applies container_pins redirects before digest lookup so that both the
+// pre-download list and the manifest entries reference the mapped image.
+func TestApplyContainerPins_ContainerPinMappings(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	t.Run("digest-pinned mapped image returned as mapped", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			ContainerPinMappings: map[string]string{
+				"ghcr.io/owner/image:v1": "registry.acme.com/image:v1@sha256:" + digest,
+			},
+		}
+		refs, pinEntries := applyContainerPins([]string{"ghcr.io/owner/image:v1"}, workflowData)
+		require.Len(t, refs, 1)
+		assert.Equal(t, "registry.acme.com/image:v1@sha256:"+digest, refs[0],
+			"source image should be redirected to the mapped registry")
+		assert.Equal(t, "registry.acme.com/image:v1@sha256:"+digest, pinEntries[0].Image,
+			"manifest entry Image should reflect the mapped image")
+		assert.Empty(t, pinEntries[0].Digest, "mapped reference already includes its digest")
+	})
+
+	t.Run("unmapped image passes through unchanged", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			ContainerPinMappings: map[string]string{
+				"other.registry.io/image:v1": "registry.acme.com/image:v1@sha256:" + digest,
+			},
+		}
+		refs, _ := applyContainerPins([]string{"ghcr.io/owner/image:v1"}, workflowData)
+		require.Len(t, refs, 1)
+		assert.Equal(t, "ghcr.io/owner/image:v1", refs[0],
+			"image not in mappings should be returned unchanged")
+	})
+
+	t.Run("nil ContainerPinMappings leaves images unchanged", func(t *testing.T) {
+		workflowData := &WorkflowData{}
+		refs, _ := applyContainerPins([]string{"ghcr.io/owner/image:v1"}, workflowData)
+		require.Len(t, refs, 1)
+		assert.Equal(t, "ghcr.io/owner/image:v1", refs[0])
+	})
+}
+
+// TestCollectDockerImages_DefaultAlpineContainerPinMapping verifies that when
+// container_pins maps DefaultAlpineImage, collectDockerImages applies the redirect
+// so the pre-download list and manifest use the configured private mirror.
+func TestCollectDockerImages_DefaultAlpineContainerPinMapping(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	mapped := "registry.acme.com/alpine@sha256:" + digest
+	workflowData := &WorkflowData{
+		ContainerPinMappings: map[string]string{
+			constants.DefaultAlpineImage: mapped,
+		},
+	}
+
+	tools := map[string]any{
+		"agentic-workflows": map[string]any{},
+	}
+
+	images := collectDockerImages(tools, workflowData, ActionModeRelease)
+
+	assert.Contains(t, images, mapped,
+		"DefaultAlpineImage should be replaced by the container_pins mapped image in the pre-download list")
+	for _, img := range images {
+		assert.NotEqual(t, constants.DefaultAlpineImage, img,
+			"original DefaultAlpineImage should not appear in the pre-download list when mapped")
+	}
+}
+
+// TestResolveGatewayContainerFromMappings verifies that resolveGatewayContainerFromMappings
+// applies the container_pins redirect and strips the digest for MCP Gateway compatibility.
+func TestResolveGatewayContainerFromMappings(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("mapped image has digest stripped for gateway", func(t *testing.T) {
+		mappings := map[string]string{
+			"ghcr.io/owner/image:v1": "registry.acme.com/image:v1@sha256:" + digest,
+		}
+		got := resolveGatewayContainerFromMappings("ghcr.io/owner/image:v1", mappings)
+		assert.Equal(t, "registry.acme.com/image:v1", got,
+			"digest should be stripped from mapped image for MCP Gateway compatibility")
+	})
+
+	t.Run("unmapped image passes through unchanged", func(t *testing.T) {
+		mappings := map[string]string{
+			"other.io/image:v1": "registry.acme.com/image:v1@sha256:" + digest,
+		}
+		got := resolveGatewayContainerFromMappings("ghcr.io/owner/image:v1", mappings)
+		assert.Equal(t, "ghcr.io/owner/image:v1", got)
+	})
+
+	t.Run("nil mappings returns image unchanged", func(t *testing.T) {
+		got := resolveGatewayContainerFromMappings("ghcr.io/owner/image:v1", nil)
+		assert.Equal(t, "ghcr.io/owner/image:v1", got)
+	})
+}
+
+// resolveContainerImage redirects the source image through container_pins before
+// digest lookup, ensuring the mapped registry is used in the compiled output.
+func TestResolveContainerImage_AppliesContainerPinMapping(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	t.Run("mapped image returns digest-pinned redirected image", func(t *testing.T) {
+		data := &WorkflowData{
+			ContainerPinMappings: map[string]string{
+				"ghcr.io/owner/img:v1": "registry.acme.com/img:v1@sha256:" + digest,
+			},
+		}
+		got := resolveContainerImage("ghcr.io/owner/img:v1", data)
+		assert.Equal(t, "registry.acme.com/img:v1@sha256:"+digest, got,
+			"resolveContainerImage should return the mapped replacement image")
+	})
+
+	t.Run("mapped image does not inherit embedded pin from source", func(t *testing.T) {
+		data := &WorkflowData{
+			ContainerPinMappings: map[string]string{
+				"node:lts-alpine": "registry.acme.com/node:lts-alpine@sha256:" + digest,
+			},
+		}
+		got := resolveContainerImage("node:lts-alpine", data)
+		assert.Equal(t, "registry.acme.com/node:lts-alpine@sha256:"+digest, got,
+			"mapped image keeps its configured digest instead of the source image digest")
+	})
+
+	t.Run("unmapped image passes through to normal resolution", func(t *testing.T) {
+		data := &WorkflowData{
+			ContainerPinMappings: map[string]string{
+				"other.registry.io/image:v1": "registry.acme.com/image:v1@sha256:" + digest,
+			},
+		}
+		// node:lts-alpine is not in the mappings but has an embedded digest pin.
+		got := resolveContainerImage("node:lts-alpine", data)
+		assert.Contains(t, got, "sha256:",
+			"unmapped image should still be resolved through normal digest-pin path")
+	})
 }

@@ -11,6 +11,10 @@ import (
 	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 )
 
+func needsDailyAICCachePermission(data *WorkflowData) bool {
+	return hasMaxDailyAICGuardrail(data) && data.WorkflowID != ""
+}
+
 // buildConclusionSetupSteps extracts the common setup, token minting, and artifact steps.
 func (c *Compiler) buildConclusionSetupSteps(data *WorkflowData) []string {
 	var steps []string
@@ -46,8 +50,8 @@ func (c *Compiler) buildConclusionSetupSteps(data *WorkflowData) []string {
 	// Add artifact download steps once (shared by noop and conclusion steps).
 	// In workflow_call context, use the per-invocation prefix to avoid artifact name clashes.
 	steps = append(steps, buildAgentOutputDownloadSteps(artifactPrefixExprForDownstreamJob(data), c.getActionPin)...)
-	steps = append(steps, buildUsageArtifactUploadSteps(artifactPrefixExprForDownstreamJob(data), c.getActionPin)...)
-	if hasMaxDailyAICGuardrail(data) && data.WorkflowID != "" {
+	steps = append(steps, buildUsageArtifactUploadSteps(artifactPrefixExprForDownstreamJob(data), data.Evals != nil && data.Evals.HasEvals(), c.getActionPin)...)
+	if needsDailyAICCachePermission(data) {
 		steps = append(steps, buildDailyAICUsageCacheSteps(data, c.getActionPin)...)
 	}
 
@@ -74,6 +78,9 @@ func (c *Compiler) buildConclusionNoOpStep(data *WorkflowData, mainJobName strin
 	envVars = append(envVars, fmt.Sprintf("          GH_AW_AIC: ${{ needs.%s.outputs.aic }}\n", mainJobName))
 	if IsDetectionJobEnabled(data.SafeOutputs) {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_THREAT_DETECTION_AIC: ${{ needs.%s.outputs.aic }}\n", constants.DetectionJobName))
+	}
+	if data.Evals != nil && data.Evals.HasEvals() {
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_EVALS_AIC: ${{ needs.%s.outputs.aic }}\n", constants.EvalsJobName))
 	}
 	envVars = append(envVars, fmt.Sprintf("          GH_AW_AMBIENT_CONTEXT: ${{ needs.%s.outputs.ambient_context }}\n", mainJobName))
 	if data.WorkflowID != "" {
@@ -209,6 +216,12 @@ func (c *Compiler) buildAgentFailureCoreVars(data *WorkflowData, mainJobName str
 	}
 	if EngineHasValidateSecretStep(engine, data) {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_SECRET_VERIFICATION_RESULT: ${{ needs.%s.outputs.secret_verification_result }}\n", constants.ActivationJobName))
+		if msg := engine.GetSecretFailureMessage(data); msg != "" {
+			envVars = append(envVars, fmt.Sprintf("          GH_AW_ENGINE_SECRET_FAILURE_MESSAGE: %q\n", msg))
+		}
+	}
+	if isDockerSbxRuntime(data) {
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_DOCKER_SBX_SECRETS_RESULT: ${{ needs.%s.outputs.docker_sbx_secrets_result }}\n", constants.ActivationJobName))
 	}
 	if ShouldGeneratePRCheckoutStep(data) {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_CHECKOUT_PR_SUCCESS: ${{ needs.%s.outputs.checkout_pr_success }}\n", mainJobName))
@@ -219,6 +232,9 @@ func (c *Compiler) buildAgentFailureCoreVars(data *WorkflowData, mainJobName str
 	envVars = append(envVars, fmt.Sprintf("          GH_AW_AIC: ${{ needs.%s.outputs.aic }}\n", mainJobName))
 	if IsDetectionJobEnabled(data.SafeOutputs) {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_THREAT_DETECTION_AIC: ${{ needs.%s.outputs.aic }}\n", constants.DetectionJobName))
+	}
+	if data.Evals != nil && data.Evals.HasEvals() {
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_EVALS_AIC: ${{ needs.%s.outputs.aic }}\n", constants.EvalsJobName))
 	}
 	if data.EngineConfig != nil && data.EngineConfig.MaxAICredits != 0 {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_MAX_AI_CREDITS: %q\n", strconv.FormatInt(data.EngineConfig.MaxAICredits, 10)))
@@ -234,7 +250,7 @@ func buildAgentFailureEngineDetectionVars(engine CodingAgentEngine, data *Workfl
 	// Pass engine error-detection outputs to the conclusion job when the selected engine
 	// provides a host-runner detect-agent-errors step.
 	// Contract: engines returning a non-empty GetErrorDetectionScriptId() must run
-	// actions/setup/js/detect_agent_errors.cjs, which emits all six outputs below.
+	// actions/setup/js/detect_agent_errors.cjs, which emits all outputs below.
 	// These outputs cover:
 	//   - inference_access_error: token lacks inference access
 	//   - mcp_policy_error: MCP servers blocked by enterprise/organization policy
@@ -242,6 +258,8 @@ func buildAgentFailureEngineDetectionVars(engine CodingAgentEngine, data *Workfl
 	//   - model_not_supported_error: configured model name is invalid or unavailable
 	//   - http_400_response_error: engine returned a generic HTTP 400 Bad Request response
 	//   - capi_quota_exceeded_error: Copilot/CAPI quota exhaustion/rate-limit response
+	//   - max_cache_misses_exceeded: AWF API proxy consecutive cache miss guardrail fired
+	//   - shell_expansion_guard_rejected: sandbox command-injection guard rejected shell expansion patterns
 	var envVars []string
 	if engine.GetErrorDetectionScriptId() != "" {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_INFERENCE_ACCESS_ERROR: ${{ needs.%s.outputs.inference_access_error }}\n", mainJobName))
@@ -249,6 +267,10 @@ func buildAgentFailureEngineDetectionVars(engine CodingAgentEngine, data *Workfl
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_AGENTIC_ENGINE_TIMEOUT: ${{ needs.%s.outputs.agentic_engine_timeout }}\n", mainJobName))
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_MODEL_NOT_SUPPORTED_ERROR: ${{ needs.%s.outputs.model_not_supported_error }}\n", mainJobName))
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_HTTP_400_RESPONSE_ERROR: ${{ needs.%s.outputs.http_400_response_error }}\n", mainJobName))
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_MAX_CACHE_MISSES_EXCEEDED: ${{ needs.%s.outputs.max_cache_misses_exceeded }}\n", mainJobName))
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_MISSING_MODEL_PRICING_ERROR: ${{ needs.%s.outputs.missing_model_pricing_error }}\n", mainJobName))
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_MISSING_MODEL_PRICING_MODEL_NAME: ${{ needs.%s.outputs.missing_model_pricing_model_name }}\n", mainJobName))
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_SHELL_EXPANSION_GUARD_REJECTED: ${{ needs.%s.outputs.shell_expansion_guard_rejected }}\n", mainJobName))
 	}
 	if apiHosts := getEngineAPIHosts(data, engine); len(apiHosts) > 0 {
 		envVars = append(envVars, fmt.Sprintf("          GH_AW_ENGINE_API_HOSTS: %q\n", strings.Join(apiHosts, ",")))
@@ -326,26 +348,16 @@ func buildAgentFailureReportingPolicyVars(data *WorkflowData) []string {
 			envVars = append(envVars, fmt.Sprintf("          GH_AW_FAILURE_REPORT_AS_ISSUE: %q\n", strconv.FormatBool(enabled)))
 		}
 		shouldIncludeCategoryFilters := true
-		switch reportSetting := data.SafeOutputs.ReportFailureAsIssue.(type) {
-		case bool:
-			appendReportFailureEnvVar(reportSetting)
-			shouldIncludeCategoryFilters = reportSetting
-		case string:
-			reportExpression := reportSetting
-			switch reportExpression {
-			case "true":
-				appendReportFailureEnvVar(true)
-			case "false":
-				appendReportFailureEnvVar(false)
-				shouldIncludeCategoryFilters = false
-			default:
-				envVars = append(envVars, buildTemplatableBoolEnvVar("GH_AW_FAILURE_REPORT_AS_ISSUE", &reportExpression)...)
-				shouldIncludeCategoryFilters = false
-			}
-		case []any:
+		reportSetting := data.SafeOutputs.ReportFailureAsIssue.String()
+		switch reportSetting {
+		case "true":
 			appendReportFailureEnvVar(true)
+		case "false":
+			appendReportFailureEnvVar(false)
+			shouldIncludeCategoryFilters = false
 		default:
-			appendReportFailureEnvVar(true)
+			envVars = append(envVars, buildTemplatableBoolEnvVar("GH_AW_FAILURE_REPORT_AS_ISSUE", templatableBoolPtrToStringPtr(data.SafeOutputs.ReportFailureAsIssue))...)
+			shouldIncludeCategoryFilters = false
 		}
 		if shouldIncludeCategoryFilters {
 			if len(data.SafeOutputs.ReportFailureAsIssueCategories) > 0 {
@@ -460,7 +472,7 @@ func (c *Compiler) buildConclusionScriptEnvVars(data *WorkflowData, mainJobName 
 }
 
 // buildConclusionJobCondition builds the condition guarding the conclusion job.
-func buildConclusionJobCondition(data *WorkflowData, mainJobName string, safeOutputJobNames []string) ConditionNode {
+func (c *Compiler) buildConclusionJobCondition(data *WorkflowData, mainJobName string, safeOutputJobNames []string) ConditionNode {
 	// Build the condition for this job:
 	// 1. always() - run even if agent fails
 	// 2. agent was activated (not skipped) OR lockdown check failed in activation job
@@ -470,13 +482,33 @@ func buildConclusionJobCondition(data *WorkflowData, mainJobName string, safeOut
 	lockdownCheckFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.lockdown_check_failed", constants.ActivationJobName)), BuildStringLiteral("true"))
 	oauthTokenCheckFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.oauth_token_check_failed", constants.ActivationJobName)), BuildStringLiteral("true"))
 	staleLockFileFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.stale_lock_file_failed", constants.ActivationJobName)), BuildStringLiteral("true"))
-	secretVerificationFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.secret_verification_result", constants.ActivationJobName)), BuildStringLiteral("failed"))
-	activationGuardrailsFailed := BuildOr(lockdownCheckFailed, BuildOr(oauthTokenCheckFailed, BuildOr(staleLockFileFailed, secretVerificationFailed)))
+	activationGuardrailsFailed := BuildOr(lockdownCheckFailed, BuildOr(oauthTokenCheckFailed, staleLockFileFailed))
+	// Only reference the secret_verification_result output when the activation job
+	// actually declares it. The output is emitted only when the engine provides a
+	// validate-secret step (see addActivationSecretValidationStep); referencing it
+	// unconditionally produces a dangling needs.*.outputs.* expression that fails
+	// actionlint in generated lock files.
+	if engine, err := c.getAgenticEngine(data.AI); err == nil && EngineHasValidateSecretStep(engine, data) {
+		secretVerificationFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.secret_verification_result", constants.ActivationJobName)), BuildStringLiteral("failed"))
+		activationGuardrailsFailed = BuildOr(activationGuardrailsFailed, secretVerificationFailed)
+	}
+	if isDockerSbxRuntime(data) {
+		dockerSbxSecretsFailed := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.docker_sbx_secrets_result", constants.ActivationJobName)), BuildStringLiteral("failed"))
+		activationGuardrailsFailed = BuildOr(activationGuardrailsFailed, dockerSbxSecretsFailed)
+	}
 	if hasMaxDailyAICGuardrail(data) {
 		dailyAICExceeded := BuildEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.daily_ai_credits_exceeded", constants.ActivationJobName)), BuildStringLiteral("true"))
 		activationGuardrailsFailed = BuildOr(activationGuardrailsFailed, dailyAICExceeded)
 	}
+	if isPreCreatePullRequestEnabled(data) {
+		// The pre-created check run must always be completed, including when the run is
+		// cancelled after activation allocated the pull request but before the agent started
+		// (which leaves the agent job skipped).
+		preCreatedCheckExists := BuildNotEquals(BuildPropertyAccess(fmt.Sprintf("needs.%s.outputs.pre_created_pull_request_check_run_id", constants.ActivationJobName)), BuildStringLiteral(""))
+		activationGuardrailsFailed = BuildOr(activationGuardrailsFailed, preCreatedCheckExists)
+	}
 	condition := BuildAnd(alwaysFunc, BuildOr(agentNotSkipped, activationGuardrailsFailed))
+
 	if slices.Contains(safeOutputJobNames, "add_comment") {
 		return BuildAnd(condition, &NotNode{Child: BuildPropertyAccess("needs.add_comment.outputs.comment_id")})
 	}
@@ -529,4 +561,31 @@ func (c *Compiler) buildConclusionJobConcurrency(data *WorkflowData) string {
 	}
 	notifyCommentLog.Printf("Configuring conclusion job concurrency group: %s", group)
 	return c.indentYAMLLines(concurrencyValue, "    ")
+}
+
+// buildConclusionReportFailedJobsStep builds the step that queries the workflow run's jobs,
+// identifies failed non-builtin jobs, and creates a failure issue for them.
+// Returns nil when report-failed-jobs is explicitly set to false.
+func (c *Compiler) buildConclusionReportFailedJobsStep(data *WorkflowData, mainJobName string) []string {
+	// Skip when explicitly disabled via frontmatter
+	if data.SafeOutputs != nil && data.SafeOutputs.ReportFailedJobs != nil && !*data.SafeOutputs.ReportFailedJobs {
+		notifyCommentLog.Print("Skipping report-failed-jobs step: disabled in frontmatter")
+		return nil
+	}
+	var envVars []string
+	envVars = append(envVars, buildWorkflowMetadataEnvVarsWithTrackerID(data.Name, data.Source, data.TrackerID, buildLocalWorkflowSourceURL(c.markdownPath))...)
+	envVars = append(envVars, "          GH_AW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n")
+	if data.SafeOutputs != nil && data.SafeOutputs.ReportFailedJobs != nil {
+		envVars = append(envVars, fmt.Sprintf("          GH_AW_REPORT_FAILED_JOBS: %q\n", strconv.FormatBool(*data.SafeOutputs.ReportFailedJobs)))
+	} else {
+		envVars = append(envVars, "          GH_AW_REPORT_FAILED_JOBS: \"true\"\n")
+	}
+	return c.buildGitHubScriptStepWithoutDownload(data, GitHubScriptStepConfig{
+		StepName:      "Report failed jobs",
+		StepID:        "report_failed_jobs",
+		MainJobName:   mainJobName,
+		CustomEnvVars: envVars,
+		ScriptFile:    "report_failed_jobs.cjs",
+		StepCondition: "always()",
+	})
 }

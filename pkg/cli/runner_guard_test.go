@@ -5,8 +5,11 @@ package cli
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseAndDisplayRunnerGuardOutput(t *testing.T) {
@@ -350,4 +353,72 @@ func TestRunnerGuardPathTraversalGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildRunnerGuardContainerScanPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		scanPath string
+		want     string
+		wantErr  string
+	}{
+		{name: "default current directory", scanPath: "", want: "./"},
+		{name: "flag-looking path stays positional", scanPath: "--help", want: "./--help"},
+		{name: "nested relative path", scanPath: "dir/subdir", want: "./dir/subdir"},
+		{name: "path traversal rejected", scanPath: "../escape", wantErr: "must stay local"},
+		{name: "control character rejected", scanPath: "bad\npath", wantErr: "invalid control characters"},
+		{name: "unicode format character rejected", scanPath: "bad\u202epath", wantErr: "invalid control characters"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildRunnerGuardContainerScanPath(tt.scanPath)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRunnerGuardDockerArgsPreservesDynamicValuesAsArguments(t *testing.T) {
+	volumeMount := "/tmp/checkout with spaces:/workdir"
+	containerScanPath := "./--help"
+
+	args := runnerGuardDockerArgs(RunnerGuardImage, volumeMount, containerScanPath)
+
+	require.Equal(t, []string{
+		"run",
+		"--rm",
+		"-v", volumeMount,
+		"-w", "/workdir",
+		RunnerGuardImage,
+		"scan",
+		containerScanPath,
+		"--format", "json",
+	}, args)
+	require.Contains(t, shellJoinArgs(append([]string{"docker"}, args...)), "'/tmp/checkout with spaces:/workdir'")
+}
+
+func TestRunnerGuardDockerArgsShellEscapesBangInPaths(t *testing.T) {
+	volumeMount := "/tmp/repo!42:/workdir"
+	containerScanPath := "./path!subdir"
+
+	args := runnerGuardDockerArgs(RunnerGuardImage, volumeMount, containerScanPath)
+	rendered := shellJoinArgs(append([]string{"docker"}, args...))
+
+	require.Contains(t, rendered, "'/tmp/repo!42:/workdir'")
+	require.Contains(t, rendered, "'./path!subdir'")
+}
+
+func TestRunRunnerGuardOnDirectoryRejectsPathsOutsideRepo(t *testing.T) {
+	outsideDir := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(outsideDir, 0o755))
+
+	err := runRunnerGuardOnDirectory(outsideDir, false, false)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "must stay within git root")
 }

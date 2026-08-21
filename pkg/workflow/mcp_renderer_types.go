@@ -19,6 +19,11 @@ type MCPRendererOptions struct {
 	// to ensure that as guard policies are rolled out, only GitHub inputs are filtered while outputs
 	// to non-GitHub servers are not restricted. Nil when no GitHub guard policies are configured.
 	WriteSinkGuardPolicies map[string]any
+	// ContainerPinMappings maps source container image references to their SHA-pinned
+	// replacements from aw.json container_pins. When set, built-in MCP server container
+	// references are redirected to the mapped private registry mirror (digest stripped for
+	// MCP Gateway compatibility). Nil when no container_pins are configured.
+	ContainerPinMappings map[string]string
 }
 
 // MCPConfigRendererUnified provides unified rendering methods for MCP configurations
@@ -38,6 +43,7 @@ type MCPToolRenderers struct {
 	RenderAgenticWorkflows func(yaml *strings.Builder, isLast bool)
 	RenderSafeOutputs      func(yaml *strings.Builder, isLast bool, workflowData *WorkflowData)
 	RenderMCPScripts       func(yaml *strings.Builder, mcpScripts *MCPScriptsConfig, isLast bool)
+	RenderEnclave          func(yaml *strings.Builder, workflowData *WorkflowData, isLast bool)
 	RenderCustomMCPConfig  RenderCustomMCPToolConfigHandler
 }
 
@@ -70,6 +76,9 @@ type GitHubMCPDockerOptions struct {
 	GuardPoliciesFromStep bool
 	// Toolsets specifies the GitHub toolsets to enable
 	Toolsets string
+	// Features is a comma-separated list of GitHub MCP feature flags to enable (e.g. "fields_param").
+	// Emitted as GITHUB_FEATURES env var for the Docker container.
+	Features string
 	// DockerImageVersion specifies the GitHub MCP server Docker image version
 	DockerImageVersion string
 	// CustomArgs are additional arguments to append to the Docker command
@@ -82,6 +91,10 @@ type GitHubMCPDockerOptions struct {
 	EffectiveToken string
 	// GuardPolicies specifies access control policies for the MCP gateway (e.g., allow-only repos/integrity)
 	GuardPolicies map[string]any
+	// ContainerPinMappings maps source container image references to their SHA-pinned replacements.
+	// When set, the GitHub MCP server container reference is redirected to the mapped private
+	// registry mirror (digest stripped for MCP Gateway compatibility). Nil → no redirect.
+	ContainerPinMappings map[string]string
 }
 
 // GitHubMCPRemoteOptions defines configuration for GitHub MCP remote mode rendering
@@ -97,6 +110,9 @@ type GitHubMCPRemoteOptions struct {
 	GuardPoliciesFromStep bool
 	// Toolsets specifies the GitHub toolsets to enable
 	Toolsets string
+	// Features is a comma-separated list of GitHub MCP feature flags to enable (e.g. "fields_param").
+	// Emitted as X-MCP-Features header for the hosted endpoint.
+	Features string
 	// AuthorizationValue is the value for the Authorization header
 	// For Claude: "Bearer {effectiveToken}"
 	// For Copilot: "Bearer \\${GITHUB_PERSONAL_ACCESS_TOKEN}"

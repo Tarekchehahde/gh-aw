@@ -1,0 +1,48 @@
+package stringbytesroundtrip
+
+// Named types to verify the analyzer checks underlying types.
+type myString string
+type myBytes []byte
+
+func good() {
+	s := "hello"
+	b := []byte("world")
+
+	// These are valid, non-redundant conversions.
+	_ = string(b)
+	_ = []byte(s)
+
+	// Named types: single-step conversions are fine.
+	var ms myString = "hello"
+	var mb myBytes = []byte("world")
+	_ = string(mb)
+	_ = []byte(ms)
+}
+
+func bad() {
+	s := "hello"
+	b := []byte{104, 101, 108, 108, 111}
+
+	_ = string([]byte(s)) // want `string\(\[\]byte\(s\)\) is a redundant round-trip`
+	_ = []byte(string(b)) // want `\[\]byte\(string\(b\)\) makes two copies to clone b`
+}
+
+func badNamedTypes() string {
+	var ms myString = "hello"
+	var mb myBytes = []byte("world")
+
+	// Named-type round-trips: underlying types still match, so these are flagged.
+	_ = myString([]byte(ms))  // want `myString\(\[\]byte\(ms\)\) is a redundant round-trip; replace it with myString\(ms\)`
+	_ = []byte(string(mb))    // want `\[\]byte\(string\(mb\)\) makes two copies to clone mb`
+	return string([]byte(ms)) // want `string\(\[\]byte\(ms\)\) is a redundant round-trip; replace it with string\(ms\)`
+}
+
+// helperString is a regular function, not a type conversion — must not be flagged.
+func helperString(b []byte) string { return string(b) }
+
+func notAConversion() {
+	b := []byte("world")
+	// Calling helperString (a real function) with []byte(s) is not a round-trip.
+	_ = helperString([]byte("x"))
+	_ = helperString(b)
+}

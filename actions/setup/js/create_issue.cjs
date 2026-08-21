@@ -35,7 +35,7 @@ const ISSUE_FIELD_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const RECENTLY_CLOSED_DEDUP_DAYS = 30;
 const TITLE_DEDUP_SEARCH_PER_PAGE = 100;
 const TITLE_DEDUP_MAX_SEARCH_PAGES = 2;
-const TITLE_DEDUP_MIN_SEARCH_RATE_LIMIT_REMAINING = 500;
+const TITLE_DEDUP_MIN_SEARCH_RATE_LIMIT_FRACTION = 0.2;
 
 /**
  * Create a dedicated GitHub client for copilot assignment operations.
@@ -124,7 +124,7 @@ async function searchForExistingParent(githubClient, owner, repo, markerComment)
 /**
  * Finds an existing parent issue for a group, or creates a new one if needed
  * @param {object} params - Parameters for finding/creating parent issue
- * @param {object} params.githubClient - Authenticated GitHub client
+ * @param {any} params.githubClient - Authenticated GitHub client
  * @param {string} params.groupId - The group identifier
  * @param {string} params.owner - Repository owner
  * @param {string} params.repo - Repository name
@@ -177,7 +177,7 @@ async function findOrCreateParentIssue({ githubClient, groupId, owner, repo, tit
  * @param {string} workflowName - Name of the workflow
  * @param {string} workflowSourceURL - URL to the workflow source
  * @param {number} [expiresHours=0] - Hours until expiration (0 means no expiration)
- * @returns {object} - Template with title and body
+ * @returns {any} - Template with title and body
  */
 function createParentIssueTemplate(groupId, titlePrefix, workflowName, workflowSourceURL, expiresHours = 0) {
   // Use applyTitlePrefix to ensure proper spacing after prefix
@@ -377,6 +377,93 @@ function buildIssueFieldMutationInput(requestedFields, availableFields) {
 }
 
 /**
+ * Parse and resolve an issue reference used by create_issue.blocked_by.
+ * Supports issue numbers, cross-repository references, URLs, and temporary IDs.
+ *
+ * @param {string|number} value
+ * @param {Map<string, {repo: string, number: number}>} temporaryIdMap
+ * @param {string} defaultRepo
+ * @param {boolean} [allowUnresolvedTemporaryIds] - When true (staged mode), unresolved temporary IDs are reported instead of deferring
+ * @returns {{target: {repo: string, number: number}|null, deferred?: boolean, unresolvedTemporaryId?: string, error?: string}}
+ */
+function resolveBlockedByReference(value, temporaryIdMap, defaultRepo, allowUnresolvedTemporaryIds = false) {
+  const raw = String(value).trim();
+  if (isTemporaryId(raw)) {
+    const resolved = temporaryIdMap.get(normalizeTemporaryId(raw));
+    if (!resolved) {
+      if (allowUnresolvedTemporaryIds) {
+        return { target: null, unresolvedTemporaryId: raw };
+      }
+      return { target: null, deferred: true, error: `Unresolved temporary ID: ${raw}` };
+    }
+    return { target: { repo: resolved.repo, number: resolved.number } };
+  }
+
+  const numericMatch = raw.match(/^#?([1-9]\d*)$/);
+  const crossRepoMatch = raw.match(/^([\w.-]+\/[\w.-]+)#([1-9]\d*)$/);
+  const urlMatch = raw.match(/^https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9]\d*)(?:[?#/].*)?$/);
+  const match = crossRepoMatch || urlMatch;
+  const repo = match ? match[1] : defaultRepo;
+  const numberString = match ? match[2] : numericMatch?.[1];
+  const number = Number(numberString);
+
+  if (!repo || !Number.isSafeInteger(number) || number < 1) {
+    return {
+      target: null,
+      error: `Invalid blocked_by reference '${raw}'. Expected an issue number, owner/repo#number, GitHub issue URL, or temporary ID.`,
+    };
+  }
+  return { target: { repo, number } };
+}
+
+/**
+ * Normalize blocked_by to a list of resolved issue references.
+ *
+ * @param {unknown} blockedBy
+ * @param {Map<string, {repo: string, number: number}>} temporaryIdMap
+ * @param {string} defaultRepo
+ * @param {boolean} [allowUnresolvedTemporaryIds] - When true (staged mode), unresolved temporary IDs are kept as display-only references instead of deferring
+ * @returns {{targets: Array<{repo: string, number: number}>, references: Array<string>, deferred?: boolean, error?: string}}
+ */
+function resolveBlockedByReferences(blockedBy, temporaryIdMap, defaultRepo, allowUnresolvedTemporaryIds = false) {
+  if (blockedBy === undefined || blockedBy === null) {
+    return { targets: [], references: [] };
+  }
+  const values = Array.isArray(blockedBy) ? blockedBy : [blockedBy];
+  const targets = [];
+  // Display references in declared order, including temporary IDs left unresolved in staged mode
+  const references = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    if (typeof value !== "string" && typeof value !== "number") {
+      return { targets: [], references: [], error: "create_issue 'blocked_by' must be an issue reference or an array of issue references" };
+    }
+    const resolved = resolveBlockedByReference(value, temporaryIdMap, defaultRepo, allowUnresolvedTemporaryIds);
+    if (resolved.deferred) {
+      return { targets: [], references: [], deferred: true, error: resolved.error };
+    }
+    if (resolved.unresolvedTemporaryId) {
+      if (!seen.has(resolved.unresolvedTemporaryId)) {
+        seen.add(resolved.unresolvedTemporaryId);
+        references.push(resolved.unresolvedTemporaryId);
+      }
+      continue;
+    }
+    if (!resolved.target) {
+      return { targets: [], references: [], error: resolved.error };
+    }
+    const key = `${resolved.target.repo.toLowerCase()}#${resolved.target.number}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      targets.push(resolved.target);
+      references.push(`${resolved.target.repo}#${resolved.target.number}`);
+    }
+  }
+  return { targets, references };
+}
+
+/**
  * Apply issue field values to a newly-created issue.
  * Resolves metadata and sends the setIssueFieldValue GraphQL mutation.
  * @param {{githubClient: Object, owner: string, repo: string, issueNumber: number, fields: Array<{name: string, value: string|number}>}} params
@@ -494,14 +581,16 @@ async function getRepoTitleDedupCandidates(githubClient, owner, repo) {
 async function shouldSkipRepoTitleDedupSearch(githubClient, owner, repo) {
   try {
     const response = await githubClient.rest.rateLimit.get();
-    const rawRemaining = response?.data?.resources?.search?.remaining;
+    const { remaining: rawRemaining, limit: rawLimit } = response?.data?.resources?.search ?? {};
     const remaining = Number(rawRemaining);
-    if (!Number.isFinite(remaining)) {
-      core.warning(`Could not determine search rate limit remaining for ${owner}/${repo}; proceeding with repo-level title dedup search`);
+    const limit = Number(rawLimit);
+    if (!Number.isFinite(remaining) || !Number.isFinite(limit)) {
+      core.warning(`Could not determine search rate limit values for ${owner}/${repo} (remaining=${rawRemaining}, limit=${rawLimit}); proceeding with repo-level title dedup search`);
       return false;
     }
-    if (remaining <= TITLE_DEDUP_MIN_SEARCH_RATE_LIMIT_REMAINING) {
-      core.warning(`Skipping repo-level title dedup search for ${owner}/${repo}: search rate limit remaining is ${remaining} (threshold <= ${TITLE_DEDUP_MIN_SEARCH_RATE_LIMIT_REMAINING})`);
+    const threshold = limit * TITLE_DEDUP_MIN_SEARCH_RATE_LIMIT_FRACTION;
+    if (remaining <= threshold) {
+      core.warning(`Skipping repo-level title dedup search for ${owner}/${repo}: search rate limit remaining is ${remaining}/${limit} (threshold <= ${Math.floor(threshold)})`);
       return true;
     }
   } catch (error) {
@@ -532,7 +621,7 @@ async function main(config = {}) {
   try {
     deduplicateByTitle = parseDeduplicateByTitle(config.deduplicate_by_title);
   } catch (error) {
-    throw new Error(`${ERR_VALIDATION}: ${getErrorMessage(error)}`);
+    throw new Error(`${ERR_VALIDATION}: ${getErrorMessage(error)}`, { cause: error });
   }
   const rawCloseOlderKey = config.close_older_key ? String(config.close_older_key) : "";
   const closeOlderKey = rawCloseOlderKey ? normalizeCloseOlderKey(rawCloseOlderKey) : "";
@@ -667,6 +756,17 @@ async function main(config = {}) {
     }
     const { repo: qualifiedItemRepo, repoParts } = repoResult;
 
+    // In staged mode no issues are created, so temporary IDs never resolve; validate the
+    // references without deferring so dependent issues still get a staged preview.
+    const blockedBy = resolveBlockedByReferences(message.blocked_by, temporaryIdMap, qualifiedItemRepo, isStaged);
+    if (blockedBy.deferred) {
+      core.info(`Deferring create_issue: ${blockedBy.error}`);
+      return { success: false, deferred: true, error: blockedBy.error };
+    }
+    if (blockedBy.error) {
+      return { success: false, error: blockedBy.error };
+    }
+
     // Get or generate the temporary ID for this issue
     const tempIdResult = getOrGenerateTemporaryId(message, "issue");
     if (tempIdResult.error) {
@@ -778,7 +878,13 @@ async function main(config = {}) {
     const bodyLines = processedBody.split("\n");
 
     if (!title) {
-      title = message.body ?? "Agent Output";
+      // Use the first non-empty line of the body as the title fallback rather than
+      // the entire body, so the title stays concise and the body remains intact.
+      const firstBodyLine = (message.body ?? "")
+        .split("\n")
+        .map(l => l.replace(/^#+\s*/, "").trim())
+        .find(l => l.length > 0);
+      title = firstBodyLine || "Agent Output";
     }
 
     // Sanitize title for Unicode security and remove any duplicate prefixes
@@ -918,7 +1024,7 @@ async function main(config = {}) {
         expiresHours,
         "Issue"
       );
-      bodyLines.push(``, ``, footer);
+      bodyLines.push(``, footer);
     }
 
     // Add standalone workflow-id marker for searchability (consistent with comments)
@@ -1005,6 +1111,10 @@ async function main(config = {}) {
     // If in staged mode, preview the issue without creating it
     if (isStaged) {
       logStagedPreviewInfo(`Would create issue in ${qualifiedItemRepo} with title: ${title}`);
+      const stagedBlockedBy = blockedBy.references;
+      if (stagedBlockedBy.length > 0) {
+        logStagedPreviewInfo(`Would mark issue as blocked by: ${stagedBlockedBy.join(", ")}`);
+      }
       if (deduplicateByTitle.enabled) {
         recordSeenTitle(qualifiedItemRepo, title, normalizedTitle);
       }
@@ -1020,6 +1130,7 @@ async function main(config = {}) {
           fields: issueFields,
           bodyLength: body.length,
           temporaryId,
+          ...(stagedBlockedBy.length > 0 ? { blockedBy: stagedBlockedBy } : {}),
         },
       };
     }
@@ -1062,6 +1173,35 @@ async function main(config = {}) {
             success: false,
             error: `Issue ${qualifiedItemRepo}#${issue.number} was created, but issue fields could not be applied: ${fieldError}`,
           };
+        }
+      }
+
+      // Dependency attachment is best-effort: the issue already exists at this point,
+      // so a dependency API failure must not report the whole create_issue as failed.
+      /** @type {Array<string>} */
+      const blockedByFailures = [];
+      for (const blockedIssue of blockedBy.targets) {
+        const [blockedOwner, blockedRepo] = blockedIssue.repo.split("/");
+        try {
+          const { data: blocker } = await githubClient.rest.issues.get({
+            owner: blockedOwner,
+            repo: blockedRepo,
+            issue_number: blockedIssue.number,
+          });
+          if (!Number.isSafeInteger(blocker?.id) || blocker.id < 1) {
+            throw new Error(`${ERR_VALIDATION}: Issue ${blockedIssue.repo}#${blockedIssue.number} did not return a valid issue ID`);
+          }
+          await githubClient.request("POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", {
+            owner: repoParts.owner,
+            repo: repoParts.repo,
+            issue_number: issue.number,
+            issue_id: blocker.id,
+          });
+          core.info(`Added blocked-by dependency: ${qualifiedItemRepo}#${issue.number} <- ${blockedIssue.repo}#${blockedIssue.number}`);
+        } catch (error) {
+          const dependencyError = getErrorMessage(error);
+          blockedByFailures.push(`${blockedIssue.repo}#${blockedIssue.number}: ${dependencyError}`);
+          core.warning(`Issue ${qualifiedItemRepo}#${issue.number} was created, but blocked-by dependency ${blockedIssue.repo}#${blockedIssue.number} could not be added: ${dependencyError}`);
         }
       }
 
@@ -1108,7 +1248,10 @@ async function main(config = {}) {
           const searchKey = closeOlderKey ? `close-older-key: ${closeOlderKey}` : `workflow-id: ${workflowId}`;
           core.info(`Attempting to close older issues for ${qualifiedItemRepo}#${issue.number} using ${searchKey}`);
           try {
-            const closedIssues = await closeOlderIssues(github, repoParts.owner, repoParts.repo, workflowId, { number: issue.number, html_url: issue.html_url }, workflowName, runUrl, callerWorkflowId, closeOlderKey);
+            // Build the set of all issue numbers created in this run (including the current
+            // one) so that previously-created issues are not incorrectly closed.
+            const currentRunIssueNumbers = new Set(createdIssues.filter(i => i._repo === qualifiedItemRepo).map(i => i.number));
+            const closedIssues = await closeOlderIssues(github, repoParts.owner, repoParts.repo, workflowId, { number: issue.number, html_url: issue.html_url }, workflowName, runUrl, callerWorkflowId, closeOlderKey, currentRunIssueNumbers);
             if (closedIssues.length > 0) {
               core.info(`Closed ${closedIssues.length} older issue(s)`);
             }
@@ -1204,6 +1347,7 @@ async function main(config = {}) {
         number: issue.number,
         url: issue.html_url,
         temporaryId: temporaryId,
+        ...(blockedByFailures.length > 0 ? { blocked_by_errors: blockedByFailures } : {}),
         _repo: qualifiedItemRepo, // For tracking in the closure
       };
     } catch (error) {

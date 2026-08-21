@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 )
 
 func TestParseDurationString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -59,6 +61,7 @@ func TestParseDurationString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := parseDurationString(tt.input)
 			if got != tt.expected {
 				t.Errorf("parseDurationString(%q) = %v, want %v", tt.input, got, tt.expected)
@@ -68,6 +71,7 @@ func TestParseDurationString(t *testing.T) {
 }
 
 func TestTruncateString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -126,6 +130,7 @@ func TestTruncateString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := stringutil.Truncate(tt.input, tt.maxLen)
 			if got != tt.expected {
 				t.Errorf("stringutil.Truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.expected)
@@ -136,6 +141,7 @@ func TestTruncateString(t *testing.T) {
 
 // TestDownloadedFilesInAuditData verifies that downloaded files are properly included in audit data
 func TestDownloadedFilesInAuditData(t *testing.T) {
+	t.Parallel()
 	// Create temporary directory with test files
 	tmpDir := testutil.TempDir(t, "test-*")
 
@@ -225,6 +231,7 @@ func TestDownloadedFilesInAuditData(t *testing.T) {
 
 // TestConsoleOutputIncludesFileInfo verifies console output displays file information
 func TestConsoleOutputIncludesFileInfo(t *testing.T) {
+	t.Parallel()
 	// Create temporary directory
 	tmpDir := testutil.TempDir(t, "test-*")
 
@@ -256,7 +263,7 @@ func TestConsoleOutputIncludesFileInfo(t *testing.T) {
 	}
 
 	// Build audit data
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 	auditData.DownloadedFiles = downloadedFiles
 
 	// Verify downloaded files are in audit data
@@ -279,6 +286,7 @@ func TestConsoleOutputIncludesFileInfo(t *testing.T) {
 
 // TestAuditReportFileListingIntegration demonstrates the complete file listing flow
 func TestAuditReportFileListingIntegration(t *testing.T) {
+	t.Parallel()
 	// Create a realistic audit directory structure
 	tmpDir := testutil.TempDir(t, "audit-integration-*")
 
@@ -351,6 +359,7 @@ func TestAuditReportFileListingIntegration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
 			info, ok := fileMap[tc.path]
 			if !ok {
 				t.Fatalf("File %s not found in extracted files", tc.path)
@@ -391,7 +400,7 @@ func TestAuditReportFileListingIntegration(t *testing.T) {
 	}
 
 	// Build audit data with the extracted files
-	auditData := buildAuditData(processedRun, metrics, nil)
+	auditData := buildAuditData(context.Background(), processedRun, metrics, nil)
 
 	// The buildAuditData should have extracted files automatically
 	if len(auditData.DownloadedFiles) == 0 {

@@ -14,7 +14,12 @@ const {
   isMaxTurnsExit,
   isNoDeferredMarkerError,
   isInvalidModelError,
+  isInvalidJsonBodyError,
+  isConnectionRefusedError,
+  hasClaudeSessionProgress,
   isSignalTerminationExitCode,
+  isCrashSignalExitCode,
+  crashSignalNameForExitCode,
   shouldRetryWithContinue,
   countPermissionDeniedIssues,
   hasNumerousPermissionDeniedIssues,
@@ -190,6 +195,23 @@ describe("claude_harness.cjs", () => {
       expect(isAuthenticationFailedError("Authentication failed (Request ID: C818:3ED713:19D401B:1C446B7:69D653CA)")).toBe(true);
     });
 
+    it('returns true for Claude Code stream-JSON "error":"authentication_failed" field', () => {
+      const jsonLine = JSON.stringify({
+        type: "assistant",
+        error: "authentication_failed",
+        message: { content: [{ type: "text", text: "Not logged in · Please run /login" }] },
+      });
+      expect(isAuthenticationFailedError(jsonLine)).toBe(true);
+    });
+
+    it('returns true for Claude Code "Not logged in" message', () => {
+      expect(isAuthenticationFailedError("Not logged in · Please run /login")).toBe(true);
+    });
+
+    it('returns true for "not logged in" (case-insensitive)', () => {
+      expect(isAuthenticationFailedError("NOT LOGGED IN")).toBe(true);
+    });
+
     describe("isInvalidModelError", () => {
       it("returns true for model-not-supported errors", () => {
         expect(isInvalidModelError("Execution failed: CAPIError: 400 The requested model is not supported.")).toBe(true);
@@ -252,6 +274,58 @@ describe("claude_harness.cjs", () => {
     });
   });
 
+  describe("isInvalidJsonBodyError", () => {
+    it("returns true for the canonical Anthropic 400 invalid-JSON message", () => {
+      const output = "API Error: 400 The request body is not valid JSON: unexpected character: line 1 column 1 (char 0)";
+      expect(isInvalidJsonBodyError(output)).toBe(true);
+    });
+
+    it("returns true for mixed-case variant", () => {
+      expect(isInvalidJsonBodyError("the REQUEST BODY IS NOT VALID json")).toBe(true);
+    });
+
+    it("returns true when the error appears inside a larger log block following a permission_denied", () => {
+      const output =
+        '{"type":"result","subtype":"permission_denied","decision_reason_type":"subcommandResults"}\n' +
+        "[claude-harness] 2026-08-10T12:33:00.000Z attempt 4 failed: exitCode=1\n" +
+        '{"type":"text","text":"API Error: 400 The request body is not valid JSON: unexpected character: line 1 column 1 (char 0)"}';
+      expect(isInvalidJsonBodyError(output)).toBe(true);
+    });
+
+    it("returns false for an overloaded_error output", () => {
+      expect(isInvalidJsonBodyError('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}')).toBe(false);
+    });
+
+    it("returns false for a rate_limit_error output", () => {
+      expect(isInvalidJsonBodyError('{"type":"result","subtype":"success","is_error":true,"api_error_status":429}')).toBe(false);
+    });
+
+    it("returns false for an empty string", () => {
+      expect(isInvalidJsonBodyError("")).toBe(false);
+    });
+
+    it("returns false for a successful result output", () => {
+      expect(isInvalidJsonBodyError('{"type":"result","subtype":"success","is_error":false}')).toBe(false);
+    });
+  });
+
+  describe("connection-refused startup detection", () => {
+    it("detects common connection-refused messages", () => {
+      expect(isConnectionRefusedError("API Error: Connection refused")).toBe(true);
+      expect(isConnectionRefusedError("connect ECONNREFUSED 127.0.0.1:3128")).toBe(true);
+    });
+
+    it("distinguishes initialization output from assistant progress", () => {
+      expect(hasClaudeSessionProgress('{"type":"system","subtype":"init"}\nAPI Error: Connection refused')).toBe(false);
+      expect(hasClaudeSessionProgress('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}')).toBe(true);
+    });
+
+    it("detects progress when connection refused appears after an assistant line", () => {
+      const output = '{"type":"assistant","message":{}}\nAPI Error: Connection refused';
+      expect(hasClaudeSessionProgress(output)).toBe(true);
+    });
+  });
+
   describe("isSignalTerminationExitCode", () => {
     it("returns true for SIGKILL/SIGTERM-style exit codes", () => {
       expect(isSignalTerminationExitCode(137)).toBe(true);
@@ -261,6 +335,31 @@ describe("claude_harness.cjs", () => {
     it("returns false for non-signal exit codes", () => {
       expect(isSignalTerminationExitCode(1)).toBe(false);
       expect(isSignalTerminationExitCode(2)).toBe(false);
+    });
+  });
+
+  describe("isCrashSignalExitCode / crashSignalNameForExitCode", () => {
+    it("identifies known fatal-signal crash exit codes", () => {
+      expect(isCrashSignalExitCode(139)).toBe(true); // SIGSEGV
+      expect(isCrashSignalExitCode(159)).toBe(true); // SIGSYS
+      expect(isCrashSignalExitCode(134)).toBe(true); // SIGABRT
+    });
+
+    it("returns false for non-crash exit codes, including timeout/cancellation signals", () => {
+      expect(isCrashSignalExitCode(0)).toBe(false);
+      expect(isCrashSignalExitCode(1)).toBe(false);
+      expect(isCrashSignalExitCode(137)).toBe(false);
+      expect(isCrashSignalExitCode(143)).toBe(false);
+    });
+
+    it("maps known crash exit codes to their signal name", () => {
+      expect(crashSignalNameForExitCode(139)).toBe("SIGSEGV");
+      expect(crashSignalNameForExitCode(159)).toBe("SIGSYS");
+    });
+
+    it("returns null for exit codes that are not recognized crash signals", () => {
+      expect(crashSignalNameForExitCode(1)).toBeNull();
+      expect(crashSignalNameForExitCode(137)).toBeNull();
     });
   });
 
@@ -349,6 +448,20 @@ describe("claude_harness.cjs", () => {
       }
     });
 
+    it("does not use --continue for fatal-signal crash exit codes", () => {
+      for (const exitCode of [134, 139, 159]) {
+        const result = shouldRetryWithContinue({
+          attempt: 0,
+          maxRetries: 3,
+          exitCode,
+          hasOutput: true,
+          isNoDeferredMarker: false,
+          continueDisabledPermanently: false,
+        });
+        expect(result).toBe(false);
+      }
+    });
+
     it("uses a fresh retry after a --continue attempt hits no-deferred-marker", () => {
       const stubScript = `
 const fs = require("fs");
@@ -384,6 +497,43 @@ process.exit(0);
       expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, false]);
       expect(calls[2].args).toContain("fix the bug");
       expect(result.stderr).toContain("failure_reason=harness_retry_path_invalid");
+    }, 50000);
+
+    it("uses a fresh retry and permanently disables --continue after a 400 invalid-JSON-body error on --continue", () => {
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+
+if (priorCalls === 0) {
+  process.stdout.write("partial execution before retry\\n");
+  process.exit(1);
+}
+
+if (priorCalls === 1) {
+  if (!args.includes("--continue")) {
+    process.stderr.write("expected --continue on first retry\\n");
+    process.exit(9);
+  }
+  process.stderr.write('{"type":"result","subtype":"error","is_error":true,"result":"400 The request body is not valid JSON"}\\n');
+  process.exit(1);
+}
+
+if (args.includes("--continue")) {
+  process.stderr.write("fresh retry unexpectedly used --continue\\n");
+  process.exit(9);
+}
+process.stdout.write("fresh retry succeeded\\n");
+process.exit(0);
+`;
+      const { result, calls } = runHarnessWithStub({ stubScript });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, false]);
+      expect(calls[2].args).toContain("fix the bug");
+      expect(result.stderr).toContain("invalid JSON request body");
     }, 50000);
 
     it("strips user-supplied --continue on fresh retry after invalid continue-path detection", () => {
@@ -449,6 +599,84 @@ process.exit(0);
       expect(result.stderr).toContain("failure_reason=cancelled_or_timed_out");
     }, 30000);
 
+    it("retries a connection-refused failure before the first assistant response as a fresh run", () => {
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+if (priorCalls === 0) {
+  process.stderr.write('{"type":"system","subtype":"init"}\\nAPI Error: Connection refused\\n');
+  process.exit(1);
+}
+process.stdout.write("startup retry succeeded\\n");
+process.exit(0);
+`;
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        extraEnv: { GH_AW_HARNESS_INITIAL_DELAY_MS: "1" },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, false]);
+      expect(calls[1].args).toContain("fix the bug");
+      expect(result.stderr).toContain("connection refused before first assistant response");
+    });
+
+    it("continues a session that encounters a connection-refused failure after an assistant response", () => {
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+if (priorCalls === 0) {
+  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
+  process.stderr.write("API Error: Connection refused\\n");
+  process.exit(1);
+}
+process.stdout.write("resume succeeded\\n");
+process.exit(0);
+`;
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        extraEnv: { GH_AW_HARNESS_INITIAL_DELAY_MS: "1" },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true]);
+    });
+
+    it("keeps resuming with --continue when a later continue attempt is refused during its own startup", () => {
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+if (priorCalls === 0) {
+  process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"Working"}]}}\\n');
+  process.stderr.write("API Error: Connection refused\\n");
+  process.exit(1);
+}
+if (priorCalls === 1) {
+  process.stderr.write('{"type":"system","subtype":"init"}\\nAPI Error: Connection refused\\n');
+  process.exit(1);
+}
+process.stdout.write("resume succeeded\\n");
+process.exit(0);
+`;
+      const { result, calls } = runHarnessWithStub({
+        stubScript,
+        extraEnv: { GH_AW_HARNESS_INITIAL_DELAY_MS: "1" },
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls.length).toBe(3);
+      expect(calls.map(call => call.args.includes("--continue"))).toEqual([false, true, true]);
+    });
+
     it("retries one no-output startup failure as a fresh run by default", () => {
       const stubScript = `
 const fs = require("fs");
@@ -482,6 +710,49 @@ process.exit(1);
       expect(calls.length).toBe(1);
       expect(calls[0].args).toContain("fix the bug");
       expect(result.stderr).toContain("startup retry budget exhausted: 0/0");
+    });
+
+    it("does not retry when maximum LLM invocations are exceeded", () => {
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+if (priorCalls > 0) {
+  process.stderr.write("unexpected retry after max_runs_exceeded\\n");
+  process.exit(9);
+}
+process.stderr.write('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20)."}}\\n');
+process.exit(1);
+`;
+      const { result, calls } = runHarnessWithStub({ stubScript });
+      expect(result.status).toBe(1);
+      expect(calls.length).toBe(1);
+      expect(result.stderr).toContain("maximum LLM invocations exceeded — not retrying");
+    });
+
+    it("exits 0 without retrying when max invocations are exceeded but safe-outputs already contain the expected result", () => {
+      const tempDir = makeHarnessTempDir("claude-harness-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      fs.writeFileSync(safeOutputsPath, '{"type":"add_comment","body":"ADR reviewed"}\n', "utf8");
+      const stubScript = `
+const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+const args = process.argv.slice(2);
+const priorCalls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({ args }) + "\\n", "utf8");
+if (priorCalls > 0) {
+  process.stderr.write("unexpected retry after max_runs_exceeded\\n");
+  process.exit(9);
+}
+process.stderr.write('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20)."}}\\n');
+process.exit(1);
+`;
+      const { result, calls } = runHarnessWithStub({ stubScript, extraEnv: { GH_AW_SAFE_OUTPUTS: safeOutputsPath } });
+      expect(result.status).toBe(0);
+      expect(calls.length).toBe(1);
+      expect(result.stderr).toContain("invocation cap saturated but safe-outputs already contain expected output");
     });
 
     it("returns true for normal partial-execution retry", () => {
@@ -667,6 +938,152 @@ process.exit(1);`,
       // Harness exits 0 because noop means the work is done
       expect(result.status).toBe(0);
       expect(result.stderr).toContain("noop message found in safe-outputs — not retrying");
+    });
+  });
+
+  describe("AI credits budget enforcement exits 0", () => {
+    /**
+     * @param {string} tempDir
+     * @returns {string}
+     */
+    function writeTrustedAICreditsExceededAudit(tempDir) {
+      const auditDir = path.join(tempDir, "sandbox", "firewall", "audit");
+      fs.mkdirSync(auditDir, { recursive: true });
+      fs.writeFileSync(path.join(auditDir, "log.jsonl"), `${JSON.stringify({ max_ai_credits_exceeded: true })}\n`, "utf8");
+      return path.join(tempDir, "agent-output.json");
+    }
+
+    it("exits 0 when the agent outputs max_ai_credits_exceeded and the CLI exits non-zero", () => {
+      const tempDir = makeHarnessTempDir("claude-ai-credits-exceeded-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      // Stub emits the AI-credits-exceeded marker on stdout (as the AWF firewall would)
+      // then exits non-zero.  The harness must detect this, set lastExitCode=0, and exit 0.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./claude_harness.cjs")),
+        env: { ...process.env, CLAUDE_HARNESS_STUB_CALLS: callsPath, GH_AW_SAFE_OUTPUTS: safeOutputsPath, GH_AW_AGENT_OUTPUT: agentOutputPath },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Only one attempt — credit limit is non-retryable
+      expect(callCount).toBe(1);
+      // Harness exits 0: budget enforcement is intentional, not a job failure
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("AI credits budget exceeded");
+      expect(result.stderr).toContain("AI credits budget enforced");
+    });
+
+    it("exits 0 when the agent outputs ai_credits_rate_limit_error and the CLI exits non-zero", () => {
+      const tempDir = makeHarnessTempDir("claude-ai-credits-rate-limit-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: ai_credits_rate_limit_error=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./claude_harness.cjs")),
+        env: { ...process.env, CLAUDE_HARNESS_STUB_CALLS: callsPath, GH_AW_SAFE_OUTPUTS: safeOutputsPath, GH_AW_AGENT_OUTPUT: agentOutputPath },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      expect(callCount).toBe(1);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("AI credits budget enforced");
+    });
+
+    it("keeps non-zero exit for auth failure even when AI-credit markers and trusted audit are present", () => {
+      const tempDir = makeHarnessTempDir("claude-auth-failure-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.stdout.write("Authentication failed (Request ID: 123)\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./claude_harness.cjs")),
+        env: {
+          ...process.env,
+          CLAUDE_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          GH_AW_AGENT_OUTPUT: agentOutputPath,
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      // Harness exits 1: normal non-credit failures still fail the job
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain("AI credits budget enforced");
+    });
+
+    it("keeps non-zero exit when AI-credit marker appears without trusted firewall audit evidence", () => {
+      const tempDir = makeHarnessTempDir("claude-ai-credits-untrusted-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CLAUDE_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["claude_harness.cjs", process.execPath, stubPath, "--print", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./claude_harness.cjs")),
+        env: {
+          ...process.env,
+          CLAUDE_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("without trusted firewall audit confirmation");
     });
   });
 });

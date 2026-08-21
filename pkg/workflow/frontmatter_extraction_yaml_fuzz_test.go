@@ -46,17 +46,19 @@ func FuzzCommentOutProcessedFieldsInOnSectionTopLevelLabels(f *testing.F) {
 			}
 		}
 
-		mustContain("  # labels: # Label filtering applied via job conditions")
+		// The commented labels/steps block is the trailing block of the on: section, so
+		// it is de-indented to column 0 to align with the top-level key that follows the
+		// on: section (yamllint comments-indentation).
+		mustContain("# labels: # Label filtering applied via job conditions")
 		mustContain("# - " + topAQuoted + " # Label filtering applied via job conditions")
 		mustContain("# - " + topBQuoted + " # Label filtering applied via job conditions")
-		mustContain("          # - " + nestedAQuoted)
-		mustContain("          # - " + nestedBQuoted)
-		if strings.Contains(result, "          # - "+nestedAQuoted+" # Label filtering applied via job conditions") {
-			t.Fatalf("nested labels item should not be marked as top-level label filtering:\n%s", result)
-		}
-		if strings.Contains(result, "          # - "+nestedBQuoted+" # Label filtering applied via job conditions") {
-			t.Fatalf("nested labels item should not be marked as top-level label filtering:\n%s", result)
-		}
+		mustContain("# - " + nestedAQuoted)
+		mustContain("# - " + nestedBQuoted)
+		// Because commented blocks are flattened to indent 2, nested step-label items
+		// are no longer distinguishable from top-level label items by indentation.
+		// The annotation-count invariant below is what guarantees the nested items are
+		// not mislabeled as top-level label filtering (any such mislabel would push the
+		// count above the expected value).
 
 		expectedTopLevelLabelItems := 2
 		expectedLabelFilterAnnotations := expectedTopLevelLabelItems + 1 // labels key + top-level items
@@ -91,10 +93,12 @@ func FuzzCommentOutProcessedFieldsInOnSectionNoTopLevelLabels(f *testing.F) {
 
 		result := compiler.commentOutProcessedFieldsInOnSection(yamlStr, map[string]any{})
 
-		if !strings.Contains(result, "          # - "+nestedAQuoted) {
+		// Commented on.steps content is the trailing block of the on: section, so it is
+		// de-indented to column 0 (yamllint comments-indentation).
+		if !strings.Contains(result, "# - "+nestedAQuoted) {
 			t.Fatalf("expected nested labels item to remain in on.steps output:\n%s", result)
 		}
-		if !strings.Contains(result, "          # - "+nestedBQuoted) {
+		if !strings.Contains(result, "# - "+nestedBQuoted) {
 			t.Fatalf("expected nested labels item to remain in on.steps output:\n%s", result)
 		}
 		if strings.Contains(result, "Label filtering applied via job conditions") {

@@ -12,6 +12,7 @@ type LogsDownloadOptions struct {
 	EndDate           string
 	OutputDir         string
 	Engine            string
+	Runtime           string
 	Ref               string
 	BeforeRunID       int64
 	AfterRunID        int64
@@ -24,9 +25,11 @@ type LogsDownloadOptions struct {
 	Parse             bool
 	JSONOutput        bool
 	TimeoutMinutes    int
+	TimeoutSeconds    int
 	SummaryFile       string
 	SafeOutputType    string
 	FilteredIntegrity bool
+	EvalsOnly         bool
 	Train             bool
 	Format            string
 	ArtifactSets      []string
@@ -39,6 +42,7 @@ type StdinLogsOptions struct {
 	RunURLs           []string
 	OutputDir         string
 	Engine            string
+	Runtime           string
 	RepoOverride      string
 	Verbose           bool
 	ToolGraph         bool
@@ -51,6 +55,7 @@ type StdinLogsOptions struct {
 	SummaryFile       string
 	SafeOutputType    string
 	FilteredIntegrity bool
+	EvalsOnly         bool
 	Train             bool
 	Format            string
 	ReportFile        string
@@ -70,6 +75,13 @@ type continuationOptions struct {
 	afterRunID     int64
 	count          int
 	timeoutMinutes int
+	// lastFetchedBeforeDate is the pagination date cursor collectProcessedWorkflowRuns
+	// had advanced to when it stopped (from the oldest run actually fetched from the
+	// API, including batches that yielded zero matching runs). When set, it is used
+	// as the continuation's end_date so a resumed request starts scanning from where
+	// this one left off instead of re-scanning the whole original window from the
+	// newest run again.
+	lastFetchedBeforeDate string
 }
 
 // renderLogsOutputOptions holds configuration for renderLogsOutput.
@@ -84,4 +96,16 @@ type renderLogsOutputOptions struct {
 	continuation   *ContinuationData
 	verbose        bool
 	artifactFilter []string
+	startDate      string
+	endDate        string
+	// checkStaleness enables the stale-data warning check. It is only meaningful
+	// for discovery-mode rendering (pagination walking backwards through time
+	// looking for runs); the stdin path processes explicit run IDs with no
+	// pagination, so it leaves this false.
+	checkStaleness bool
+	// countLimitReached indicates the continuation (if any) was produced because
+	// the count/iteration cap was hit, as opposed to a timeout. It is used to
+	// scope dateRangeCoverageWarning to the cause it actually describes, rather
+	// than firing for timeout-driven continuations too.
+	countLimitReached bool
 }

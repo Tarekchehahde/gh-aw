@@ -1,0 +1,234 @@
+import { RuleTester } from "eslint";
+import { describe, it } from "vitest";
+import { noErrStackThenStringFallbackRule } from "./no-err-stack-then-string-fallback";
+
+const cjsRuleTester = new RuleTester({
+  languageOptions: {
+    ecmaVersion: 2022,
+    sourceType: "commonjs",
+  },
+});
+
+describe("no-err-stack-then-string-fallback", () => {
+  it("valid: already uses getErrorMessage", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = getErrorMessage(err);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: instanceof .message form is handled by prefer-get-error-message", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err instanceof Error ? err.message : String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: mismatched variable names are excluded", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err && err.stack ? err.stack : String(other);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: mismatched object in err.stack check is excluded", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err && other.stack ? err.stack : String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: mismatched consequent variable is excluded", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err && err.stack ? other.stack : String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: logical-OR form is intentionally out of scope", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err.stack || String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: test with different property than stack is excluded", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err && err.message ? err.message : String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("invalid: instanceof Error form with .stack consequent is flagged", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { getErrorMessage } = require("./error_helpers.cjs"); const msg = err instanceof Error ? err.stack : String(err);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: "err" },
+                  output: `const { getErrorMessage } = require("./error_helpers.cjs"); const msg = getErrorMessage(err);`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: instanceof Error form in template literal is flagged", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { getErrorMessage } = require("./error_helpers.cjs"); core.setFailed(\`unhandled error: \${err instanceof Error ? err.stack : String(err)}\`);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: "err" },
+                  output: `const { getErrorMessage } = require("./error_helpers.cjs"); core.setFailed(\`unhandled error: \${getErrorMessage(err)}\`);`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: instanceof non-Error check with .stack is excluded", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [`const msg = err instanceof MyError ? err.stack : String(err);`],
+      invalid: [],
+    });
+  });
+
+  it("invalid: core.setFailed(err && err.stack ? err.stack : String(err)) is flagged", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { getErrorMessage } = require("./error_helpers.cjs"); core.setFailed(err && err.stack ? err.stack : String(err));`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: "err" },
+                  output: `const { getErrorMessage } = require("./error_helpers.cjs"); core.setFailed(getErrorMessage(err));`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: standalone assignment is flagged", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { getErrorMessage } = require("./error_helpers.cjs"); const msg = err && err.stack ? err.stack : String(err);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: "err" },
+                  output: `const { getErrorMessage } = require("./error_helpers.cjs"); const msg = getErrorMessage(err);`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: different variable name (error) is also flagged", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { getErrorMessage } = require("./error_helpers.cjs"); console.error(error && error.stack ? error.stack : String(error));`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "error" },
+              suggestions: [
+                {
+                  messageId: "replaceWithGetErrorMessage",
+                  data: { errorVar: "error" },
+                  output: `const { getErrorMessage } = require("./error_helpers.cjs"); console.error(getErrorMessage(error));`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: getErrorMessage defined in its own initializer (TDZ) — diagnostic fires but no suggestion offered", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const getErrorMessage = err instanceof Error ? err.stack : String(err);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: no getErrorMessage in scope — diagnostic fires but no suggestion offered", () => {
+    cjsRuleTester.run("no-err-stack-then-string-fallback", noErrStackThenStringFallbackRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const msg = err instanceof Error ? err.stack : String(err);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [],
+            },
+          ],
+        },
+        {
+          code: `process.stderr.write(\`[copilot-sdk-driver] unhandled error: \${err instanceof Error ? err.stack : String(err)}\\n\`);`,
+          errors: [
+            {
+              messageId: "preferGetErrorMessage",
+              data: { errorVar: "err" },
+              suggestions: [],
+            },
+          ],
+        },
+      ],
+    });
+  });
+});

@@ -3,6 +3,7 @@
 // This file contains domain-specific validation functions for sandbox configuration:
 //   - validateMountsSyntax() - Validates container mount syntax
 //   - validateSandboxConfig() - Validates complete sandbox configuration
+//   - validateBoundedQueriesConfig() - Validates tools.github.bounded-queries configuration
 //
 // These validation functions are organized in a dedicated file following the validation
 // architecture pattern where domain-specific validation belongs in domain validation files.
@@ -14,16 +15,20 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/logger"
+	"github.com/github/gh-aw/pkg/sliceutil"
 )
 
-var sandboxValidationLog = newValidationLogger("sandbox")
+var sandboxValidationLog = logger.New("workflow:sandbox_validation")
 
 const minSandboxDisableJustificationLength = 20
 
 var githubActionsExpressionPattern = regexp.MustCompile(`\$\{\{[\s\S]*\}\}`)
+var mcpGatewayEnvNamePattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // validateMountsSyntax validates that mount strings follow the correct syntax
 // Expected format: "source:destination:mode" where mode is either "ro" or "rw"
@@ -61,7 +66,7 @@ func validateMountsSyntax(mounts []string) error {
 				fmt.Sprintf("Provide a valid destination path.\n\nExample:\nsandbox:\n  mounts:\n    - \"/host/path:/container/path:ro\"\n\nSee: %s", constants.DocsSandboxURL),
 			)
 		default:
-			return fmt.Errorf("internal error: unsupported mount validation kind %d for sandbox mount %q", kind, mount)
+			return fmt.Errorf("internal error: sandbox mount validation kind %d for mount %q is not supported. Expected one of: invalid-format, too-few-parts, too-many-parts, empty-host-path, empty-destination. Example: \"/host/path:/container/path:ro\"", kind, mount)
 		}
 	})
 }
@@ -106,6 +111,24 @@ func validateSandboxConfig(workflowData *WorkflowData) error {
 		}
 	}
 
+	// Validate memory format if specified in agent config
+	if agentConfig != nil && agentConfig.Memory != "" {
+		if err := validateAgentMemoryLimit(agentConfig.Memory); err != nil {
+			return err
+		}
+	}
+
+	if agentConfig != nil && len(agentConfig.AllowHostPorts) > 0 {
+		if err := validateAllowHostPorts(agentConfig.AllowHostPorts); err != nil {
+			return err
+		}
+	}
+
+	// Validate the runtime profile and the properties that depend on it.
+	if err := validateSandboxRuntimeProfile(workflowData, agentConfig); err != nil {
+		return err
+	}
+
 	// Validate gVisor runtime compatibility
 	if agentConfig != nil && agentConfig.Runtime == AgentRuntimeGVisor {
 		// gVisor is incompatible with ARC/DinD topology: the runner has no access to the
@@ -123,6 +146,99 @@ func validateSandboxConfig(workflowData *WorkflowData) error {
 		}
 
 		sandboxValidationLog.Print("gVisor runtime configured -- topology check passed")
+	}
+
+	// Validate docker-sbx runtime compatibility
+	if agentConfig != nil && agentConfig.Runtime == AgentRuntimeDockerSbx {
+		// docker-sbx is incompatible with ARC/DinD topology: sbx requires KVM which is
+		// not available on ARC DinD runners that typically lack nested virtualisation.
+		if isArcDindTopology(workflowData) {
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeDockerSbx),
+				"docker-sbx is incompatible with runner.topology: arc-dind",
+				"docker-sbx requires KVM (nested virtualisation) which is typically unavailable "+
+					"on ARC DinD runners. Remove sandbox.agent.runtime: docker-sbx or change runner.topology.",
+			)
+		}
+
+		firewallConfig := getFirewallConfig(workflowData)
+		var configuredVersion string
+		if firewallConfig != nil {
+			configuredVersion = firewallConfig.Version
+		}
+		if !versionAtLeast(configuredVersion, string(constants.DefaultFirewallVersion), string(constants.AWFContainerRuntimeMinVersion)) {
+			effectiveVersion := configuredVersion
+			if effectiveVersion == "" {
+				effectiveVersion = string(constants.DefaultFirewallVersion)
+			}
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeDockerSbx),
+				fmt.Sprintf("docker-sbx requires AWF %s or newer", constants.AWFContainerRuntimeMinVersion),
+				fmt.Sprintf("docker-sbx emits 'awf --container-runtime sbx', which is only supported in AWF %s+.\n\nThe effective AWF version is %s. Set firewall.version or sandbox.agent.version to %s or newer.", constants.AWFContainerRuntimeMinVersion, effectiveVersion, constants.AWFContainerRuntimeMinVersion),
+			)
+		}
+
+		sandboxValidationLog.Print("docker-sbx runtime configured -- topology and AWF version checks passed")
+	}
+
+	// Validate cloud-hypervisor runtime compatibility
+	if agentConfig != nil && agentConfig.Runtime == AgentRuntimeCloudHypervisor {
+		if isArcDindTopology(workflowData) {
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeCloudHypervisor),
+				"cloud-hypervisor is incompatible with runner.topology: arc-dind",
+				"cloud-hypervisor requires KVM and is only supported on GitHub-hosted Ubuntu x86_64 runners. "+
+					"ARC DinD runners do not provide that runtime environment. Remove sandbox.agent.runtime: cloud-hypervisor or change runner.topology.",
+			)
+		}
+
+		firewallConfig := getFirewallConfig(workflowData)
+		var configuredVersion string
+		if firewallConfig != nil {
+			configuredVersion = firewallConfig.Version
+		}
+		if !versionAtLeast(configuredVersion, string(constants.DefaultFirewallVersion), string(constants.AWFCloudHypervisorMinVersion)) {
+			effectiveVersion := configuredVersion
+			if effectiveVersion == "" {
+				effectiveVersion = string(constants.DefaultFirewallVersion)
+			}
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeCloudHypervisor),
+				fmt.Sprintf("cloud-hypervisor requires AWF %s or newer", constants.AWFCloudHypervisorMinVersion),
+				fmt.Sprintf("cloud-hypervisor preview support is only available in AWF %s+.\n\nThe effective AWF version is %s. Set firewall.version or sandbox.agent.version to %s or newer.", constants.AWFCloudHypervisorMinVersion, effectiveVersion, constants.AWFCloudHypervisorMinVersion),
+			)
+		}
+
+		// cloud-hypervisor rejects --difc-proxy-host: the CLI proxy sidecar (awmg-cli-proxy)
+		// is intentionally not attached to the isolated topology, so gh-proxy mode
+		// (and integrity-reactions, which implicitly enables it) has no route to the host.
+		if isCliProxyNeeded(workflowData) {
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeCloudHypervisor),
+				"cloud-hypervisor is incompatible with tools.github.mode: gh-proxy",
+				"cloud-hypervisor does not attach the CLI proxy sidecar, and the AWF runtime rejects "+
+					"--difc-proxy-host for this runtime. Remove tools.github.mode: gh-proxy and the "+
+					"integrity-reactions feature, or change sandbox.agent.runtime.",
+			)
+		}
+
+		// cloud-hypervisor rejects enclaves configuration outright.
+		if len(workflowData.Enclaves) > 0 {
+			return NewValidationError(
+				"sandbox.agent.runtime",
+				string(AgentRuntimeCloudHypervisor),
+				"cloud-hypervisor is incompatible with enclaves",
+				"cloud-hypervisor does not support the enclaves subsystem. Remove the enclaves "+
+					"configuration, or change sandbox.agent.runtime.",
+			)
+		}
+
+		sandboxValidationLog.Print("cloud-hypervisor runtime configured -- topology, AWF version, and feature compatibility checks passed")
 	}
 
 	// Validate config structure if provided (deprecated - was only for SRT)
@@ -144,6 +260,27 @@ func validateSandboxConfig(workflowData *WorkflowData) error {
 		sandboxValidationLog.Printf("Validated MCP gateway port: %d", sandboxConfig.MCP.Port)
 	}
 
+	if sandboxConfig.MCP != nil {
+		for _, name := range sliceutil.SortedKeys(sandboxConfig.MCP.Env) {
+			if isReservedMCPGatewayEnvVar(name) {
+				return NewValidationError(
+					"sandbox.mcp.env."+name,
+					name,
+					"environment variable names in the GH_AW_MCP_GATEWAY_ namespace are reserved for internal transport",
+					"Choose a different name that does not start with GH_AW_MCP_GATEWAY_. Example:\n\nsandbox:\n  mcp:\n    env:\n      API_TOKEN: value",
+				)
+			}
+			if !mcpGatewayEnvNamePattern.MatchString(name) {
+				return NewValidationError(
+					"sandbox.mcp.env."+name,
+					name,
+					fmt.Sprintf("environment variable names should match %s", mcpGatewayEnvNamePattern),
+					"Use uppercase letters, digits, and underscores, starting with a letter or underscore. Example:\n\nsandbox:\n  mcp:\n    env:\n      API_TOKEN: value",
+				)
+			}
+		}
+	}
+
 	// Validate that if agent sandbox is enabled, MCP gateway is always enabled.
 	// The MCP gateway is enabled when MCP servers are configured (tools that use MCP).
 	// Note: Even if agent sandbox is disabled (sandbox.agent: false), the MCP gateway
@@ -163,29 +300,343 @@ func validateSandboxConfig(workflowData *WorkflowData) error {
 	return nil
 }
 
+// validBoundedQuerySensitivities is the set of accepted sensitivity classifications.
+var validBoundedQuerySensitivities = map[string]struct{}{
+	"public":       {},
+	"internal":     {},
+	"confidential": {},
+	"sealed":       {},
+}
+
+// validBoundedQueryRuntimes is the set of accepted isolated query backends.
+var validBoundedQueryRuntimes = map[BoundedQueryRuntime]struct{}{
+	BoundedQueryRuntimeDocker: {},
+	BoundedQueryRuntimeGVisor: {},
+	BoundedQueryRuntimeSbx:    {},
+}
+
+// validBoundedQueryInterpreters is the set of accepted script interpreters.
+var validBoundedQueryInterpreters = map[string]struct{}{
+	"python3": {},
+}
+
+// validateBoundedQueriesConfig validates tools.github.bounded-queries configuration.
+// Returns an error when the configuration is invalid.
+func validateBoundedQueriesConfig(workflowData *WorkflowData) error {
+	if workflowData == nil || workflowData.ParsedTools == nil || workflowData.ParsedTools.GitHub == nil {
+		return nil
+	}
+	bq := workflowData.ParsedTools.GitHub.BoundedQueries
+	if bq == nil {
+		return nil
+	}
+
+	// Reject malformed frontmatter that the parser recorded as a type error.
+	if bq.ParseError != "" {
+		return NewValidationError(
+			"tools.github.bounded-queries",
+			"<malformed>",
+			bq.ParseError,
+			"Ensure bounded-queries is a valid mapping object:\n\ntools:\n  github:\n    bounded-queries:\n      private-repos:\n        - repo: my-org/my-repo\n          sensitivity: internal\n\nSee: "+string(constants.DocsSandboxURL),
+		)
+	}
+
+	// bounded-queries is only supported for the AWF sandbox.
+	var agentType SandboxType
+	if workflowData.SandboxConfig != nil && workflowData.SandboxConfig.Agent != nil {
+		agentType = getAgentType(workflowData.SandboxConfig.Agent)
+	}
+	if !isSupportedSandboxType(agentType) {
+		return NewValidationError(
+			"tools.github.bounded-queries",
+			string(agentType),
+			"bounded-queries requires the AWF sandbox (sandbox.agent.id: awf)",
+			"Set sandbox.agent.id: awf when using bounded-queries:\n\nsandbox:\n  agent:\n    id: awf\ntools:\n  github:\n    bounded-queries:\n      private-repos:\n        - repo: my-org/my-repo\n          sensitivity: internal\n\nSee: "+string(constants.DocsSandboxURL),
+		)
+	}
+
+	// Verify that the effective AWF version supports bounded queries.
+	// Fail early with a clear message rather than silently generating a workflow
+	// that lacks the requested capability and may follow an invalid access model.
+	if !awfSupportsBoundedQueries(getFirewallConfig(workflowData)) {
+		firewallConfig := getFirewallConfig(workflowData)
+		var configuredVersion string
+		if firewallConfig != nil {
+			configuredVersion = firewallConfig.Version
+		}
+		effectiveVersion := configuredVersion
+		if effectiveVersion == "" {
+			effectiveVersion = string(constants.DefaultFirewallVersion)
+		}
+		return NewValidationError(
+			"tools.github.bounded-queries",
+			effectiveVersion,
+			fmt.Sprintf("bounded-queries requires AWF %s or newer", constants.AWFBoundedQueriesMinVersion),
+			fmt.Sprintf("bounded-queries is only supported in AWF %s+.\n\nThe effective AWF version is %s. Set firewall.version or sandbox.agent.version to %s or newer.", constants.AWFBoundedQueriesMinVersion, effectiveVersion, constants.AWFBoundedQueriesMinVersion),
+		)
+	}
+
+	// Validate that private-repos is non-empty.
+	if len(bq.PrivateRepos) == 0 {
+		return NewValidationError(
+			"tools.github.bounded-queries.private-repos",
+			"[]",
+			"bounded-queries requires at least one private-repos entry",
+			"Add at least one repository to private-repos:\n\ntools:\n  github:\n    bounded-queries:\n      private-repos:\n        - repo: my-org/my-repo\n          sensitivity: internal\n\nSee: "+string(constants.DocsSandboxURL),
+		)
+	}
+
+	// Validate each private-repo entry.
+	seen := make(map[string]struct{}, len(bq.PrivateRepos))
+	for i, r := range bq.PrivateRepos {
+		field := fmt.Sprintf("tools.github.bounded-queries.private-repos[%d]", i)
+
+		if r == nil {
+			return NewValidationError(field, "<nil>", "private-repos entry must not be null", "")
+		}
+
+		// Validate repo slug format.
+		if err := validateRepoSlug(field+".repo", r.Repo); err != nil {
+			return err
+		}
+
+		// Validate sensitivity.
+		if _, ok := validBoundedQuerySensitivities[r.Sensitivity]; !ok {
+			const validValues = "public, internal, confidential, sealed"
+			return NewValidationError(
+				field+".sensitivity",
+				r.Sensitivity,
+				"sensitivity must be one of: "+validValues,
+				"Use one of the accepted sensitivity values:\n\ntools:\n  github:\n    bounded-queries:\n      private-repos:\n        - repo: my-org/my-repo\n          sensitivity: internal  # one of: "+validValues+"\n\nSee: "+string(constants.DocsSandboxURL),
+			)
+		}
+
+		// Validate no duplicates (case-insensitive, matching AWF's treatment of slugs).
+		key := strings.ToLower(r.Repo)
+		if _, dup := seen[key]; dup {
+			return NewValidationError(
+				field+".repo",
+				r.Repo,
+				"duplicate repository slug in bounded-queries.private-repos",
+				fmt.Sprintf("Each repository may appear at most once in bounded-queries.private-repos. Remove the duplicate entry for %q.\n\nSee: %s", r.Repo, constants.DocsSandboxURL),
+			)
+		}
+		seen[key] = struct{}{}
+	}
+
+	// Validate optional runtime.
+	if bq.Runtime != "" {
+		if _, ok := validBoundedQueryRuntimes[bq.Runtime]; !ok {
+			return NewValidationError(
+				"tools.github.bounded-queries.runtime",
+				bq.Runtime,
+				"unsupported bounded-queries runtime: must be \"docker\", \"gvisor\", or \"sbx\"",
+				fmt.Sprintf("Set runtime to a supported value:\n\ntools:\n  github:\n    bounded-queries:\n      runtime: docker  # docker, gvisor, or sbx\n\nThe sbx backend is experimental and capability-gated. AWF performs a fail-closed host preflight and never falls back to docker or gvisor.\n\nSee: %s", constants.DocsSandboxURL),
+			)
+		}
+	}
+
+	// Validate optional timeout (1–540 seconds; explicit zero is also rejected).
+	if bq.Timeout != nil {
+		if err := validateIntRange(*bq.Timeout, 1, 540, "tools.github.bounded-queries.timeout"); err != nil {
+			return NewValidationError(
+				"tools.github.bounded-queries.timeout",
+				strconv.Itoa(*bq.Timeout),
+				"bounded-queries timeout must be between 1 and 540 seconds",
+				fmt.Sprintf("Set timeout to a value between 1 and 540 (seconds).\n\nSee: %s", constants.DocsSandboxURL),
+			)
+		}
+	}
+
+	// Validate optional memory-limit format (e.g. "512m", "2g").
+	if bq.MemoryLimit != "" {
+		if err := validateBoundedQueryMemoryLimit(bq.MemoryLimit); err != nil {
+			return err
+		}
+	}
+
+	// Validate optional interpreter.
+	if bq.Interpreter != "" {
+		if _, ok := validBoundedQueryInterpreters[bq.Interpreter]; !ok {
+			return NewValidationError(
+				"tools.github.bounded-queries.interpreter",
+				bq.Interpreter,
+				"unsupported bounded-queries interpreter: must be \"python3\"",
+				fmt.Sprintf("Set interpreter to a supported value:\n\ntools:\n  github:\n    bounded-queries:\n      interpreter: python3\n\nSee: %s", constants.DocsSandboxURL),
+			)
+		}
+	}
+
+	// Validate optional max-invocations (1–10000; explicit zero is also rejected).
+	if bq.MaxInvocations != nil {
+		if err := validateIntRange(*bq.MaxInvocations, 1, 10000, "tools.github.bounded-queries.max-invocations"); err != nil {
+			return NewValidationError(
+				"tools.github.bounded-queries.max-invocations",
+				strconv.Itoa(*bq.MaxInvocations),
+				"bounded-queries max-invocations must be between 1 and 10000",
+				fmt.Sprintf("Set max-invocations to a value between 1 and 10000.\n\nSee: %s", constants.DocsSandboxURL),
+			)
+		}
+	}
+
+	sandboxValidationLog.Printf("bounded-queries validation passed: %d private repo(s)", len(bq.PrivateRepos))
+	return nil
+}
+
+// validateRepoSlug validates a repository slug in "owner/repo" format.
+// Returns a validation error for empty values, GitHub Actions expressions, or malformed slugs.
+func validateRepoSlug(field, slug string) error {
+	if slug == "" {
+		return NewValidationError(
+			field,
+			"",
+			"repository slug must not be empty",
+			fmt.Sprintf("Provide a valid 'owner/repo' slug.\n\nSee: %s", constants.DocsSandboxURL),
+		)
+	}
+	if githubActionsExpressionPattern.MatchString(slug) {
+		return NewValidationError(
+			field,
+			slug,
+			"repository slug must not contain GitHub Actions expressions",
+			fmt.Sprintf("Use a literal 'owner/repo' slug; dynamic values are not permitted in bounded-queries.\n\nSee: %s", constants.DocsSandboxURL),
+		)
+	}
+	if !repoSlugPattern.MatchString(slug) {
+		return NewValidationError(
+			field,
+			slug,
+			"repository slug must be in 'owner/repo' format",
+			fmt.Sprintf("Use a valid 'owner/repo' slug (owner: alphanumeric characters, hyphens, underscores; repo: alphanumeric characters, hyphens, underscores, and dots).\n\nSee: %s", constants.DocsSandboxURL),
+		)
+	}
+	return nil
+}
+
+// memoryLimitPattern matches valid memory limit strings.
+// The value must start with a non-zero digit, optionally followed by more digits,
+// and end with one of: b, k, m, g (case-insensitive). Leading zeros and bare-zero
+// values (e.g. "0m") are rejected because AWF rejects them at startup.
+// Examples of valid values: "512m", "2g", "1024k", "1b", "128M".
+var memoryLimitPattern = regexp.MustCompile(`^[1-9][0-9]*[bkmgBKMG]$`)
+
+// validateBoundedQueryMemoryLimit checks that a memory-limit string has the correct format.
+func validateBoundedQueryMemoryLimit(memoryLimit string) error {
+	if !memoryLimitPattern.MatchString(memoryLimit) {
+		return NewValidationError(
+			"tools.github.bounded-queries.memory-limit",
+			memoryLimit,
+			"memory-limit must be a positive number followed by a unit: b, k, m, or g (e.g. \"512m\", \"2g\")",
+			fmt.Sprintf("Use a valid memory limit format:\n\ntools:\n  github:\n    bounded-queries:\n      memory-limit: 512m  # examples: 512m, 2g, 1024k, 1b\n\nSee: %s", constants.DocsSandboxURL),
+		)
+	}
+	return nil
+}
+
+// validateAgentMemoryLimit checks that a sandbox.agent.memory string has the correct format.
+func validateAgentMemoryLimit(memory string) error {
+	if !memoryLimitPattern.MatchString(memory) {
+		return NewValidationError(
+			"sandbox.agent.memory",
+			memory,
+			"memory value is not a valid limit. Expected a positive integer without leading zeros followed by a unit: b, k, m, or g (e.g. \"4g\", \"512m\")",
+			fmt.Sprintf("Use a valid memory limit format:\n\nsandbox:\n  agent:\n    memory: 4g  # examples: 512m, 4g, 8g\n\nSee: %s", constants.DocsSandboxURL),
+		)
+	}
+	return nil
+}
+
+func validateAllowHostPorts(ports []int) error {
+	for _, port := range ports {
+		if port < minPort || port > maxPort {
+			return fmt.Errorf("allow-host-ports value %d is out of range. Expected a TCP port between 1 and 65535. Example: allow-host-ports: [9000]", port)
+		}
+		if service, dangerous := awfDangerousHostPorts[port]; dangerous {
+			return fmt.Errorf("allow-host-ports value %d maps to blocked service %s. Expected blocked service ports to be removed from allow-host-ports because they remain unreachable there even with the %s runtime; expose the service via GitHub Actions services: with sandbox.agent.runtime: %s instead. Example:\n# Do not list blocked service ports under allow-host-ports\nsandbox:\n  agent:\n    runtime: %s\nservices:\n  db:\n    image: postgres\n    ports: [\"5432:5432\"]", port, service, AgentRuntimeDockerSudoIptables, AgentRuntimeDockerSudoIptables, AgentRuntimeDockerSudoIptables)
+		}
+	}
+	return nil
+}
+
+// validateSandboxRuntimeProfile validates sandbox.agent.runtime and the properties
+// whose behavior depends on the selected runtime profile.
+func validateSandboxRuntimeProfile(workflowData *WorkflowData, agentConfig *AgentSandboxConfig) error {
+	if agentConfig == nil || agentConfig.Disabled {
+		return nil
+	}
+
+	if !isSupportedAgentRuntime(agentConfig.Runtime) {
+		return NewValidationError(
+			"sandbox.agent.runtime",
+			string(agentConfig.Runtime),
+			"unsupported sandbox runtime: must be one of "+strings.Join(supportedAgentRuntimeNames(), ", "),
+			fmt.Sprintf("Choose one of the supported runtime profiles:\n\nsandbox:\n  agent:\n    runtime: %s\n\nSee: %s", AgentRuntimeDocker, constants.DocsSandboxURL),
+		)
+	}
+
+	profile := resolveSandboxRuntimeProfile(agentConfig)
+
+	// runtime-install controls runner provisioning and is only meaningful for the
+	// runtimes that the compiler provisions (gvisor and docker-sbx).
+	if agentConfig.RuntimeInstall != nil && !profile.SupportsRuntimeInstall {
+		return NewValidationError(
+			"sandbox.agent.runtime-install",
+			strconv.FormatBool(*agentConfig.RuntimeInstall),
+			fmt.Sprintf("sandbox.agent.runtime-install is only supported with sandbox.agent.runtime: %s or %s (current runtime: %s)", AgentRuntimeGVisor, AgentRuntimeDockerSbx, profile.Runtime),
+			fmt.Sprintf("Remove sandbox.agent.runtime-install, or select a runtime that the compiler provisions:\n\nsandbox:\n  agent:\n    runtime: %s\n    runtime-install: false\n\nSee: %s", AgentRuntimeGVisor, constants.DocsSandboxURL),
+		)
+	}
+
+	// Host access (explicit host ports and automatic GitHub Actions services:
+	// connectivity) requires the privileged iptables profile.
+	if profile.SupportsHostAccess {
+		return nil
+	}
+
+	if len(agentConfig.AllowHostPorts) > 0 {
+		return NewValidationError(
+			"sandbox.agent.allow-host-ports",
+			joinPorts(agentConfig.AllowHostPorts),
+			fmt.Sprintf("sandbox.agent.allow-host-ports requires sandbox.agent.runtime: %s (current runtime: %s)", AgentRuntimeDockerSudoIptables, profile.Runtime),
+			fmt.Sprintf("Host access is only available in the %s runtime profile:\n\nsandbox:\n  agent:\n    runtime: %s\n    allow-host-ports: [9000]\n\nSee: %s", AgentRuntimeDockerSudoIptables, AgentRuntimeDockerSudoIptables, constants.DocsSandboxURL),
+		)
+	}
+
+	if workflowData != nil && workflowData.ServicePortExpressions != "" {
+		return NewValidationError(
+			"services",
+			workflowData.ServicePortExpressions,
+			fmt.Sprintf("GitHub Actions services: with published ports require sandbox.agent.runtime: %s (current runtime: %s)", AgentRuntimeDockerSudoIptables, profile.Runtime),
+			fmt.Sprintf("The agent can only reach service containers in the %s runtime profile:\n\nsandbox:\n  agent:\n    runtime: %s\n\nOr remove the port mappings from services: if the agent does not need to reach them.\n\nSee: %s", AgentRuntimeDockerSudoIptables, AgentRuntimeDockerSudoIptables, constants.DocsSandboxURL),
+		)
+	}
+
+	return nil
+}
+
 func getSandboxDisableJustification(workflowData *WorkflowData) (string, error) {
 	if workflowData == nil || workflowData.Features == nil {
-		return "", errors.New("dangerously-disable-sandbox-agent feature is missing")
+		return "", errors.New("features block is missing dangerously-disable-sandbox-agent configuration. Expected a non-empty string justification under features when sandbox.agent is false. Example:\nfeatures:\n  dangerously-disable-sandbox-agent: \"Temporary migration while hardening container profile\"")
 	}
 
 	flagName := string(constants.DangerouslyDisableSandboxAgentFeatureFlag)
 	value, found := getFeatureValueCaseInsensitive(workflowData.Features, flagName)
 	if !found {
-		return "", errors.New("dangerously-disable-sandbox-agent feature is missing")
+		return "", errors.New("dangerously-disable-sandbox-agent key is missing from features. Expected a non-empty string justification under features when sandbox.agent is false. Example:\nfeatures:\n  dangerously-disable-sandbox-agent: \"Temporary migration while hardening container profile\"")
 	}
 
 	justification, ok := value.(string)
 	if !ok {
-		return "", fmt.Errorf("feature must be a string, got %T", value)
+		return "", fmt.Errorf("dangerously-disable-sandbox-agent feature value has type %T. Expected a string justification. Example:\nfeatures:\n  dangerously-disable-sandbox-agent: \"Temporary migration while hardening container profile\"", value)
 	}
 
 	trimmed := strings.TrimSpace(justification)
 	if len(trimmed) < minSandboxDisableJustificationLength {
-		return "", fmt.Errorf("feature must be at least %d characters", minSandboxDisableJustificationLength)
+		return "", fmt.Errorf("dangerously-disable-sandbox-agent justification is shorter than %d characters. Expected a descriptive justification string with at least %d characters. Example:\nfeatures:\n  dangerously-disable-sandbox-agent: \"Temporary migration while hardening container profile\"", minSandboxDisableJustificationLength, minSandboxDisableJustificationLength)
 	}
 
 	if githubActionsExpressionPattern.MatchString(trimmed) {
-		return "", errors.New("feature cannot use GitHub Actions expressions")
+		return "", errors.New("dangerously-disable-sandbox-agent justification uses a GitHub Actions expression. Expected a literal explanatory string, not an expression. Example:\nfeatures:\n  dangerously-disable-sandbox-agent: \"Temporary migration while hardening container profile\"")
 	}
 
 	return trimmed, nil

@@ -41,15 +41,28 @@ function readManifestEntriesFromEnv() {
 
 function resolveDefaultBranch(repository, checkoutPath, options = {}) {
   const workspace = options.workspace || process.env.GITHUB_WORKSPACE || "";
-  const runGit = options.runGit || ((args, execOptions = {}) => execFileSync("git", args, { encoding: "utf8", ...execOptions }));
+  const runGit =
+    options.runGit ||
+    ((args, execOptions = {}) => {
+      try {
+        return execFileSync("git", args, { encoding: "utf8", ...execOptions });
+      } catch (err) {
+        throw new Error(`Failed to run git ${args.join(" ")}: ${getErrorMessage(err)}`, { cause: err });
+      }
+    });
   const runGH =
     options.runGH ||
-    ((args, execOptions = {}) =>
-      execFileSync("gh", args, {
-        encoding: "utf8",
-        env: { ...process.env, ...(execOptions.env || {}) },
-        ...execOptions,
-      }));
+    ((args, execOptions = {}) => {
+      try {
+        return execFileSync("gh", args, {
+          encoding: "utf8",
+          env: { ...process.env, ...(execOptions.env || {}) },
+          ...execOptions,
+        });
+      } catch (err) {
+        throw new Error(`Failed to run gh ${args.join(" ")}: ${getErrorMessage(err)}`, { cause: err });
+      }
+    });
   let defaultBranch = "";
 
   const repoPath = checkoutPath ? path.join(workspace, checkoutPath) : workspace;
@@ -97,7 +110,11 @@ function buildCheckoutManifest(entries, options = {}) {
   // $RUNNER_TEMP/gh-aw that is bind-mounted into the containerized safe-outputs
   // MCP server, which is where the manifest is read by findRepoCheckout.
   const manifestDir = path.join(runnerTemp, "gh-aw", "safeoutputs");
-  fs.mkdirSync(manifestDir, { recursive: true });
+  try {
+    fs.mkdirSync(manifestDir, { recursive: true });
+  } catch (err) {
+    throw new Error(`Failed to create directory ${manifestDir}: ${getErrorMessage(err)}`, { cause: err });
+  }
   const manifestPath = path.join(manifestDir, "checkout-manifest.json");
   const manifest = {};
   core.info(`checkout-manifest: building manifest for ${entries.length} checkout entries`);
@@ -127,7 +144,11 @@ function buildCheckoutManifest(entries, options = {}) {
     core.info(`checkout-manifest: ${repository} -> path=${checkoutPath} default_branch=${defaultBranch || "<unresolved>"}`);
   }
 
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  } catch (err) {
+    throw new Error(`Failed to write file ${manifestPath}: ${getErrorMessage(err)}`, { cause: err });
+  }
   core.info(`checkout-manifest written to ${manifestPath}`);
   return { manifestPath, manifest };
 }

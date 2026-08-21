@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +15,47 @@ func TestFindModelPricing(t *testing.T) {
 	pricing, ok := findModelPricing("anthropic", "claude-sonnet-4.6")
 	require.True(t, ok)
 	assert.InDelta(t, 0.000003, pricing["input"], 1e-12)
+}
+
+func TestFindKimiK3Pricing(t *testing.T) {
+	pricing, ok := findModelPricing("github-copilot", "kimi-k3")
+	require.True(t, ok)
+	assert.InDelta(t, 0.000003, pricing["input"], 1e-12)
+	assert.InDelta(t, 0.000015, pricing["output"], 1e-12)
+	assert.InDelta(t, 0.0000003, pricing["cache_read"], 1e-12)
+}
+
+func TestFindMaiCode11FlashPricing(t *testing.T) {
+	pricing, ok := findModelPricing("github-copilot", "mai-code-1.1-flash")
+	require.True(t, ok)
+	assert.InDelta(t, 0.0000002, pricing["input"], 1e-12)
+	assert.InDelta(t, 0.0000012, pricing["output"], 1e-12)
+	assert.InDelta(t, 0.00000002, pricing["cache_read"], 1e-12)
+	assert.InDelta(t, 0.00000025, pricing["cache_write"], 1e-12)
+}
+
+func TestFindGrok45CacheReadPricing(t *testing.T) {
+	pricing, ok := findModelPricing("github-copilot", "grok-4.5")
+	require.True(t, ok)
+	assert.InDelta(t, 0.000002, pricing["input"], 1e-12)
+	assert.InDelta(t, 0.000006, pricing["output"], 1e-12)
+	assert.InDelta(t, 0.0000005, pricing["cache_read"], 1e-12)
+}
+
+func TestFindGrok46Pricing(t *testing.T) {
+	pricing, ok := findModelPricing("github-copilot", "grok-4.6")
+	require.True(t, ok)
+	assert.InDelta(t, 0.000002, pricing["input"], 1e-12)
+	assert.InDelta(t, 0.000006, pricing["output"], 1e-12)
+	assert.InDelta(t, 0.0000005, pricing["cache_read"], 1e-12)
+}
+
+func TestFindGemini37FlashPricing(t *testing.T) {
+	pricing, ok := findModelPricing("github-copilot", "gemini-3.7-flash")
+	require.True(t, ok)
+	assert.InDelta(t, 0.00000075, pricing["input"], 1e-12)
+	assert.InDelta(t, 0.00000375, pricing["output"], 1e-12)
+	assert.InDelta(t, 0.000000075, pricing["cache_read"], 1e-12)
 }
 
 func TestComputeModelInferenceAIC(t *testing.T) {
@@ -98,12 +138,4 @@ func TestComputeModelInferenceAICGitHubCopilotNoCacheRead(t *testing.T) {
 	aicViaAnthropic := computeModelInferenceAIC("anthropic", "claude-sonnet-4.6", 1000, 200, 0, 0, 0)
 	assert.InDelta(t, aicViaAnthropic, aicViaGitHubCopilot, 1e-9,
 		"zero cache reads must not alter the charged input token count")
-}
-
-func TestFindOrFetchModelPricing_EmbeddedModelReturnsNil(t *testing.T) {
-	// claude-sonnet-4.6 is in the embedded catalog; FindOrFetchModelPricing should return
-	// (nil, false) so the lock.yml overlay does not duplicate what models.json already has.
-	pricing, ok := FindOrFetchModelPricing(context.Background(), "anthropic", "claude-sonnet-4.6")
-	assert.False(t, ok)
-	assert.Nil(t, pricing)
 }

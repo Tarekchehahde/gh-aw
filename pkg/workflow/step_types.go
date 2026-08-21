@@ -1,13 +1,12 @@
 package workflow
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"reflect"
-	"sort"
+	"strconv"
 
+	"github.com/github/gh-aw/pkg/importinpututil"
 	"github.com/github/gh-aw/pkg/logger"
 )
 
@@ -25,7 +24,7 @@ type WorkflowStep struct {
 	Shell            string            `yaml:"shell,omitempty"`
 	With             map[string]any    `yaml:"with,omitempty"`
 	Env              map[string]string `yaml:"env,omitempty"`
-	ContinueOnError  any               `yaml:"continue-on-error,omitempty"` // Can be bool or string expression
+	ContinueOnError  *TemplatableBool  `yaml:"continue-on-error,omitempty"` // Can be bool or string expression
 	TimeoutMinutes   int               `yaml:"timeout-minutes,omitempty"`
 }
 
@@ -67,7 +66,14 @@ func (s *WorkflowStep) ToMap() map[string]any {
 		result["env"] = s.Env
 	}
 	if s.ContinueOnError != nil {
-		result["continue-on-error"] = s.ContinueOnError
+		switch s.ContinueOnError.String() {
+		case "true":
+			result["continue-on-error"] = true
+		case "false":
+			result["continue-on-error"] = false
+		default:
+			result["continue-on-error"] = s.ContinueOnError.String()
+		}
 	}
 	if s.TimeoutMinutes > 0 {
 		result["timeout-minutes"] = s.TimeoutMinutes
@@ -126,8 +132,16 @@ func MapToStep(stepMap map[string]any) (*WorkflowStep, error) {
 		}
 	}
 	if continueOnError, ok := stepMap["continue-on-error"]; ok {
-		// Preserve the original type (bool or string)
-		step.ContinueOnError = continueOnError
+		switch value := continueOnError.(type) {
+		case bool:
+			templatableValue := TemplatableBool(strconv.FormatBool(value))
+			step.ContinueOnError = &templatableValue
+		case string:
+			if value == "true" || value == "false" || isExpression(value) {
+				templatableValue := TemplatableBool(value)
+				step.ContinueOnError = &templatableValue
+			}
+		}
 	}
 	if timeoutMinutes, ok := stepMap["timeout-minutes"].(int); ok {
 		step.TimeoutMinutes = timeoutMinutes
@@ -153,8 +167,12 @@ func (s *WorkflowStep) Clone() *WorkflowStep {
 		Run:              s.Run,
 		WorkingDirectory: s.WorkingDirectory,
 		Shell:            s.Shell,
-		ContinueOnError:  s.ContinueOnError,
 		TimeoutMinutes:   s.TimeoutMinutes,
+	}
+
+	if s.ContinueOnError != nil {
+		continueOnError := *s.ContinueOnError
+		clone.ContinueOnError = &continueOnError
 	}
 
 	if s.With != nil {
@@ -218,48 +236,16 @@ func StepsToSlice(steps []*WorkflowStep) []any {
 
 // marshalEnvValue serializes a non-string env var value to a string suitable
 // for use in a GitHub Actions step env block.
-// Arrays and maps are serialized as JSON (e.g. ["a","b"]) so that shell
-// consumers such as `jq --argjson` receive valid JSON.
-// Typed slices produced by goccy/go-yaml (e.g. []string instead of []any)
-// are normalized via reflection before marshaling.
-// Scalar values (int, bool, float64, etc.) fall back to fmt.Sprint.
+// Arrays and maps are serialized as JSON (e.g. ["a","b"]) via
+// importinpututil.FormatResolvedValue so import substitutions and env
+// serialization stay aligned. Scalar values (int, bool, float64, etc.)
+// fall back to fmt.Sprint.
 func marshalEnvValue(v any) string {
-	switch val := v.(type) {
-	case []any:
-		if b, err := json.Marshal(val); err == nil {
-			return string(b)
-		}
-	case map[string]any:
-		if b, err := json.Marshal(val); err == nil {
-			return string(b)
-		}
-	case nil:
+	if v == nil {
 		return ""
-	default:
-		rv := reflect.ValueOf(v)
-		switch rv.Kind() {
-		case reflect.Slice:
-			normalized := make([]any, rv.Len())
-			for i := range rv.Len() {
-				normalized[i] = rv.Index(i).Interface()
-			}
-			if b, err := json.Marshal(normalized); err == nil {
-				return string(b)
-			}
-		case reflect.Map:
-			keys := make([]string, 0, rv.Len())
-			for _, key := range rv.MapKeys() {
-				keys = append(keys, key.String())
-			}
-			sort.Strings(keys)
-			normalized := make(map[string]any, rv.Len())
-			for _, k := range keys {
-				normalized[k] = rv.MapIndex(reflect.ValueOf(k)).Interface()
-			}
-			if b, err := json.Marshal(normalized); err == nil {
-				return string(b)
-			}
-		}
+	}
+	if s, ok := importinpututil.FormatResolvedValue(v); ok {
+		return s
 	}
 	return fmt.Sprint(v)
 }

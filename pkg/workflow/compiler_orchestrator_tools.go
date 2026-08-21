@@ -62,7 +62,7 @@ func (c *Compiler) processToolsAndMarkdown(result *parser.FrontmatterResult, cle
 	if err != nil {
 		return nil, err
 	}
-	toolsData, err := c.resolveToolsConfiguration(result, effectiveMarkdown, markdownDir, importsResult, agenticEngine)
+	toolsData, err := c.resolveToolsConfiguration(result, effectiveMarkdown, markdownDir, importsResult, agenticEngine, engineSetting)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +174,7 @@ func (c *Compiler) resolveToolsConfiguration(
 	markdownDir string,
 	importsResult *parser.ImportsResult,
 	agenticEngine CodingAgentEngine,
+	engineSetting string,
 ) (*mergedToolsData, error) {
 	topTools := extractToolsMapFromFrontmatter(result.Frontmatter)
 	if err := ValidateToolsSection(topTools); err != nil {
@@ -206,7 +207,15 @@ func (c *Compiler) resolveToolsConfiguration(
 		orchestratorToolsLog.Printf("MCP configuration validation failed: %v", err)
 		return nil, err
 	}
+	tools, err = enforceMCPProxyTools(agenticEngine, tools)
+	if err != nil {
+		return nil, err
+	}
 	tools = c.adjustToolsForEngineCapabilities(result.Frontmatter, agenticEngine, tools)
+	tools, err = enforceMCPProxyTools(agenticEngine, tools)
+	if err != nil {
+		return nil, err
+	}
 	if err := c.validateEngineToolRequirements(result.Frontmatter, agenticEngine, tools); err != nil {
 		return nil, err
 	}
@@ -218,6 +227,47 @@ func (c *Compiler) resolveToolsConfiguration(
 		toolsStartupTimeout:   toolsStartupTimeout,
 		hasExplicitGitHubTool: githubToolExplicit,
 	}, nil
+}
+
+// enforceMCPProxyTools exposes MCP-backed tools through CLI proxies for engines
+// that do not have an MCP client.
+func enforceMCPProxyTools(engine MCPProxyEngine, tools map[string]any) (map[string]any, error) {
+	if engine == nil || engine.GetCapabilities().MCP {
+		return tools, nil
+	}
+
+	if githubValue, exists := tools["github"]; exists {
+		switch github := githubValue.(type) {
+		case bool:
+			if !github {
+				return nil, fmt.Errorf("engine '%s' does not support MCP; tools.github cannot be disabled because gh-proxy is required", engine.GetID())
+			}
+		case map[string]any:
+			if modeValue, hasMode := github["mode"]; hasMode {
+				mode, ok := modeValue.(string)
+				if !ok || (mode != string(GitHubMCPModeGHProxy) && mode != string(GitHubMCPModeCLI)) {
+					return nil, fmt.Errorf("engine '%s' does not support MCP; tools.github.mode must be gh-proxy", engine.GetID())
+				}
+			}
+			github["mode"] = string(GitHubMCPModeGHProxy)
+		case nil, string:
+			tools["github"] = map[string]any{"mode": string(GitHubMCPModeGHProxy)}
+		}
+	}
+
+	if _, exists := tools["github"]; !exists {
+		tools["github"] = map[string]any{"mode": string(GitHubMCPModeGHProxy)}
+	} else if enabled, ok := tools["github"].(bool); ok && enabled {
+		tools["github"] = map[string]any{"mode": string(GitHubMCPModeGHProxy)}
+	}
+
+	if cliProxy, exists := tools["cli-proxy"]; exists {
+		if enabled, ok := cliProxy.(bool); ok && !enabled {
+			return nil, fmt.Errorf("engine '%s' does not support MCP; tools.cli-proxy cannot be disabled", engine.GetID())
+		}
+	}
+	tools["cli-proxy"] = true
+	return tools, nil
 }
 
 func nonEmptyStrings(values ...string) []string {
@@ -294,10 +344,10 @@ func (c *Compiler) adjustToolsForEngineCapabilities(frontmatter map[string]any, 
 	if agenticEngine.GetCapabilities().ToolsAllowlist {
 		return tools
 	}
-	fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("Using experimental %s support (engine: %s)", agenticEngine.GetDisplayName(), agenticEngine.GetID())))
+	fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf("Using experimental %s support (engine: %s)", agenticEngine.GetDisplayName(), agenticEngine.GetID())))
 	c.IncrementWarningCount()
 	if _, hasTools := frontmatter["tools"]; hasTools {
-		fmt.Fprintln(os.Stderr, console.FormatWarningMessage(fmt.Sprintf("'tools' section ignored when using engine: %s (%s doesn't support MCP tool allow-listing)", agenticEngine.GetID(), agenticEngine.GetDisplayName())))
+		fmt.Fprintln(os.Stderr, console.FormatWarningMessageStderr(fmt.Sprintf("'tools' section ignored when using engine: %s (%s doesn't support MCP tool allow-listing)", agenticEngine.GetID(), agenticEngine.GetDisplayName())))
 		c.IncrementWarningCount()
 	}
 	return map[string]any{"github": map[string]any{}}
@@ -310,6 +360,7 @@ func (c *Compiler) validateEngineToolRequirements(frontmatter map[string]any, ag
 		func() error { return c.validateMaxToolDenialsSupport(frontmatter, agenticEngine) },
 		func() error { return c.validateUniversalLLMConsumerModel(frontmatter, agenticEngine) },
 		func() error { return c.validatePiEngineRequirements(NewTools(tools), agenticEngine) },
+		func() error { return c.validateBashCommandAllowlistSupport(tools, agenticEngine) },
 	}
 	for _, validator := range validators {
 		if err := validator(); err != nil {
@@ -428,12 +479,26 @@ func (c *Compiler) tryParseFrontmatterConfig(frontmatter map[string]any) *Frontm
 }
 
 // detectTextOutputUsage checks if the markdown content uses ${{ steps.sanitized.outputs.text }},
-// ${{ steps.sanitized.outputs.title }}, or ${{ steps.sanitized.outputs.body }}
+// ${{ steps.sanitized.outputs.title }}, or ${{ steps.sanitized.outputs.body }}.
+// It also recognises the deprecated ${{ needs.activation.outputs.{text,title,body} }} forms so
+// that workflows that have not yet been migrated still compile correctly.
 func (c *Compiler) detectTextOutputUsage(markdownContent string) bool {
-	// Check for any of the text-related output expressions
+	// Check for any of the text-related output expressions (modern form)
 	hasTextUsage := strings.Contains(markdownContent, "${{ steps.sanitized.outputs.text }}")
 	hasTitleUsage := strings.Contains(markdownContent, "${{ steps.sanitized.outputs.title }}")
 	hasBodyUsage := strings.Contains(markdownContent, "${{ steps.sanitized.outputs.body }}")
+
+	// Also recognise the deprecated needs.activation.outputs.* forms so that workflows
+	// using the old syntax still get the sanitized step included during compilation.
+	if !hasTextUsage {
+		hasTextUsage = strings.Contains(markdownContent, "${{ needs.activation.outputs.text }}")
+	}
+	if !hasTitleUsage {
+		hasTitleUsage = strings.Contains(markdownContent, "${{ needs.activation.outputs.title }}")
+	}
+	if !hasBodyUsage {
+		hasBodyUsage = strings.Contains(markdownContent, "${{ needs.activation.outputs.body }}")
+	}
 
 	hasUsage := hasTextUsage || hasTitleUsage || hasBodyUsage
 	detectionLog.Printf("Detected usage of sanitized outputs - text: %v, title: %v, body: %v, any: %v",

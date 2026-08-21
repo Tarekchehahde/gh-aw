@@ -46,8 +46,7 @@ func TestValidateSandboxConfig(t *testing.T) {
 			data: &WorkflowData{
 				SandboxConfig: &SandboxConfig{
 					Agent: &AgentSandboxConfig{
-						Type:             SandboxTypeAWF,
-						NetworkIsolation: true,
+						Type: SandboxTypeAWF,
 					},
 				},
 				Tools: map[string]any{
@@ -126,7 +125,7 @@ func TestValidateSandboxConfig(t *testing.T) {
 			if tt.expectError {
 				require.Error(t, err)
 				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg)
+					require.ErrorContains(t, err, tt.errorMsg)
 				}
 			} else {
 				assert.NoError(t, err)
@@ -343,6 +342,58 @@ func TestMergeImportedSandboxAgentMounts(t *testing.T) {
 
 func TestDefaultAgentWorkspaceWritePath(t *testing.T) {
 	assert.Equal(t, "/tmp/gh-aw/agent", defaultAgentWorkspaceWritePath)
+}
+
+func TestMergeImportedSandboxAgentRuntimeInstall(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name     string
+		initial  *SandboxConfig
+		imported *bool
+		expected *bool
+	}{
+		{
+			name:     "nil import leaves config unchanged",
+			initial:  &SandboxConfig{Agent: &AgentSandboxConfig{RuntimeInstall: &trueVal}},
+			imported: nil,
+			expected: &trueVal,
+		},
+		{
+			name:     "false import overrides explicit true",
+			initial:  &SandboxConfig{Agent: &AgentSandboxConfig{RuntimeInstall: &trueVal}},
+			imported: &falseVal,
+			expected: &falseVal,
+		},
+		{
+			name:     "true import does not override explicit false",
+			initial:  &SandboxConfig{Agent: &AgentSandboxConfig{RuntimeInstall: &falseVal}},
+			imported: &trueVal,
+			expected: &falseVal,
+		},
+		{
+			name:     "true import initializes unset field",
+			initial:  &SandboxConfig{Agent: &AgentSandboxConfig{}},
+			imported: &trueVal,
+			expected: &trueVal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged := mergeImportedSandboxAgentRuntimeInstall(tt.initial, tt.imported)
+			if tt.imported == nil {
+				assert.Equal(t, tt.initial, merged)
+				return
+			}
+
+			require.NotNil(t, merged)
+			require.NotNil(t, merged.Agent)
+			require.NotNil(t, merged.Agent.RuntimeInstall)
+			assert.Equal(t, *tt.expected, *merged.Agent.RuntimeInstall)
+		})
+	}
 }
 
 func TestWorkflowHashWithSandbox(t *testing.T) {

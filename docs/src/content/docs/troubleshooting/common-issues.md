@@ -43,11 +43,7 @@ Wait a few minutes for policy propagation, then re-run.
 
 ### Actions Restrictions Reported During Init
 
-The CLI validates three permission layers. Fix restrictions in Repository Settings → Actions → General:
-
-1. **Actions disabled**: Enable Actions ([docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository))
-2. **Local-only**: Switch to "Allow all actions" or enable GitHub-created actions ([docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#managing-github-actions-permissions-for-your-repository))
-3. **Selective allowlist**: Enable "Allow actions created by GitHub" checkbox ([docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#allowing-select-actions-and-reusable-workflows-to-run))
+The CLI validates three permission layers in Repository Settings → Actions → General: enable Actions, switch from local-only restrictions to allowing GitHub-created or all actions, and, if you're using a selective allowlist, enable GitHub-created actions as well. See the [repository Actions settings docs](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository) and [allowlist details](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#allowing-select-actions-and-reusable-workflows-to-run).
 
 > [!NOTE]
 > Organization policies override repository settings. Contact admins if settings are grayed out.
@@ -85,7 +81,7 @@ Import paths are relative to the repository root, for example `.github/workflows
 
 ### GitHub Tools Not Available
 
-Configure using `toolsets:` ([tools reference](/gh-aw/reference/github-tools/)):
+Configure GitHub access with `toolsets:` ([tools reference](/gh-aw/reference/github-tools/)). If a tool is still missing, combine toolsets such as `toolsets: [default, actions]` or inspect the resolved set with `gh aw mcp inspect <workflow>`.
 
 ```yaml wrap
 tools:
@@ -93,13 +89,9 @@ tools:
     toolsets: [repos, issues]
 ```
 
-### Toolset Missing Expected Tools
-
-Check [GitHub Toolsets](/gh-aw/reference/github-tools/), combine toolsets (`toolsets: [default, actions]`), or inspect with `gh aw mcp inspect <workflow>`.
-
 ### MCP Server Connection Failures
 
-Verify package installation, syntax, and environment variables:
+Verify package installation, command syntax, and required environment variables:
 
 ```yaml
 mcp-servers:
@@ -110,18 +102,22 @@ mcp-servers:
       API_KEY: "${{ secrets.MCP_API_KEY }}"
 ```
 
-### OpenCode/Crush MCP Tools Not Being Called
+### OpenCode MCP Tools Not Being Called
 
-When integrating OpenCode-compatible engines (such as `crush`), runs can complete without ever invoking MCP or file tools. Use this `.crush.json`. Port `10004` is the local AWF API proxy port (with `--enable-api-proxy`); `MCP_GATEWAY_PORT` and `MCP_GATEWAY_API_KEY` are expanded from workflow env at runtime (substitute concrete values when running outside a workflow):
+OpenCode-compatible engines do not auto-discover MCP servers, so use an explicit `opencode.jsonc` config. Keep the local AWF API proxy at `http://host.docker.internal:10004` when using `--enable-api-proxy`; `MCP_GATEWAY_PORT` and `MCP_GATEWAY_API_KEY` are expanded from workflow env at runtime, so substitute concrete values outside a workflow:
 
 ```json
 {
   "provider": {
     "copilot-proxy": {
-      "name": "Copilot Proxy",
-      "type": "openai-compatible",
-      "baseURL": "http://host.docker.internal:10004",
-      "models": ["gpt-4.1", "claude-sonnet-4-6"]
+      "api": "http://host.docker.internal:10004",
+      "options": {
+        "apiKey": "awf-copilot-proxy"
+      },
+      "models": {
+        "gpt-4.1": {},
+        "claude-sonnet-4-6": {}
+      }
     }
   },
   "model": "copilot-proxy/claude-sonnet-4-6",
@@ -146,11 +142,9 @@ When integrating OpenCode-compatible engines (such as `crush`), runs can complet
 }
 ```
 
-Key gotchas:
+Declare an explicit top-level `mcp` block with routed URLs such as `http://host.docker.internal:${MCP_GATEWAY_PORT}/mcp/<server-name>`. Use `agent.build.permission` (singular), not `permissions`, and enable `external_directory: allow` only when you truly need access outside the workspace because the default `ask` behaves like a deny in non-interactive runs.
 
-Crush/OpenCode does not auto-discover MCP servers, so declare an explicit top-level `mcp` block with routed URLs such as `http://host.docker.internal:${MCP_GATEWAY_PORT}/mcp/<server-name>`. Use `agent.build.permission` (singular); `permissions` is silently ignored and leaves tools unavailable. `external_directory` defaults to `ask`, which becomes an implicit deny in non-interactive runs, so set it to `allow` only when you truly need access outside the workspace.
-
-For direct Copilot endpoints (`api.githubcopilot.com`), do **not** append `/v1`. For other OpenAI-compatible providers, use the provider's documented base path so `/chat/completions` is appended correctly. Keep the local proxy URL (`http://host.docker.internal:10004`) unchanged.
+For direct Copilot endpoints (`api.githubcopilot.com`), do **not** append `/v1`. For other OpenAI-compatible providers, use the provider's documented base path so `/chat/completions` is appended correctly.
 
 When using `--enable-api-proxy`, pass `COPILOT_GITHUB_TOKEN` in the execute step's `env:` so the proxy can authenticate:
 
@@ -159,7 +153,7 @@ When using `--enable-api-proxy`, pass `COPILOT_GITHUB_TOKEN` in the execute step
   env:
     COPILOT_GITHUB_TOKEN: ${{ steps.copilot-token.outputs.token }}
   run: |
-    awf --enable-api-proxy <workflow-args> -- crush run "<prompt>"
+    awf --enable-api-proxy <workflow-args> -- opencode run "<prompt>"
 ```
 
 ### Playwright Network Access Denied
@@ -236,8 +230,7 @@ Delete conflicting fields in Projects UI and recreate.
 
 ## Engine-Specific Issues
 
-- **Copilot CLI not found:** verify compilation succeeded — compiled workflows include CLI installation steps.
-- **Model not available:** use the default (`engine: copilot`) or specify an available model (`engine: {id: copilot, model: gpt-4}`).
+If the Copilot CLI is missing, first verify compilation succeeded because compiled workflows install it automatically. If a model is unavailable, fall back to the default (`engine: copilot`) or choose one your environment exposes, such as `engine: {id: copilot, model: gpt-4}`.
 
 ### Copilot License or Inference Access Issues
 
@@ -260,21 +253,17 @@ If this fails, contact your organization administrator to enable Copilot for the
 
 ### Copilot Engine Prerequisites on GHES
 
-Before running Copilot-based workflows on GHES, verify:
+Before running Copilot-based workflows on GHES, verify three things: site admins have enabled GitHub Connect, enterprise Copilot licensing, and outbound HTTPS to `api.githubcopilot.com` and `api.enterprise.githubcopilot.com`; enterprise or org admins have assigned a Copilot seat to the `COPILOT_GITHUB_TOKEN` owner and allowed usage by policy; and the workflow targets the enterprise endpoint:
 
-- **Site admin:** GitHub Connect enabled (links GHES to github.com for Copilot cloud services), enterprise-level Copilot licensing activated, and outbound HTTPS allowed to `api.githubcopilot.com` and `api.enterprise.githubcopilot.com`.
-- **Enterprise/org admin:** a Copilot seat assigned to the `COPILOT_GITHUB_TOKEN` owner, and the org Copilot policy permits usage.
-- **Workflow config:**
-
-  ```aw wrap
-  engine:
-    id: copilot
-    api-target: api.enterprise.githubcopilot.com
-  network:
-    allowed:
-      - defaults
-      - api.enterprise.githubcopilot.com
-  ```
+```aw wrap
+engine:
+  id: copilot
+  api-target: api.enterprise.githubcopilot.com
+network:
+  allowed:
+    - defaults
+    - api.enterprise.githubcopilot.com
+```
 
 See [Enterprise API Endpoint](/gh-aw/reference/engines/#enterprise-api-endpoint-api-target) for GHEC/GHES `api-target` values.
 
@@ -304,19 +293,15 @@ network:
 
 ## Context Expression Issues
 
-- **Unauthorized expression:** use only [allowed expressions](/gh-aw/reference/templating/) (`github.event.issue.number`, `github.repository`, `steps.sanitized.outputs.text`). `secrets.*` and `env.*` are disallowed.
-- **Sanitized context empty:** `steps.sanitized.outputs.text` requires issue/PR/comment events (`on: issues:`), not `push:` or similar triggers.
+Use only [allowed expressions](/gh-aw/reference/templating/) such as `github.event.issue.number`, `github.repository`, and `steps.sanitized.outputs.text`; `secrets.*` and `env.*` are disallowed. If `steps.sanitized.outputs.text` is empty, confirm the workflow runs on issue, PR, or comment events rather than `push:`.
 
 ## Build and Test Issues
 
-- **Documentation build fails:** clean install (`cd docs && rm -rf node_modules package-lock.json && npm install && npm run build`) and check for malformed frontmatter, MDX syntax errors, or broken links.
-- **Tests failing after changes:** run `make fmt && make lint && make test-unit` before iterating.
+If the docs build fails, do a clean install (`cd docs && rm -rf node_modules package-lock.json && npm install && npm run build`) and check for malformed frontmatter, MDX syntax errors, or broken links. If tests fail after changes, run `make fmt && make lint && make test-unit` before iterating.
 
 ## Network and Connectivity Issues
 
-### Firewall Denials for Package Registries
-
-Add ecosystem identifiers ([Network Configuration Guide](/gh-aw/guides/network-configuration/)):
+For package registries, add ecosystem identifiers from the [Network Configuration Guide](/gh-aw/guides/network-configuration/):
 
 ```yaml wrap
 network:
@@ -327,8 +312,6 @@ network:
     - containers  # Docker
     - go          # Go modules
 ```
-
-### Other Network Issues
 
 If URLs appear as `(redacted)`, add the relevant domains to the allowed list ([Network Permissions](/gh-aw/reference/network/)), for example `allowed: [defaults, "api.example.com"]`. If remote imports fail to download, verify both network access (`curl -I https://raw.githubusercontent.com/github/gh-aw/main/README.md`) and authentication (`gh auth status`). For MCP server timeouts, prefer local servers such as `command: "node"` with `args: ["./server.js"]`.
 
@@ -364,6 +347,7 @@ GitHub Actions marks the run as `timed_out` when the job exceeds `timeout-minute
 | Codex | `Tool call timed out after 120 seconds` | `tools: timeout: N` (default: 120s) |
 | Copilot | *(task incomplete, workflow succeeds)* | `max-continuations: N` |
 | Any | `Failed to register tools error="initialize: timeout"` | `tools: startup-timeout: N` |
+| Copilot/Codex | Harness log says `post-result watchdog terminating idle process` after a comment, label, PR, push, or `noop` output | Increase `engine.harness.watchdog-timeout` (seconds) or `GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS` (milliseconds) |
 
 ```yaml wrap
 timeout-minutes: 60      # job-level limit
@@ -373,6 +357,17 @@ tools:
 max-turns: 30            # Claude: max turns
 max-continuations: 5     # Copilot: autopilot continuations
 ```
+
+The post-result watchdog only starts after a terminal safe output is written. It is useful for cleaning up child processes after a result, but it can terminate silent long-running shell commands and builds that continue doing CPU or I/O work without writing stdout or stderr. For quiet monorepo scans or builds, increase the watchdog window:
+
+```yaml wrap
+engine:
+  id: copilot
+  harness:
+    watchdog-timeout: 600  # seconds
+```
+
+See [Harness Settings and Runtime Tuning Variables](/gh-aw/reference/environment-variables/#harness-settings-and-runtime-tuning-variables) for the raw `GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS` environment variable, default, range, and clamping behavior.
 
 ### Why Did My Workflow Fail?
 
@@ -407,8 +402,8 @@ DEBUG_COLORS=0 DEBUG=* gh aw compile 2>&1 | tee debug.log  # capture to file
 
 ## Operational Runbooks
 
-See [Workflow Health Monitoring Runbook](https://github.com/github/gh-aw/blob/main/.github/aw/runbooks/workflow-health.md) for diagnosing errors.
+For a step-by-step diagnostic checklist, see the [Workflow Health Monitoring Runbook](https://github.com/github/gh-aw/blob/main/.github/aw/runbooks/workflow-health.md).
 
 ## Getting Help
 
-Review [reference docs](/gh-aw/reference/workflow-structure/), search [existing issues](https://github.com/github/gh-aw/issues), or create an issue. See [Error Reference](/gh-aw/troubleshooting/errors/) and [Frontmatter Reference](/gh-aw/reference/frontmatter/).
+Start with the [reference docs](/gh-aw/reference/workflow-structure/), [Error Reference](/gh-aw/troubleshooting/errors/), and [Frontmatter Reference](/gh-aw/reference/frontmatter/). If that doesn't resolve the issue, search [existing issues](https://github.com/github/gh-aw/issues) or open a new one.

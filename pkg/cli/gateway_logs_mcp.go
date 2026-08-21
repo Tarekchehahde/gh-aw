@@ -123,8 +123,8 @@ func extractToolCallsFromGatewayLog(gatewayLogPath string, mcpData *MCPToolUsage
 			continue // Skip malformed lines
 		}
 
-		// Only process tool call events
-		if entry.Event == "tool_call" || entry.Event == "rpc_call" || entry.Event == "request" {
+		// Only process actual tool invocations, not protocol requests such as tools/list.
+		if entry.Event == "tool_call" || entry.Method == "tools/call" {
 			toolName := entry.ToolName
 			if toolName == "" {
 				toolName = entry.Method
@@ -178,12 +178,14 @@ func buildMCPSummaryStats(gatewayMetrics *GatewayMetrics, mcpData *MCPToolUsageD
 	for serverName, serverMetrics := range gatewayMetrics.Servers {
 		// Server-level stats
 		serverStats := MCPServerStats{
-			ServerName:      serverName,
+			MCPServerStatsBase: MCPServerStatsBase{
+				ServerName:    serverName,
+				ToolCallCount: serverMetrics.ToolCallCount,
+				ErrorCount:    serverMetrics.ErrorCount,
+			},
 			RequestCount:    serverMetrics.RequestCount,
-			ToolCallCount:   serverMetrics.ToolCallCount,
 			TotalInputSize:  0,
 			TotalOutputSize: 0,
-			ErrorCount:      serverMetrics.ErrorCount,
 		}
 
 		if serverMetrics.RequestCount > 0 {
@@ -262,4 +264,10 @@ func buildMCPSummaryStats(gatewayMetrics *GatewayMetrics, mcpData *MCPToolUsageD
 			return 0
 		}
 	})
+}
+
+// TODO: Implement token-usage correlation for MCP tool calls.
+func correlateToolCallsWithTokenDelta(toolCalls []MCPToolCall, tokenUsageFile string) []MCPToolCall {
+	_ = tokenUsageFile
+	return toolCalls
 }

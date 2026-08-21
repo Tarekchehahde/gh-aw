@@ -10,7 +10,7 @@ permissions:
   copilot-requests: write
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 tools:
   repo-memory:
     branch-name: memory/copilot-centralization-optimizer
@@ -299,6 +299,15 @@ steps:
       path: /tmp/gh-aw/data
       retention-days: 14
       if-no-files-found: ignore
+evals:
+  - id: patterns_identified
+    question: Did the agent identify repeated cross-user prompt patterns suitable for centralization?
+  - id: recommendations_produced
+    question: Were recommendations produced for new workflows, tools, shared prompts, or other automations?
+imports:
+  - shared/reporting.md
+features:
+  gh-aw-detection: true
 ---
 
 # Copilot Centralization Optimizer

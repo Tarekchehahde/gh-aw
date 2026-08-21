@@ -33,7 +33,7 @@ The user requested support for guard policies in the MCP gateway configuration, 
 
 3. Expose these parameters through workflow frontmatter fields
 
-## Proposed Solution
+## Approach
 
 ### 1. Type Hierarchy
 
@@ -102,18 +102,21 @@ tools:
 
 > **Note**: The field was originally named `repos` and renamed to `allowed-repos` in PR #22331. The old name is retained as a deprecated alias; run `gh aw fix` to migrate automatically.
 
+## Operations
+
 ### 4. MCP Gateway Configuration Flow
 
 1. **Frontmatter Parsing** (`tools_parser.go`):
    - Extracts `allowed-repos` and `min-integrity` directly from GitHub tool config
    - Stores them as fields on `GitHubToolConfig`
    - Validates structure and types
+   - MUST complete before guard-policy validation in the same compiler pass. The compiler orchestration invariant is `ParseWorkflowFile()` → `setupWorkflowBuildContext()` / `processToolsAndMarkdown()` (frontmatter and tool parsing) → `validateWorkflowBuildContext()` / `validateWorkflowToolConfigurations()` (validation) in `pkg/workflow/compiler_orchestrator_workflow.go`.
 
 2. **Validation** (`tools_validation.go`):
    - Validates allowed-repos format (all/public or valid patterns)
    - Validates min-integrity level (none/unapproved/approved/merged)
    - Validates repository pattern syntax (lowercase, valid characters, wildcard placement)
-   - Called during workflow compilation
+   - MUST run after frontmatter parsing has populated `GitHubToolConfig` and before workflow compilation completes or emits a compiled workflow. A guard-policy validation error MUST abort the same compiler pass.
 
 3. **Compilation**:
    - Guard policy fields (allowed-repos, min-integrity) included in compiled GitHub tool configuration
@@ -365,9 +368,9 @@ tools:
 
 ### Documentation Tasks
 
-- [ ] `docs/src/content/docs/reference/mcp-gateway.md` — document how GitHub guard policies map into gateway `guard-policies` and how `lockdown: true` overrides them. **Done when** the page shows the compiled gateway shape and warns that guard-policy fields are ignored under lockdown.
-- [ ] `docs/src/content/docs/reference/github-tools.md` — add frontmatter examples for `allowed-repos`, `min-integrity`, `blocked-users`, `trusted-users`, and `approval-labels`. **Done when** the page includes at least one valid multi-field example and notes the deprecated `repos` alias.
-- [ ] `docs/src/content/docs/reference/frontmatter-full.md` — add schema-level reference entries for the GitHub guard-policy fields. **Done when** each field has a documented type, default/requirement note, and at least one cross-reference to the GitHub/MCP gateway docs.
+- [x] `docs/src/content/docs/reference/mcp-gateway.md` — document how GitHub guard policies map into gateway `guard-policies` and how `lockdown: true` overrides them. **Done when** the page shows the compiled gateway shape and warns that guard-policy fields are ignored under lockdown. (PR: [#48686](https://github.com/github/gh-aw/issues/48686))
+- [x] `docs/src/content/docs/reference/github-tools.md` — add frontmatter examples for `allowed-repos`, `min-integrity`, `blocked-users`, `trusted-users`, and `approval-labels`. **Done when** the page includes at least one valid multi-field example and notes the deprecated `repos` alias. (PR: [#48686](https://github.com/github/gh-aw/issues/48686))
+- [x] `docs/src/content/docs/reference/frontmatter-full.md` — add schema-level reference entries for the GitHub guard-policy fields. **Done when** each field has a documented type, default/requirement note, and at least one cross-reference to the GitHub/MCP gateway docs. (PR: [#48686](https://github.com/github/gh-aw/issues/48686))
 
 3. **Runtime Implementation** (Separate from this PR):
    - MCP Gateway enforcement of guard policies
@@ -405,7 +408,7 @@ tools:
 
 4. **Should we add a "dry-run" mode to test policies before enforcement?**
 
-   **Decision**: Dry-run enforcement mode is **deferred** to a future release. A compile-time validation (`gh aw compile --strict`) that reports which repositories would be permitted or denied under the configured guard policy SHOULD be implemented instead.
+   **Decision**: Runtime dry-run enforcement mode remains **deferred** to a future release. The compile-time validation (`gh aw compile --strict`) that reports which repositories would be permitted or denied under the configured guard policy is now **implemented**: `pkg/cli/compile_guard_policy_report.go` renders a per-workflow guard-policy dry-run report (allowed-repos, min-integrity, blocked-users, trusted-users, approval-labels, and lockdown precedence) to stderr whenever `--strict` is passed to `gh aw compile` and a GitHub guard policy is configured.
    *Rationale*: A runtime dry-run mode requires MCP Gateway support for pass-through logging of policy decisions, which is out of scope for the initial implementation. Compile-time policy analysis covers the majority of the validation need (catching misconfigured patterns before deployment) at lower implementation cost. Runtime dry-run may be added when MCP Gateway observability tooling matures.
 
 ## Conclusion
@@ -463,7 +466,7 @@ Any value outside the four literals above MUST be rejected with a compilation er
 |---|---|---|---|---|
 | `AllowedRepos` | `allowed-repos` | `GitHubReposScope` | No | Repository access scope. Defaults to `"all"` when `min-integrity` is present. |
 | `Repos` | `repos` | `GitHubReposScope` | No | **Deprecated** alias for `allowed-repos`. |
-| `MinIntegrity` | `min-integrity` | `GitHubIntegrityLevel` | Conditionally | Required when `allowed-repos` is set to a non-`"all"` scope or to any explicit pattern array. |
+| `MinIntegrity` | `min-integrity` | `GitHubIntegrityLevel` | Conditionally | Required whenever `allowed-repos` is explicitly configured, including `allowed-repos: "all"`. |
 
 Implementations MUST ensure `AllowedRepos` and `Repos` are not both set simultaneously; if both are present, implementations SHOULD error or use `AllowedRepos` and warn.
 
@@ -483,11 +486,11 @@ The key words in this section are to be interpreted as described in RFC 2119 (se
 
 A conforming implementation of the guard policies framework **MUST** satisfy all of the following normative requirements:
 
-**GP-01**: Implementations MUST support the `allowed-repos` field on `GitHubToolConfig` and validate its value as either a string scalar (`"all"` or `"public"`) or an array of repository patterns. Implementations MUST reject any other type with a descriptive compilation error.
+**GP-01**: Implementations MUST support the `allowed-repos` field on `GitHubToolConfig` and validate its value as either a string scalar (`"all"`, `"public"`, or the expression `"${{ github.repository }}"`) or a non-empty array of repository patterns. Implementations MUST reject any other string scalar or any other type with a descriptive compilation error.
 
 **GP-02**: Implementations MUST support the `min-integrity` field on `GitHubToolConfig` and validate its value as one of the enum strings `"none"`, `"unapproved"`, `"approved"`, or `"merged"`. Any other value MUST produce a descriptive compilation error.
 
-**GP-03**: When `allowed-repos` is set to an array, implementations MUST validate that each element is a non-empty string matching one of the allowed pattern formats: exact (`owner/repo`), owner-wildcard (`owner/*`), or prefix-wildcard (`owner/prefix*`). Uppercase letters and wildcards in non-terminal positions MUST be rejected.
+**GP-03**: When `allowed-repos` is set to an array, implementations MUST validate that each element is either (a) the exact expression string `"${{ github.repository }}"` (accepted as a dynamic self-repo reference) or (b) a non-empty string matching one of the allowed pattern formats: exact (`owner/repo`), owner-wildcard (`owner/*`), or prefix-wildcard (`owner/prefix*`). Uppercase letters and wildcards in non-terminal positions MUST be rejected.
 
 **GP-04**: Implementations MUST NOT permit an empty array as the value of `allowed-repos`. An empty allowlist MUST produce a compilation error indicating that an empty array is invalid.
 
@@ -503,7 +506,7 @@ A conforming implementation of the guard policies framework **MUST** satisfy all
 
 **GP-10**: When `lockdown: true` is set in the same workflow, implementations MUST treat `lockdown` as taking absolute precedence. Guard policy fields (`allowed-repos`, `min-integrity`) MUST NOT widen access beyond the single triggering repository when lockdown is active. The compiler SHOULD emit a warning when both `lockdown: true` and guard policy fields are present.
 
-**GP-11**: When `allowed-repos` is configured explicitly, implementations MUST require `min-integrity` to be present. In particular, any non-`"all"` `allowed-repos` scope MUST NOT be accepted without `min-integrity`, and implementations MAY enforce the same requirement for explicit `allowed-repos: "all"` for consistency with the general guard-policy validation rule.
+**GP-11**: When `allowed-repos` is configured explicitly, implementations MUST require `min-integrity` to be present. This requirement applies to every explicit repository scope, including `allowed-repos: "all"`, `allowed-repos: "public"`, the expression `"${{ github.repository }}"`, and explicit pattern arrays. Implementations MUST NOT accept any explicit `allowed-repos` value without `min-integrity`.
 
 ---
 
@@ -523,9 +526,9 @@ Implementations MUST emit a compilation warning when both `lockdown: true` and a
 
 ### GP-S003: Cross-Field Consistency
 
-When `allowed-repos` is set to an explicit pattern array or `"public"`, implementations MUST require `min-integrity` to also be present. Permitting a restricted repository scope without a minimum integrity level could allow low-integrity content to reach restricted repositories undetected.
+When `allowed-repos` is set to any explicit value, including `"all"`, `"public"`, `"${{ github.repository }}"`, or an explicit pattern array, implementations MUST require `min-integrity` to also be present. Permitting a repository scope without a minimum integrity level could allow low-integrity content to reach repositories undetected.
 
-Implementations MUST reject the combination `{ allowed-repos: <non-"all" scope>, min-integrity: (absent) }` with a compilation error that names both the missing field and the reason it is required.
+Implementations MUST reject the combination `{ allowed-repos: <any explicit scope>, min-integrity: (absent) }` with a compilation error that names both the missing field and the reason it is required.
 
 ### GP-S004: Legacy Field Isolation
 
@@ -553,7 +556,7 @@ This section maps normative sections of this specification to the implementation
 | GP-01, GP-03 pattern validation | Repository pattern format validation (exact, wildcard, prefix) | `pkg/workflow/tools_validation_github.go` (`validateReposScope`, `validateRepoPattern`, `isValidOwnerOrRepo`) |
 | GP-02 `min-integrity` validation | Enum value check for `none`/`unapproved`/`approved`/`merged` | `pkg/workflow/tools_validation_github.go` (`validateGitHubGuardPolicy`) |
 | GP-04 empty array rejection | Empty `allowed-repos` array detection and error | `pkg/workflow/tools_validation_github.go` (`validateGitHubGuardPolicy`) |
-| GP-11 cross-field consistency | `allowed-repos` non-`"all"` without `min-integrity` MUST fail validation | `pkg/workflow/tools_validation_github.go` (`validateGitHubGuardPolicy`), `pkg/workflow/tools_validation_test.go` (`allowed-repos non-all without min-integrity fails`) |
+| GP-11 cross-field consistency | Any explicit `allowed-repos` value without `min-integrity` MUST fail validation, including `allowed-repos: "all"` | `pkg/workflow/tools_validation_github.go` (`validateGitHubGuardPolicy`), `pkg/workflow/tools_validation_test.go` (`missing min-integrity field`, `allowed-repos non-all without min-integrity fails`) |
 | GP-10 lockdown precedence | Lockdown + guard-policy conflict detection and warning | `pkg/workflow/tools_validation_github.go` (`validateGitHubGuardPolicy`, `emitGitHubLockdownGuardPolicyWarning`) |
 
 ### Safe-Outputs Guard Policy Derivation
@@ -575,3 +578,45 @@ The deprecated `repos` field (YAML key: `repos`) is handled alongside `allowed-r
 **Migration command**: `gh aw fix` applies a codemod that replaces `repos:` with `allowed-repos:` in workflow frontmatter. The codemod is idempotent and safe to run multiple times.
 
 **Removal tracking**: The `repos` alias is tracked for removal. When it is removed, update `pkg/workflow/tools_types.go` (delete the `Repos` field), `pkg/workflow/mcp_github_config.go` (remove the fallback lookup), and `pkg/workflow/tools_validation_github.go` (adjust any `repos`-specific validation paths). Update doc-comments in `pkg/workflow/tools_types.go` to reference this spec version after the removal.
+
+---
+
+## Sync Follow-ups
+
+This section lists the files that **MUST** be reviewed and updated whenever a normative section of this specification changes. Reviewers **SHALL** confirm each target is consistent with the updated spec before merging.
+
+### After Restructuring Approach and Operations Headers
+
+The Approach and Operations headers organize the former Proposed Solution and MCP Gateway Configuration Flow content. Keep these headers in place when synchronizing this scratchpad document with downstream documentation or navigation.
+
+### After Adding or Changing Normative Requirements (§Conformance)
+
+When requirements GP-01–GP-11 (or any later additions) change, update the following:
+
+1. **`pkg/workflow/schemas/mcp-gateway-config.schema.json`** AND **`docs/public/schemas/mcp-gateway-config.schema.json`** — These are the source and published copies of the gateway config schema (JSON Schema draft-07, using `definitions`). The `allowed-repos` and `min-integrity` fields are frontmatter keys that compile to the `guard-policies` object inside the gateway config; they are not top-level properties of `stdioServerConfig` or `httpServerConfig`. Verify that the `guard-policies` definition and its `allowed-repos`/`min-integrity` sub-fields in both copies reflect the updated GP-01 and GP-02 constraints (enum values, types, `required` constraints). Keep both copies in sync.
+
+2. **`pkg/workflow/tools_validation_github.go`** — Update `validateGitHubGuardPolicy()`, `validateReposScope()`, and `validateRepoPattern()` to enforce the revised constraints. Any new rejection rule in GP-01–GP-11 **MUST** have a corresponding validation call and error message in this file.
+
+3. **`pkg/workflow/mcp_github_config.go`** — Update `deriveSafeOutputsGuardPolicyFromGitHub()` to match any changes to GP-05 or GP-08 derivation rules.
+
+4. **`pkg/workflow/tools_types.go`** — Update `GitHubToolConfig`, `GitHubReposScope`, and `GitHubIntegrityLevel` type definitions and struct tags when field names, types, or constraints change.
+
+### After Changing the Safe-Outputs Derivation Rules (§5)
+
+When the derivation mapping in §5 changes (e.g., new pattern transformation rules):
+
+1. **`pkg/workflow/schemas/mcp-gateway-config.schema.json`** AND **`docs/public/schemas/mcp-gateway-config.schema.json`** — Ensure the `write-sink` accept-list field structure in both copies of the gateway config schema matches the new derivation output.
+
+2. **`pkg/workflow/mcp_github_config.go`** — Update `deriveSafeOutputsGuardPolicyFromGitHub()` and `normalizeGitHubRepositoryInReposScope()`.
+
+3. **`pkg/workflow/safeoutputs_guard_policy_test.go`** — Add or update test cases in `TestDeriveSafeOutputsGuardPolicyFromGitHub` to cover the new transformation rules.
+
+### After Changing Extension-Point Semantics (§6)
+
+When the extensibility model for future MCP servers (Jira, WorkIQ) changes:
+
+1. **`pkg/workflow/tools_types.go`** — Update `MCPServerConfig.GuardPolicies` and any server-specific policy types.
+
+2. **`pkg/workflow/schemas/mcp-gateway-config.schema.json`** AND **`docs/public/schemas/mcp-gateway-config.schema.json`** — Add server-specific guard-policy schema objects as new `definitions` entries (the schema is JSON Schema draft-07 and uses `definitions`, not `$defs`) and reference them from the relevant server config schemas. Update both copies.
+
+3. Document the new policy type in this specification under a new `### Entity:` subsection in [§Entities](#entities).

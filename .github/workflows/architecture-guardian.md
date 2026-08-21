@@ -13,25 +13,8 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tracker-id: architecture-guardian
-experiments:
-  sub_agent_strategy:
-    variants: [sub_agents, single_agent]
-    description: "Test whether inlining violation classification in the main agent reduces AI credit spend without sacrificing detection accuracy"
-    hypothesis: "H0: single_agent does not change ai_credits_spent vs sub_agents. H1: single_agent reduces ai_credits_spent by ≥15% by eliminating sub-agent model-call overhead"
-    metric: ai_credits_spent
-    secondary_metrics: [run_duration_ms, violation_count_delta]
-    guardrail_metrics:
-      - name: run_failure_rate
-        direction: min
-        threshold: 0.10
-      - name: empty_output_rate
-        direction: min
-        threshold: 0.05
-    min_samples: 30
-    weight: [50, 50]
-    start_date: "2026-06-13"
-    issue: 39062
 imports:
   - uses: shared/skip-if-issue-open.md
     with:
@@ -45,7 +28,7 @@ imports:
   - shared/otlp.md
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 tools:
   cli-proxy: true
   bash:
@@ -152,6 +135,11 @@ steps:
       echo "✅ Pre-computed metrics for $FILE_COUNT file(s) → /tmp/gh-aw/agent/arch-metrics.json"
 features:
   gh-aw-detection: true
+evals:
+  - id: violations-analyzed
+    question: Did the workflow analyze changed Go or JavaScript files from the last 24 hours for architecture violations, or correctly conclude there were none?
+  - id: issue-created-or-noop
+    question: Was an architecture report issue created when violations were found, or was noop or skip behavior used appropriately when there was nothing actionable?
 ---
 
 # Architecture Guardian
@@ -191,7 +179,6 @@ If `noop` is `true`, call the `noop` safe-output tool and stop:
 
 ## Step 2: Classify Violations by Severity
 
-{{#if experiments.sub_agent_strategy == 'single_agent' }}
 Read the metrics JSON already loaded in Step 1. Apply the following rules using the `thresholds` values directly:
 
 - **BLOCKER**: `import_cycles` non-empty → import cycle; `files[].lines > thresholds.file_lines_blocker` → oversized file
@@ -199,9 +186,6 @@ Read the metrics JSON already loaded in Step 1. Apply the following rules using 
 - **INFO**: `files[].export_count > thresholds.max_exports` → excessive exports
 
 Build `blockers`, `warnings`, and `infos` arrays from this analysis and proceed to Step 3.
-{{else}}
-Use the `violation-classifier` agent to read `/tmp/gh-aw/agent/arch-metrics.json` and return the categorized violation list. If it returns `{"noop": true}`, skip to the noop call in Step 3.
-{{/if}}
 
 ## Step 3: Post Report
 
@@ -217,7 +201,7 @@ Call the `noop` safe-output tool:
 
 Create an issue with a structured report. Only create ONE issue (the `max: 1` limit applies and an existing open issue skips the run via `skip-if-match`).
 
-Use the `blockers`, `warnings`, and `infos` arrays returned by the `violation-classifier` agent to populate the violation rows in each section. Replace all `[PLACEHOLDER]` values with actual data, and replace `N` with actual counts.
+Use the `blockers`, `warnings`, and `infos` arrays built in Step 2 to populate the violation rows in each section. Replace all `[PLACEHOLDER]` values with actual data, and replace `N` with actual counts.
 
 **Issue title**: Architecture Violations Detected — [DATE]
 
@@ -281,61 +265,4 @@ Thresholds (from `.architecture.yml` or defaults):
 - [ ] Close this issue once all violations are resolved
 
 > 🏛️ *To configure thresholds, add a `.architecture.yml` file to the repository root.*
-```
-## agent: `violation-classifier`
----
-description: Applies numeric thresholds to the pre-computed metrics JSON and returns a structured list of violations grouped by severity
-model: kiwi
----
-You are a violation classification assistant. Read the pre-computed metrics JSON, apply the thresholds, and return a structured categorization of all findings.
-
-Read the file:
-
-```bash
-cat /tmp/gh-aw/agent/arch-metrics.json
-```
-
-If `noop` is `true`, return immediately:
-
-```json
-{"noop": true}
-```
-
-Otherwise, apply the following rules using the values in `thresholds`:
-
-**BLOCKER** (critical):
-- Non-empty `import_cycles` field → import cycle detected
-- `files[].lines` > `thresholds.file_lines_blocker`
-
-**WARNING** (should be addressed soon):
-- `files[].lines` > `thresholds.file_lines_warning`
-- Any function in `files[].func_data` with line count > `thresholds.function_lines` (for Go files, each line in `func_data` is `name\tline_count`; for JS files use the presence of the entry as an indicator of a large function when line count context is available)
-
-**INFO** (informational):
-- `files[].export_count` > `thresholds.max_exports`
-
-Return only a JSON object with no additional commentary:
-
-```json
-{
-  "noop": false,
-  "blockers": [
-    {"file": "path/to/file.go", "reason": "N lines (limit: 1000)"},
-    {"file": "import_cycle", "reason": "cycle description"}
-  ],
-  "warnings": [
-    {"file": "path/to/file.go", "reason": "N lines (limit: 500)"},
-    {"file": "path/to/file.go::FunctionName", "reason": "N lines (limit: 80)"}
-  ],
-  "infos": [
-    {"file": "path/to/file.go", "reason": "N exported identifiers (limit: 10)"}
-  ],
-  "thresholds": {
-    "file_lines_blocker": 1000,
-    "file_lines_warning": 500,
-    "function_lines": 80,
-    "max_exports": 10
-  },
-  "files_analyzed": 0
-}
 ```

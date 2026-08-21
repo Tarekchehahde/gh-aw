@@ -21,10 +21,12 @@ Resolution is performed by a `Resolver`, which holds a label matcher function an
 |------|------|-------------|
 | `AttributionStatus` | string | Classifies the outcome of intent attribution |
 | `AttributionSource` | string | Identifies the data source used for attribution |
-| `IntentRecord` | struct | Holds the attribution result for a pull request or issue |
+| `IntentRecord` | struct | Holds the attribution result for a pull request or issue, including optional `Domains`, `Priority`, and `Risk` classification fields |
 | `RootReference` | struct | Represents a referenced issue or artifact root (node ID, type, URL, labels) |
 | `PullRequestData` | struct | Input data for pull request resolution (node ID, URL, labels, explicit intent, closing issues) |
 | `Resolver` | struct | Stateless resolver that maps labels to intent records |
+| `PolicyRule` | struct | Pairs a match condition with the execution policy fragment to apply |
+| `PolicyCondition` | struct | Describes the intent labels and repository organization context that make a policy rule match |
 
 ### AttributionStatus constants
 
@@ -57,6 +59,31 @@ Resolution is performed by a `Resolver`, which holds a label matcher function an
 |--------|-----------|-------------|
 | `ResolvePullRequest` | `func (r Resolver) ResolvePullRequest(pr PullRequestData) IntentRecord` | Resolves intent for a pull request using explicit intent, closing issues, or PR labels |
 | `ResolveIssue` | `func (r Resolver) ResolveIssue(nodeID, url string, labels []string) IntentRecord` | Resolves intent for an issue using its labels |
+
+### Policy compiler methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Compile` | `func (c PolicyCompiler) Compile(rec IntentRecord, repo RepositoryContext) ExecutionPolicy` | Compiles an `IntentRecord` and repository context into an execution policy |
+
+### Policy rule types
+
+`PolicyRule` configures a single policy fragment. Its `ID` identifies the matched rule in compiled policy output, `Scope` records the rule level (`"organization"`, `"repository"`, `"intent"`, or `"workflow"`), `When` holds the match criteria, and `Set` holds the `ExecutionPolicy` fields to merge when the rule applies.
+
+`PolicyCondition` matches rule criteria against an `IntentRecord` and `RepositoryContext`. Empty condition fields act as wildcards. `Domain`, `Priority`, and `Risk` match against `IntentRecord.Labels` (not the dedicated `Domains`/`Priority`/`Risk` fields below, which are used only by `ResolveRisk`); `Org` matches either the repository organization or owner.
+
+### Risk classification
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ResolveRisk` | `func ResolveRisk(rec IntentRecord) string` | Returns `rec.Risk` when set; otherwise derives a risk level from `rec.Domains`/`rec.Priority`: `security`+`critical` and `production` resolve to `"high"`, `infrastructure` to `"medium"`, `documentation` to `"low"`, and anything else to `"unknown"` |
+
+### Tool authorization
+
+| Type/Method | Signature | Description |
+|-------------|-----------|-------------|
+| `Authorizer` | struct | Authorizes individual tool calls against a compiled `ExecutionPolicy` |
+| `AuthorizeTool` | `func (a Authorizer) AuthorizeTool(policy ExecutionPolicy, tool string) error` | Returns `ErrToolDenied` if `tool` is in `DeniedTools` (denial always wins), `ErrToolNotAllowed` if `AllowedTools` is non-nil and does not contain `tool`, or `nil` otherwise. A `nil` `AllowedTools` is unrestricted; a non-nil empty `AllowedTools` denies every tool. |
 
 ## Usage Examples
 

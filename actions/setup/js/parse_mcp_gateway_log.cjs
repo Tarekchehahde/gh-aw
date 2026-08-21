@@ -24,7 +24,26 @@ const TOKEN_USAGE_PATH = "/tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-
 const MAX_RPC_SUMMARY_DETAILS_LENGTH = 120;
 const MAX_RPC_SUMMARY_GENERIC_LENGTH = 160;
 const MAX_RPC_MESSAGE_LABEL_LENGTH = 80;
-const TOP_LEVEL_RPC_IGNORED_KEYS = new Set(["timestamp", "direction", "type", "server_id", "payload"]);
+const TOP_LEVEL_RPC_IGNORED_KEYS = new Set(["timestamp", "direction", "type", "event", "_schema", "server_id", "payload"]);
+// Maps the "event" field values used by the schema "rpc-message/v2" format (written by
+// real Copilot CLI MCP gateway telemetry) to the legacy "type" values ("REQUEST",
+// "RESPONSE", "DIFC_FILTERED") this file was originally written against. Real-world
+// rpc-messages.jsonl files do not populate a top-level "type" field at all; they use
+// "event" instead (e.g. "rpc_request"/"rpc_response").
+const RPC_EVENT_TO_TYPE = { rpc_request: "REQUEST", rpc_response: "RESPONSE", difc_filtered: "DIFC_FILTERED" };
+
+/**
+ * Returns the normalized rpc-messages.jsonl entry type ("REQUEST", "RESPONSE", or
+ * "DIFC_FILTERED"), accepting either the legacy top-level "type" field or the
+ * "event" field used by schema "rpc-message/v2".
+ * @param {Object} entry
+ * @returns {string}
+ */
+function getRpcMessageType(entry) {
+  if (typeof entry?.type === "string" && entry.type) return entry.type;
+  if (typeof entry?.event === "string") return RPC_EVENT_TO_TYPE[entry.event] || entry.event;
+  return "";
+}
 const AI_CREDITS_RATE_LIMIT_PATTERNS = [
   /ai[\s_-]*credits?.*(?:rate[\s-]*limit|limit exceeded|budget exceeded|exceeded)/i,
   /(?:rate[\s-]*limit|too many requests).*(?:ai[\s_-]*credits?)/i,
@@ -205,7 +224,12 @@ async function writeStepSummaryWithTokenUsage(coreObj) {
   if (!fs.existsSync(TOKEN_USAGE_PATH)) {
     coreObj.debug(`No token-usage.jsonl found at: ${TOKEN_USAGE_PATH}`);
   } else {
-    const content = fs.readFileSync(TOKEN_USAGE_PATH, "utf8");
+    let content;
+    try {
+      content = fs.readFileSync(TOKEN_USAGE_PATH, "utf8");
+    } catch (err) {
+      throw new Error(`${ERR_SYSTEM}: Failed to read file ${TOKEN_USAGE_PATH}: ${getErrorMessage(err)}`, { cause: err });
+    }
     if (content?.trim()) {
       coreObj.info(`Found token-usage.jsonl (${content.length} bytes)`);
       const parsedSummary = parseTokenUsageJsonl(content);
@@ -296,10 +320,10 @@ function parseGatewayJsonlForDifcFiltered(jsonlContent) {
   const lines = jsonlContent.split("\n");
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed || !trimmed.includes("DIFC_FILTERED")) continue;
+    if (!trimmed || !/difc_filtered/i.test(trimmed)) continue;
     try {
       const entry = JSON.parse(trimmed);
-      if (entry.type === "DIFC_FILTERED") {
+      if (getRpcMessageType(entry) === "DIFC_FILTERED") {
         filteredEvents.push(entry);
       }
     } catch {
@@ -492,13 +516,20 @@ function parseRpcMessagesJsonl(jsonlContent) {
     if (!trimmed) continue;
     try {
       const entry = JSON.parse(trimmed);
-      if (!entry || typeof entry !== "object" || !entry.type) continue;
+      if (!entry || typeof entry !== "object") continue;
+      const messageType = getRpcMessageType(entry);
+      if (!messageType) continue;
+      // Normalize entry.type so downstream consumers that read entry.type directly
+      // (e.g. grouping "other" entries by type) keep working regardless of whether
+      // the source used the legacy "type" field or the "event" field. Only set it
+      // when absent so we never overwrite an entry's own explicit "type" value.
+      if (!entry.type) entry.type = messageType;
 
-      if (entry.type === "REQUEST") {
+      if (messageType === "REQUEST") {
         requests.push(entry);
-      } else if (entry.type === "RESPONSE") {
+      } else if (messageType === "RESPONSE") {
         responses.push(entry);
-      } else if (entry.type !== "DIFC_FILTERED") {
+      } else if (messageType !== "DIFC_FILTERED") {
         other.push(entry);
       }
     } catch {
@@ -829,6 +860,7 @@ async function main() {
     let difcFilteredEvents = [];
     let tokenSteeringEvents = [];
     let modelAliasResolutionEvents = [];
+    /** @type {any} */
     let rpcMessagesContent = null;
     if (fs.existsSync(gatewayJsonlPath)) {
       const jsonlContent = fs.readFileSync(gatewayJsonlPath, "utf8");
@@ -836,8 +868,11 @@ async function main() {
       difcFilteredEvents = parseGatewayJsonlForDifcFiltered(jsonlContent);
       tokenSteeringEvents = parseGatewayJsonlForTokenSteering(jsonlContent);
       modelAliasResolutionEvents = parseGatewayJsonlForModelAliasResolution(jsonlContent);
-      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([jsonlContent]);
-      unknownModelAICredits ||= hasUnknownModelAICreditsError([jsonlContent]);
+      // Do NOT scan gateway.jsonl / rpc-messages.jsonl for AI credits rate limit errors.
+      // These files contain full MCP tool call request/response payloads including arbitrary
+      // repository data (branch names, commit messages, file contents) that can false-positively
+      // match the rate-limit patterns. Real AI credits rate limit errors from the inference API
+      // appear in gateway.log / stderr.log / gateway.md, not in MCP RPC message logs.
       if (difcFilteredEvents.length > 0) {
         core.info(`Found ${difcFilteredEvents.length} DIFC_FILTERED event(s) in gateway.jsonl`);
       }
@@ -856,8 +891,7 @@ async function main() {
       difcFilteredEvents = parseGatewayJsonlForDifcFiltered(rpcMessagesContent);
       tokenSteeringEvents = parseGatewayJsonlForTokenSteering(rpcMessagesContent);
       modelAliasResolutionEvents = parseGatewayJsonlForModelAliasResolution(rpcMessagesContent);
-      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([rpcMessagesContent]);
-      unknownModelAICredits ||= hasUnknownModelAICreditsError([rpcMessagesContent]);
+      // Do NOT scan rpc-messages.jsonl for AI credits signals (same reason as gateway.jsonl above).
       if (difcFilteredEvents.length > 0) {
         core.info(`Found ${difcFilteredEvents.length} DIFC_FILTERED event(s) in rpc-messages.jsonl`);
       }
@@ -869,6 +903,29 @@ async function main() {
       }
     } else {
       core.info(`No gateway.jsonl or rpc-messages.jsonl found for steering or DIFC_FILTERED scanning`);
+    }
+
+    // Always scan authoritative text logs for AI credits signals before selecting
+    // which format to render in the step summary.
+    let gatewayLogContent = "";
+    let stderrLogContent = "";
+
+    if (fs.existsSync(gatewayLogPath)) {
+      gatewayLogContent = fs.readFileSync(gatewayLogPath, "utf8");
+      core.info(`Found gateway.log (${gatewayLogContent.length} bytes)`);
+      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([gatewayLogContent]);
+      unknownModelAICredits ||= hasUnknownModelAICreditsError([gatewayLogContent]);
+    } else {
+      core.info(`No gateway.log found at: ${gatewayLogPath}`);
+    }
+
+    if (fs.existsSync(stderrLogPath)) {
+      stderrLogContent = fs.readFileSync(stderrLogPath, "utf8");
+      core.info(`Found stderr.log (${stderrLogContent.length} bytes)`);
+      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([stderrLogContent]);
+      unknownModelAICredits ||= hasUnknownModelAICreditsError([stderrLogContent]);
+    } else {
+      core.info(`No stderr.log found at: ${stderrLogPath}`);
     }
 
     // Try to read gateway.md if it exists (preferred for general gateway summary)
@@ -939,30 +996,7 @@ async function main() {
       return;
     }
 
-    // Fallback to legacy log files
-    let gatewayLogContent = "";
-    let stderrLogContent = "";
-
-    // Read gateway.log if it exists
-    if (fs.existsSync(gatewayLogPath)) {
-      gatewayLogContent = fs.readFileSync(gatewayLogPath, "utf8");
-      core.info(`Found gateway.log (${gatewayLogContent.length} bytes)`);
-      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([gatewayLogContent]);
-      unknownModelAICredits ||= hasUnknownModelAICreditsError([gatewayLogContent]);
-    } else {
-      core.info(`No gateway.log found at: ${gatewayLogPath}`);
-    }
-
-    // Read stderr.log if it exists
-    if (fs.existsSync(stderrLogPath)) {
-      stderrLogContent = fs.readFileSync(stderrLogPath, "utf8");
-      core.info(`Found stderr.log (${stderrLogContent.length} bytes)`);
-      aiCreditsRateLimitError ||= hasAICreditsRateLimitError([stderrLogContent]);
-      unknownModelAICredits ||= hasUnknownModelAICreditsError([stderrLogContent]);
-    } else {
-      core.info(`No stderr.log found at: ${stderrLogPath}`);
-    }
-
+    // Fallback to legacy log files for summary rendering.
     // If no legacy log content and no DIFC events, check if token usage is available
     if (
       (!gatewayLogContent || gatewayLogContent.trim().length === 0) &&
@@ -1117,6 +1151,7 @@ if (typeof module !== "undefined" && module.exports) {
     generateTokenSteeringSummary,
     generateModelAliasResolutionSummary,
     parseRpcMessagesJsonl,
+    getRpcMessageType,
     getRpcRequestLabel,
     generateRpcMessagesSummary,
     printAllGatewayFiles,
@@ -1132,7 +1167,7 @@ if (typeof module !== "undefined" && module.exports) {
 // Run main if called directly
 if (require.main === module) {
   main().catch(err => {
-    console.error(err && err.stack ? err.stack : String(err));
+    console.error(err && err.stack ? err.stack : getErrorMessage(err));
     process.exitCode = 1;
   });
 }

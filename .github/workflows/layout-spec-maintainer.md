@@ -9,15 +9,13 @@ permissions:
   issues: read
   pull-requests: read
 
-sandbox:
-  agent:
-    sudo: false
 
 network:
   allowed:
   - defaults
   - github
 imports:
+- shared/reporting.md
 - shared/otlp.md
 safe-outputs:
   create-pull-request:
@@ -38,6 +36,7 @@ emoji: 📐
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 name: Layout Specification Maintainer
 strict: true
 timeout-minutes: 20
@@ -48,8 +47,16 @@ tools:
   - grep -r ".*" pkg/workflow/js/
   - grep -r ".*" pkg/workflow/*.go
   - git status
+  - cd * && git status
+  - cd * && git checkout -b *
+  - git -C * checkout -b *
+  - cd * && git add * && git diff --cached --stat
+  - cd * && git add * && git status
   - git diff scratchpad/layout.md
   - cat scratchpad/layout.md
+  - sed -n
+  - git status --short
+  - git checkout -b * && git add scratchpad/layout.md && git status --short
   cli-proxy: true
   edit: null
   github:
@@ -58,6 +65,7 @@ tools:
     - default
 tracker-id: layout-spec-maintainer
 ---
+
 # Layout Specification Maintainer
 
 You are an AI agent that maintains a comprehensive specification file documenting all patterns of file paths, folder names, and artifact names used in the compiled lock.yml files in this repository.

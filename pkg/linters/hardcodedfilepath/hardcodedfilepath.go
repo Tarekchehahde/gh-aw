@@ -20,22 +20,19 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 
+	"github.com/github/gh-aw/pkg/linters/internal/analyzerutil"
 	"github.com/github/gh-aw/pkg/linters/internal/astutil"
 	"github.com/github/gh-aw/pkg/linters/internal/filecheck"
 	"github.com/github/gh-aw/pkg/linters/internal/nolint"
+	"github.com/github/gh-aw/pkg/logger"
 )
 
+var pkgLog = logger.New("linters:hardcodedfilepath")
+
 // Analyzer is the hardcoded-file-path analysis pass.
-var Analyzer = &analysis.Analyzer{
-	Name:     "hardcodedfilepath",
-	Doc:      "reports hard-coded file path string literals that should be replaced with named constants",
-	URL:      "https://github.com/github/gh-aw/tree/main/pkg/linters/hardcodedfilepath",
-	Requires: []*analysis.Analyzer{inspect.Analyzer},
-	Run:      run,
-}
+var Analyzer = analyzerutil.New("hardcodedfilepath", "reports hard-coded file path string literals that should be replaced with named constants", run)
 
 // constRef holds a reference to a named path constant.
 type constRef struct {
@@ -156,7 +153,7 @@ func isLogOrPrintCall(pass *analysis.Pass, call *ast.CallExpr) bool {
 
 // collectKnownPathConsts builds a map from path string value to constRef by
 // scanning:
-//  1. All exported constants declared at package scope in pass.Pkg.
+//  1. All constants declared at package scope in pass.Pkg.
 //  2. All exported constants in directly imported packages whose import path
 //     contains "constants" (e.g. "github.com/example/pkg/constants").
 //
@@ -164,8 +161,8 @@ func isLogOrPrintCall(pass *analysis.Pass, call *ast.CallExpr) bool {
 func collectKnownPathConsts(pass *analysis.Pass) map[string]constRef {
 	out := make(map[string]constRef)
 
-	addConst := func(c *types.Const, alias, name string) {
-		if !c.Exported() {
+	addConst := func(c *types.Const, alias, name string, exportedOnly bool) {
+		if exportedOnly && !c.Exported() {
 			return
 		}
 		basic, ok := c.Type().Underlying().(*types.Basic)
@@ -183,7 +180,7 @@ func collectKnownPathConsts(pass *analysis.Pass) map[string]constRef {
 		}
 	}
 
-	// 1. Current package's own exported constants.
+	// 1. Current package's own constants.
 	scope := pass.Pkg.Scope()
 	for _, name := range scope.Names() {
 		obj := scope.Lookup(name)
@@ -191,7 +188,7 @@ func collectKnownPathConsts(pass *analysis.Pass) map[string]constRef {
 		if !ok {
 			continue
 		}
-		addConst(c, "", name)
+		addConst(c, "", name, false)
 	}
 
 	// 2. Imported "constants" packages.
@@ -206,10 +203,11 @@ func collectKnownPathConsts(pass *analysis.Pass) map[string]constRef {
 			if !ok {
 				continue
 			}
-			addConst(c, alias, name)
+			addConst(c, alias, name, true)
 		}
 	}
 
+	pkgLog.Printf("collected %d known path constants", len(out))
 	return out
 }
 
@@ -238,62 +236,64 @@ func run(pass *analysis.Pass) (any, error) {
 		return nil, err
 	}
 
-	noLintLines := nolint.BuildLineIndex(pass, "hardcodedfilepath")
+	noLintIndex, generatedFiles, err := analyzerutil.Indexes(pass)
+	if err != nil {
+		return nil, err
+	}
 	knownConsts := collectKnownPathConsts(pass)
+	pkgLog.Printf("analyzing package %s (%d known path constants)", pass.Pkg.Path(), len(knownConsts))
 
 	for cur := range insp.Root().Preorder((*ast.BasicLit)(nil)) {
-		lit, ok := cur.Node().(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			continue
-		}
-
-		pos := pass.Fset.PositionFor(lit.Pos(), false)
-		if filecheck.IsTestFile(pos.Filename) {
-			continue
-		}
-		if nolint.HasDirective(pos, noLintLines) {
-			continue
-		}
-
-		raw := unquoteStringLit(lit.Value)
-		if !isPathLike(raw) {
-			continue
-		}
-		if hasFormatVerb(raw) {
-			continue
-		}
-
-		// Skip literals that are the value of a const declaration — those are
-		// the canonical definitions, not inline usages.
-		if isConstDeclValue(cur) {
-			continue
-		}
-
-		// Detect whether the literal is a direct argument of a log/print call.
-		inLog := enclosingCallIsLogPrint(pass, cur)
-
-		if ref, found := knownConsts[raw]; found {
-			msg := fmt.Sprintf(
-				"hard-coded file path %q: use constant %s instead of inline string literal",
-				raw, ref,
-			)
-			if inLog {
-				msg += " (path appears in log/print call — keeping consistent via constant is especially important)"
-			}
-			pass.ReportRangef(lit, "%s", msg)
-		} else {
-			msg := fmt.Sprintf(
-				"hard-coded file path %q: consider extracting as a named constant",
-				raw,
-			)
-			if inLog {
-				msg += " (path appears in log/print call)"
-			}
-			pass.ReportRangef(lit, "%s", msg)
-		}
+		checkHardcodedFilePath(pass, cur, generatedFiles, noLintIndex, knownConsts)
 	}
-
 	return nil, nil
+}
+
+// checkHardcodedFilePath inspects a single string literal and reports a
+// diagnostic when it is a hard-coded file path that should be a named constant.
+func checkHardcodedFilePath(pass *analysis.Pass, cur inspector.Cursor, generatedFiles filecheck.GeneratedIndex, noLintIndex nolint.DirectiveIndex, knownConsts map[string]constRef) {
+	lit, ok := cur.Node().(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return
+	}
+	pos := pass.Fset.PositionFor(lit.Pos(), false)
+	if filecheck.ShouldSkipFilename(pos.Filename, generatedFiles) {
+		return
+	}
+	if nolint.HasDirectiveForLinter(pos, noLintIndex, "hardcodedfilepath") {
+		return
+	}
+	raw := unquoteStringLit(lit.Value)
+	if !isPathLike(raw) {
+		return
+	}
+	if hasFormatVerb(raw) {
+		return
+	}
+	if isConstDeclValue(cur) {
+		return
+	}
+	inLog := enclosingCallIsLogPrint(pass, cur)
+	pkgLog.Printf("flagging hardcoded path %q (in log/print call=%v)", raw, inLog)
+	if ref, found := knownConsts[raw]; found {
+		msg := fmt.Sprintf(
+			"hard-coded file path %q: use constant %s instead of inline string literal",
+			raw, ref,
+		)
+		if inLog {
+			msg += " (path appears in log/print call — keeping consistent via constant is especially important)"
+		}
+		pass.ReportRangef(lit, "%s", msg)
+	} else {
+		msg := fmt.Sprintf(
+			"hard-coded file path %q: consider extracting as a named constant",
+			raw,
+		)
+		if inLog {
+			msg += " (path appears in log/print call)"
+		}
+		pass.ReportRangef(lit, "%s", msg)
+	}
 }
 
 // isConstDeclValue reports whether the cursor's node is the value expression

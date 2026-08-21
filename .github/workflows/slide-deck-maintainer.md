@@ -16,9 +16,6 @@ permissions:
   pull-requests: read
   issues: read
 
-sandbox:
-  agent:
-    sudo: false
 
 concurrency:
   job-discriminator: ${{ inputs.focus || github.run_id }}
@@ -35,6 +32,11 @@ imports:
       expires: "1d"
   - shared/otlp.md
 timeout-minutes: 45
+checkout:
+  lfs: false
+runtimes:
+  node:
+    version: "24"
 tools:
   cli-proxy: true
   cache-memory: true
@@ -42,11 +44,14 @@ tools:
     mode: cli
   edit:
   bash:
+    - "npm *"
     - "npm install*"
     - "npm run*"
     - "npm ci*"
+    - "npx *"
     - "npx @marp-team/marp-cli*"
     - "npx http-server*"
+    - "node *"
     - "curl*"
     - "kill*"
     - "lsof*"
@@ -63,8 +68,24 @@ network:
   allowed:
     - node
 steps:
+  - name: Fetch Git LFS files
+    run: |
+      attempt=1
+      max_attempts=5
+      wait_time=5
+      until git lfs pull; do
+        if [ "${attempt}" -ge "${max_attempts}" ]; then
+          echo "::error::git lfs pull failed after ${max_attempts} attempts"
+          exit 1
+        fi
+        echo "git lfs pull failed (attempt ${attempt}/${max_attempts}). Retrying in ${wait_time}s..."
+        sleep "${wait_time}"
+        attempt=$((attempt + 1))
+        wait_time=$((wait_time * 2))
+      done
+
   - name: Setup Node.js
-    uses: actions/setup-node@v6.4.0
+    uses: actions/setup-node@v7.0.0
     with:
       node-version: "24"
       cache: npm
@@ -72,9 +93,12 @@ steps:
   
   - name: Install Marp dependencies
     run: |
-      cd docs
+      cd docs || exit 1
       npm ci
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Slide Deck Maintenance Agent

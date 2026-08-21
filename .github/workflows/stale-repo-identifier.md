@@ -26,6 +26,7 @@ strict: true
 timeout-minutes: 45
 
 imports:
+  - shared/mcp-pagination.md
   - shared/github-guard-policy.md
   - uses: shared/daily-audit-charts.md
     with:
@@ -33,6 +34,7 @@ imports:
   - ../skills/jqschema/SKILL.md
 
   - shared/otlp.md
+  - shared/reporting.md
 network:
   allowed:
     - defaults
@@ -86,7 +88,7 @@ env:
 steps:
   - name: Run stale-repos
     id: stale-repos
-    uses: github/stale-repos@v9.0.15
+    uses: github/stale-repos@v9.0.17
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ORGANIZATION: ${{ env.ORGANIZATION }}
@@ -102,6 +104,11 @@ steps:
       echo "$INACTIVE_REPOS" > /tmp/gh-aw/agent/stale-repos-data/inactive-repos.json
       echo "Stale repositories data saved"
       echo "Total stale repositories: $(jq 'length' /tmp/gh-aw/agent/stale-repos-data/inactive-repos.json)"
+evals:
+  - id: repos_analyzed
+    question: Did the agent analyze repositories for staleness indicators such as inactivity, archived status, and lack of recent commits?
+  - id: report_created
+    question: Was a report or issue created summarizing the stale repository findings?
 
 ---
 

@@ -85,6 +85,20 @@ if [ "$ROOTLESS" = "true" ]; then
   fi
 fi
 
+# Clean up any stale AWF chroot directories left by previous runs before we
+# execute awf. Rootless AWF can fail its writeConfigs startup path with EACCES
+# when stale /tmp/awf-*-chroot-home or /tmp/awf-chroot-* directories remain
+# from earlier jobs on the same runner. Limit cleanup to directories owned by
+# root or the current runner user so we do not delete unrelated /tmp entries
+# that happen to match the name pattern.
+echo "Cleaning up stale AWF chroot directories..."
+if command -v sudo >/dev/null 2>&1; then
+  sudo find /tmp -maxdepth 1 -name 'awf-*-chroot-home' -type d \( -user root -o -user "$(id -un)" \) -exec rm -rf -- {} + || true
+  sudo find /tmp -maxdepth 1 -name 'awf-chroot-*' -type d \( -user root -o -user "$(id -un)" \) -exec rm -rf -- {} + || true
+else
+  echo "Warning: sudo is unavailable; skipping stale AWF chroot cleanup" >&2
+fi
+
 # Download URLs
 BASE_URL="https://github.com/${AWF_REPO}/releases/download/${AWF_VERSION}"
 CHECKSUMS_URL="${BASE_URL}/checksums.txt"
@@ -108,7 +122,7 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 
 # Download checksums
 echo "Downloading checksums from ${CHECKSUMS_URL@Q}..."
-curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/checksums.txt" "${CHECKSUMS_URL}"
+curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/checksums.txt" "${CHECKSUMS_URL}"
 
 verify_checksum() {
   local file="$1"
@@ -160,7 +174,7 @@ install_bundle() {
 
   echo "Node.js >= 20 detected ($(node --version)), using lightweight bundle..."
   echo "Downloading bundle from ${bundle_url@Q}..."
-  if ! curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/${bundle_name}" "${bundle_url}"; then
+  if ! curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/${bundle_name}" "${bundle_url}"; then
     echo "⚠ Bundle download failed (asset may not exist for this version)"
     return 1
   fi
@@ -199,7 +213,7 @@ install_linux_binary() {
 
   local binary_url="${BASE_URL}/${awf_binary}"
   echo "Downloading binary from ${binary_url@Q}..."
-  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/${awf_binary}" "${binary_url}"
+  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/${awf_binary}" "${binary_url}"
 
   # Verify checksum
   verify_checksum "${TEMP_DIR}/${awf_binary}" "${awf_binary}"
@@ -224,7 +238,7 @@ install_darwin_binary() {
 
   local binary_url="${BASE_URL}/${awf_binary}"
   echo "Downloading binary from ${binary_url@Q}..."
-  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 -o "${TEMP_DIR}/${awf_binary}" "${binary_url}"
+  curl -fsSL --retry 5 --retry-delay 10 --retry-max-time 180 --retry-all-errors -o "${TEMP_DIR}/${awf_binary}" "${binary_url}"
 
   # Verify checksum
   verify_checksum "${TEMP_DIR}/${awf_binary}" "${awf_binary}"

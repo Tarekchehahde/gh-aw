@@ -24,11 +24,14 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/github/gh-aw/pkg/logger"
 )
 
-var runsOnValidationLog = newValidationLogger("runs_on")
+var runsOnValidationLog = logger.New("workflow:runs_on_validation")
 
 // macOSRunnerFAQURL is the URL to the FAQ entry explaining why macOS runners are not supported.
 const macOSRunnerFAQURL = "https://github.github.com/gh-aw/reference/faq/#why-are-macos-runners-not-supported"
@@ -54,6 +57,16 @@ func validateRunsOn(frontmatter map[string]any, markdownPath string) error {
 		runsOnFields = append(runsOnFields, runnerField{name: "safe-outputs.runs-on", value: safeOutputs["runs-on"]})
 		if threatDetection, ok := safeOutputs["threat-detection"].(map[string]any); ok {
 			runsOnFields = append(runsOnFields, runnerField{name: "safe-outputs.threat-detection.runs-on", value: threatDetection["runs-on"]})
+		}
+		if jobs, ok := safeOutputs["jobs"].(map[string]any); ok {
+			for jobName, jobValue := range jobs {
+				if job, ok := jobValue.(map[string]any); ok {
+					runsOnFields = append(runsOnFields, runnerField{
+						name:  fmt.Sprintf("safe-outputs.jobs.%s.runs-on", jobName),
+						value: job["runs-on"],
+					})
+				}
+			}
 		}
 	}
 
@@ -87,34 +100,37 @@ func validateRunsOnValue(value any) error {
 	case []any:
 		for _, label := range v {
 			if _, ok := label.(string); !ok {
-				return fmt.Errorf("invalid runs-on array entry type %T: expected string", label)
+				return fmt.Errorf("runs-on array entry has type %T, expected a string label. Example: runs-on: [ubuntu-latest, self-hosted]", label)
 			}
 		}
 		return nil
 	case map[string]any:
+		if len(v) == 0 {
+			return errors.New("runs-on object is empty. Expected an object with 'group' or 'labels'. Example: runs-on:\n  group: my-runner-group")
+		}
 		for key, value := range v {
 			switch key {
 			case "group":
 				if _, ok := value.(string); !ok {
-					return fmt.Errorf("invalid runs-on.group type %T: expected string", value)
+					return fmt.Errorf("runs-on.group has type %T, expected a string name. Example: runs-on:\n  group: my-runner-group", value)
 				}
 			case "labels":
 				labels, ok := value.([]any)
 				if !ok {
-					return fmt.Errorf("invalid runs-on.labels type %T: expected array of strings", value)
+					return fmt.Errorf("runs-on.labels has type %T, expected an array of string labels. Example: runs-on:\n  labels: [self-hosted, linux]", value)
 				}
 				for _, label := range labels {
 					if _, ok := label.(string); !ok {
-						return fmt.Errorf("invalid runs-on.labels entry type %T: expected string", label)
+						return fmt.Errorf("runs-on.labels entry has type %T, expected a string label. Example: runs-on:\n  labels: [self-hosted, linux]", label)
 					}
 				}
 			default:
-				return fmt.Errorf("invalid runs-on object key %q: expected only group or labels", key)
+				return fmt.Errorf("runs-on object key '%s' is not supported, expected 'group' or 'labels'. Example: runs-on:\n  group: my-runner-group\n  labels: [self-hosted]", key)
 			}
 		}
 		return nil
 	default:
-		return fmt.Errorf("invalid runs-on type %T: expected string, array of strings, or object", value)
+		return fmt.Errorf("runs-on has type %T, expected a string, array of strings, or object. Example: runs-on: ubuntu-latest", value)
 	}
 }
 
@@ -125,7 +141,16 @@ func isEmptyRunsOnValue(value any) bool {
 	case string:
 		return strings.TrimSpace(v) == ""
 	case []any:
-		return len(v) == 0
+		if len(v) == 0 {
+			return true
+		}
+		for _, label := range v {
+			label, ok := label.(string)
+			if !ok || strings.TrimSpace(label) != "" {
+				return false
+			}
+		}
+		return true
 	case map[string]any:
 		if len(v) == 0 {
 			return true

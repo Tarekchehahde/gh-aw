@@ -47,8 +47,22 @@ Window examples:
 
 Strategy: fixed durations for trend comparisons, run-based windows for continuous monitoring, calendar windows for stakeholder reporting.
 
+Whenever a report window is defined, also fix its grouping dimensions and deduplication key up front (see [Recurring Digest Defaults](#recurring-digest-defaults) below) — a window alone is not sufficient to make a recurring report deterministic and non-duplicating.
+
 When the window has no qualifying updates, call `noop` with the evaluated window in the message:
 `noop("No updates in last 24 full hours ({{window_start_utc}} to {{window_end_utc}})")`
+
+## Recurring Digest Defaults
+
+For recurring PM, stakeholder, and information-worker digests, fix all three elements up front — window, grouping dimensions, and deduplication key — before generating the report:
+
+| Element | Default guidance | Examples |
+|---|---|---|
+| Report window | Closed, explicit UTC window or `since previous successful run` (see above) | `last 7 full days ending at run start (UTC)`, `previous calendar month (UTC)` |
+| Grouping dimensions | Group by the dimensions the audience already uses to decide | team, area, milestone, owner, severity, status, repository |
+| Deduplication key | One stable key per scope and window; week-based for weekly, calendar-date for daily/monthly | `pm-digest:platform:2026-W27`, `stakeholder-digest:mobile:2026-07-02` |
+
+Duplicate-suppression: search for an existing open issue by the stable key (title prefix or dedicated label) before creating; if one exists, update it with `add-comment` instead of opening a duplicate. Use `create-issue` with `close-older-issues: true` for recurring issue-style digests.
 
 ## Fallback for Incomplete Metadata
 

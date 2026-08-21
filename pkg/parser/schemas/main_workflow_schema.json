@@ -23,7 +23,7 @@
     "emoji": {
       "type": "string",
       "description": "Optional emoji to represent the workflow visually in listings and UI surfaces.",
-      "examples": ["🤖", "🔍", "🚀"]
+      "examples": ["\ud83e\udd16", "\ud83d\udd0d", "\ud83d\ude80"]
     },
     "source": {
       "type": "string",
@@ -43,6 +43,31 @@
       "description": "Optional tracker identifier to tag all created assets (issues, discussions, comments, pull requests). Must be at least 8 characters and contain only alphanumeric characters, hyphens, and underscores. This identifier will be inserted in the body/description of all created assets to enable searching and retrieving assets associated with this workflow.",
       "examples": ["workflow-2024-q1", "team-alpha-bot", "security_audit_v2"]
     },
+    "threat-detection-suppress": {
+      "type": "array",
+      "description": "Auditable false-positive suppression annotations for compiler threat-detection rules.",
+      "items": {
+        "type": "object",
+        "required": ["rule", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "rule": {
+            "type": "string",
+            "pattern": "^CTR-[0-9]{3}$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          }
+        }
+      }
+    },
     "labels": {
       "type": "array",
       "description": "Optional array of labels to categorize and organize workflows. Labels can be used to filter workflows in status/list commands.",
@@ -58,12 +83,12 @@
     },
     "skills": {
       "type": "array",
-      "description": "Optional list of external skill references to install during activation. Supports repository-wide installs (`owner/repo@<sha>`) and path-scoped installs (`owner/repo/skill/path@<sha>`). Static references must be pinned to a full 40-character lowercase commit SHA. GitHub Actions expressions (`${{ ... }}`) are also accepted and are evaluated at runtime. Entries may also be objects to configure per-skill authentication via github-token or github-app.",
+      "description": "Optional list of skill references to install during activation. Supports remote repository-wide installs (`owner/repo@<sha>`), remote path-scoped installs (`owner/repo/skill/path@<sha>`), and local path references (e.g. `skills/rig` or `.github/skills/my-skill`). Remote static references may use a full 40-character lowercase commit SHA, or a branch/tag name (resolved to a SHA at compile time). Omitting the ref (`owner/repo@`) opts out of pinning and triggers a compile-time warning. Local paths are installed with --from-local at runtime and are rewritten to a remote repospec by `gh aw add`. GitHub Actions expressions (`${{ ... }}`) are also accepted and are evaluated at runtime. Entries may also be objects to configure per-skill authentication via github-token or github-app.",
       "items": {
         "oneOf": [
           {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*)?@[0-9a-f]{40}$"
+            "pattern": "^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*)?@(?:[0-9a-f]{40}|[A-Za-z0-9](?:[A-Za-z0-9_./-]*[A-Za-z0-9_.-])?)?$"
           },
           {
             "type": "string",
@@ -76,6 +101,11 @@
             "description": "GitHub Actions expression that resolves to a full skill reference string at runtime."
           },
           {
+            "type": "string",
+            "pattern": "^(?:\\./)?(?:\\.[A-Za-z0-9_-][A-Za-z0-9_.-]*|[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\\/(?:\\.[A-Za-z0-9_-][A-Za-z0-9_.-]*|[A-Za-z0-9_-][A-Za-z0-9_.-]*))*$",
+            "description": "Local path to a skill directory relative to the repository root. Installed with --from-local at runtime. Rewritten to a remote repospec by gh aw add."
+          },
+          {
             "type": "object",
             "description": "Object-form skill reference with per-skill authentication.",
             "required": ["skill"],
@@ -85,7 +115,7 @@
                 "oneOf": [
                   {
                     "type": "string",
-                    "pattern": "^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*)?@[0-9a-f]{40}$"
+                    "pattern": "^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*)?@(?:[0-9a-f]{40}|[A-Za-z0-9](?:[A-Za-z0-9_./-]*[A-Za-z0-9_.-])?)?$"
                   },
                   {
                     "type": "string",
@@ -94,6 +124,11 @@
                   {
                     "type": "string",
                     "pattern": "^\\$\\{\\{.+\\}\\}$"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^(?:\\./)?(?:\\.[A-Za-z0-9_-][A-Za-z0-9_.-]*|[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\\/(?:\\.[A-Za-z0-9_-][A-Za-z0-9_.-]*|[A-Za-z0-9_-][A-Za-z0-9_.-]*))*$",
+                    "description": "Local path to a skill directory relative to the repository root."
                   }
                 ],
                 "description": "Skill reference string in the same format accepted by string-form entries."
@@ -110,7 +145,7 @@
           }
         ]
       },
-      "examples": [["githubnext/awesome-skills@1f181b37d3fe5862ab590648f25a292e345b5de6"], ["githubnext/awesome-skills/review/security@1f181b37d3fe5862ab590648f25a292e345b5de6"]]
+      "examples": [["githubnext/awesome-skills@1f181b37d3fe5862ab590648f25a292e345b5de6"], ["githubnext/awesome-skills/review/security@1f181b37d3fe5862ab590648f25a292e345b5de6"], ["skills/rig"]]
     },
     "metadata": {
       "type": "object",
@@ -498,6 +533,30 @@
       "description": "If true, inline all imports (including those without inputs) at compilation time in the generated lock.yml instead of using runtime-import macros. When enabled, the frontmatter hash covers the entire markdown body so any change to the content will invalidate the hash.",
       "examples": [true, false]
     },
+    "ambient-folders": {
+      "type": "array",
+      "description": "Workspace-relative folders to bundle in the activation artifact and restore before the agent runs. Useful for activation steps that generate reusable prompt, skill, or agent context.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._/\\-]+$",
+        "not": {
+          "anyOf": [
+            {
+              "pattern": "^/"
+            },
+            {
+              "pattern": "(^|/)\\.\\.(/|$)"
+            },
+            {
+              "pattern": "^\\.$"
+            }
+          ]
+        }
+      },
+      "uniqueItems": true,
+      "examples": [[".squad"], [".squad", ".github/agents"]]
+    },
     "on": {
       "description": "Workflow triggers that define when the agentic workflow should run. Supports standard GitHub Actions trigger events plus special command triggers for /commands (required)",
       "examples": [
@@ -687,7 +746,7 @@
                         {
                           "type": "array",
                           "minItems": 1,
-                          "description": "Array of label names — any of these labels will trigger the workflow.",
+                          "description": "Array of label names \u2014 any of these labels will trigger the workflow.",
                           "items": {
                             "type": "string",
                             "minLength": 1,
@@ -708,7 +767,7 @@
                         {
                           "type": "array",
                           "minItems": 1,
-                          "description": "Array of label names — any of these labels will trigger the workflow.",
+                          "description": "Array of label names \u2014 any of these labels will trigger the workflow.",
                           "items": {
                             "type": "string",
                             "minLength": 1,
@@ -934,6 +993,21 @@
                   "type": "boolean",
                   "description": "Filter by draft pull request state. Set to false to exclude draft PRs, true to include only drafts, or omit to include both"
                 },
+                "max-stack": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "const": -1,
+                      "description": "Disable stack protection; run on every pull request in the stack."
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Run only on the top N pull requests in the stack. Default is 1 (only the latest/top pull request)."
+                    }
+                  ],
+                  "description": "Maximum number of top stack layers to run on for stacked pull requests. Default is 1 (only the latest/top pull request in the stack). Set to -1 to disable stack protection and run on every pull request in the stack. Value 0 is not allowed."
+                },
                 "forks": {
                   "oneOf": [
                     {
@@ -1039,7 +1113,28 @@
                   "description": "Types of issue events",
                   "items": {
                     "type": "string",
-                    "enum": ["opened", "edited", "deleted", "transferred", "pinned", "unpinned", "closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled", "locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped"]
+                    "enum": [
+                      "opened",
+                      "edited",
+                      "deleted",
+                      "transferred",
+                      "pinned",
+                      "unpinned",
+                      "closed",
+                      "reopened",
+                      "assigned",
+                      "unassigned",
+                      "labeled",
+                      "unlabeled",
+                      "locked",
+                      "unlocked",
+                      "milestoned",
+                      "demilestoned",
+                      "typed",
+                      "untyped",
+                      "field_added",
+                      "field_removed"
+                    ]
                   }
                 },
                 "names": {
@@ -1669,6 +1764,21 @@
                     "type": "string",
                     "enum": ["submitted", "edited", "dismissed"]
                   }
+                },
+                "max-stack": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "const": -1,
+                      "description": "Disable stack protection; run on every pull request review in the stack."
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Run only on pull request reviews for the top N pull requests in the stack. Default is 1 (only the latest/top pull request)."
+                    }
+                  ],
+                  "description": "Maximum number of top stack layers to run on for stacked pull request review events. Default is 1 (only the latest/top pull request in the stack). Set to -1 to disable stack protection and run on every pull request review in the stack. Value 0 is not allowed."
                 }
               }
             },
@@ -1867,7 +1977,7 @@
               "oneOf": [
                 {
                   "type": "null",
-                  "description": "Bare key with no value — equivalent to true. Skips workflow execution if any CI checks on the target branch are currently failing."
+                  "description": "Bare key with no value \u2014 equivalent to true. Skips workflow execution if any CI checks on the target branch are currently failing."
                 },
                 {
                   "type": "boolean",
@@ -1963,12 +2073,12 @@
               }
             },
             "roles": {
-              "description": "Repository access roles required to trigger agentic workflows. Defaults to ['admin', 'maintainer', 'write'] for security. Use 'all' to allow any authenticated user (⚠️ security consideration).",
+              "description": "Repository access roles required to trigger agentic workflows. Defaults to ['admin', 'maintainer', 'write'] for security. Use 'all' to allow any authenticated user (\u26a0\ufe0f security consideration).",
               "oneOf": [
                 {
                   "type": "string",
                   "enum": ["admin", "maintainer", "maintain", "write", "triage", "read", "all"],
-                  "description": "Single repository permission level that can trigger the workflow. Use 'all' to allow any authenticated user (⚠️ disables permission checking entirely - use with caution)"
+                  "description": "Single repository permission level that can trigger the workflow. Use 'all' to allow any authenticated user (\u26a0\ufe0f disables permission checking entirely - use with caution)"
                 },
                 {
                   "type": "array",
@@ -1993,7 +2103,7 @@
               }
             },
             "labels": {
-              "description": "Filter workflows triggered by pull_request_target (or other labeled events) to only fire when the triggering label matches one of these names. Generates a job-level if: condition on the pre-activation job so unmatched label events show as Skipped (⊘) rather than Failed (❌).",
+              "description": "Filter workflows triggered by pull_request_target (or other labeled events) to only fire when the triggering label matches one of these names. Generates a job-level if: condition on the pre-activation job so unmatched label events show as Skipped (\u2298) rather than Failed (\u274c).",
               "oneOf": [
                 {
                   "$ref": "#/$defs/non_empty_string",
@@ -2012,7 +2122,7 @@
             },
             "allow-bot-authored-trigger-comment": {
               "type": "boolean",
-              "description": "Allow the bot-posted-menu / user-checks-box pattern: when a workflow posts a checkbox-menu comment as a GitHub App bot and a human maintainer edits it to tick a box (issue_comment:edited where actor ≠ comment.user.login), treat this as safe and skip the confused-deputy check. When false (default), the check applies to all issue_comment events. The Dependabot confused-deputy attack vector (issue_comment:created) is unaffected."
+              "description": "Allow the bot-posted-menu / user-checks-box pattern: when a workflow posts a checkbox-menu comment as a GitHub App bot and a human maintainer edits it to tick a box (issue_comment:edited where actor \u2260 comment.user.login), treat this as safe and skip the confused-deputy check. When false (default), the check applies to all issue_comment events. The Dependabot confused-deputy attack vector (issue_comment:created) is unaffected."
             },
             "manual-approval": {
               "type": "string",
@@ -2332,6 +2442,19 @@
           ]
         }
       ]
+    },
+    "plugins": {
+      "type": "array",
+      "description": "\u26a0\ufe0f Experimental. Agent Plugins to install after the agentic engine. Each GitHub repository reference must include a ref that the compiler resolves to a commit SHA. Using this field emits a compile-time warning.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*@[A-Za-z0-9._/-]+$",
+        "description": "A plugin repository reference in owner/repository[/path]@ref format"
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "examples": [["github/awesome-copilot/plugins/example@v1"]]
     },
     "permissions": {
       "description": "GitHub token permissions for the workflow. Controls what the GITHUB_TOKEN can access during execution. Use the principle of least privilege - only grant the minimum permissions needed.",
@@ -2823,9 +2946,17 @@
       ]
     },
     "features": {
-      "description": "Feature flags and configuration options for experimental or optional features in the workflow. Each feature can be a boolean flag or a string value. The 'action-tag' feature (string) specifies the tag or SHA to use when referencing actions/setup in compiled workflows (for testing purposes only).",
+      "description": "Feature flags and configuration options for experimental or optional features in the workflow. Each feature can be a boolean flag or a string value. The 'action-tag' feature (string) specifies the tag or SHA to use when referencing actions/setup in compiled workflows (for testing purposes only). The 'intentional-failure' feature (boolean) marks the workflow as one that is intentionally expected to fail (e.g., guardrail stress-tests); such workflows are excluded from fleet-health and prod-main success-rate rollups.",
       "type": "object",
       "additionalProperties": true,
+      "properties": {
+        "intentional-failure": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mark the workflow as one that is intentionally expected to fail (e.g., guardrail stress-tests). Workflows tagged with features.intentional-failure: true are excluded from fleet-health and prod-main success-rate rollups so they do not depress real-regression baselines.",
+          "examples": [true, false]
+        }
+      },
       "examples": [
         {
           "action-tag": "v1.0.0"
@@ -2833,6 +2964,9 @@
         {
           "action-tag": "abc123def456",
           "experimental-feature": true
+        },
+        {
+          "intentional-failure": true
         }
       ]
     },
@@ -2869,33 +3003,8 @@
                   "description": "Pricing data for a single model.",
                   "properties": {
                     "cost": {
-                      "type": "object",
-                      "description": "Per-token cost in USD. Keys are token classes; values are numeric cost-per-token strings or numbers.",
-                      "properties": {
-                        "input": {
-                          "type": ["number", "string"],
-                          "description": "Cost per input token in USD."
-                        },
-                        "output": {
-                          "type": ["number", "string"],
-                          "description": "Cost per output token in USD."
-                        },
-                        "cache_read": {
-                          "type": ["number", "string"],
-                          "description": "Cost per cached-read token in USD."
-                        },
-                        "cache_write": {
-                          "type": ["number", "string"],
-                          "description": "Cost per cache-write token in USD."
-                        },
-                        "reasoning": {
-                          "type": ["number", "string"],
-                          "description": "Cost per reasoning token in USD."
-                        }
-                      },
-                      "additionalProperties": {
-                        "type": ["number", "string"]
-                      }
+                      "$ref": "#/$defs/ai_credits_pricing",
+                      "description": "Per-token cost in USD. Keys are token classes; values are numeric cost-per-token strings or numbers."
                     }
                   },
                   "additionalProperties": false
@@ -2904,6 +3013,10 @@
             },
             "additionalProperties": false
           }
+        },
+        "default-ai-credits-pricing": {
+          "$ref": "#/$defs/ai_credits_pricing",
+          "description": "Fallback per-token pricing ($/1M tokens) for models not in the built-in pricing table. Required when max-ai-credits is active and the model is self-hosted or unrecognized (e.g. BYOK Ollama). Without this, the AWF API proxy rejects unrecognized models with HTTP 400."
         }
       },
       "additionalProperties": false
@@ -3100,7 +3213,7 @@
           "type": "string",
           "enum": ["cache", "repo"],
           "default": "repo",
-          "description": "Storage backend for experiment state. 'repo' (default) persists state to a git branch named 'experiments/{sanitizedWorkflowID}' (workflow ID lowercased with hyphens removed, e.g. 'my-workflow' -> 'experiments/myworkflow') for durability across cache evictions. 'cache' uses GitHub Actions cache (legacy behaviour). Repo storage is recommended because experiment data is valuable and more durable than cache."
+          "description": "Storage backend for experiment state. 'repo' (default) persists state to a git branch named 'experiments/{sanitizedWorkflowID}' (workflow ID lowercased with hyphens removed, e.g. 'my-workflow' -> 'experiments/myworkflow') for durability across cache evictions. 'cache' uses GitHub Actions cache (legacy behavior). Repo storage is recommended because experiment data is valuable and more durable than cache."
         }
       }
     },
@@ -3314,7 +3427,7 @@
     },
     "network": {
       "$comment": "Strict mode requirements: When strict=true, the 'network' field must be present (not null/undefined) and cannot contain standalone wildcard '*' in allowed domains (but patterns like '*.example.com' ARE allowed). This is validated in Go code (pkg/workflow/strict_mode_validation.go) via validateStrictNetwork().",
-      "description": "Network access control for AI engines using ecosystem identifiers and domain allowlists. Supports wildcard patterns like '*.example.com' to match any subdomain. Controls web fetch and search capabilities. IMPORTANT: For workflows that build/install/test code, always include the language ecosystem identifier alongside 'defaults' — 'defaults' alone only covers basic infrastructure, not package registries. Key ecosystem identifiers by runtime: 'dotnet' (.NET/NuGet), 'python' (pip/PyPI), 'node' (npm/yarn), 'go' (go modules), 'java' (Maven/Gradle), 'ruby' (Bundler), 'rust' (Cargo), 'swift' (Swift PM). Example: a .NET project needs network: { allowed: [defaults, dotnet] }.",
+      "description": "Network access control for AI engines using ecosystem identifiers and domain allowlists. Supports wildcard patterns like '*.example.com' to match any subdomain. Controls web fetch and search capabilities. IMPORTANT: For workflows that build/install/test code, always include the language ecosystem identifier alongside 'defaults' \u2014 'defaults' alone only covers basic infrastructure, not package registries. Key ecosystem identifiers by runtime: 'dotnet' (.NET/NuGet), 'python' (pip/PyPI), 'node' (npm/yarn), 'go' (go modules), 'java' (Maven/Gradle), 'ruby' (Bundler), 'rust' (Cargo), 'swift' (Swift PM). Example: a .NET project needs network: { allowed: [defaults, dotnet] }.",
       "examples": [
         "defaults",
         {
@@ -3361,6 +3474,70 @@
         }
       ]
     },
+    "enclaves": {
+      "type": "array",
+      "description": "AWF-owned private-repository executors exposed only through the compiler-launched MCP gateway. Omit this field to disable enclaves.",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["script", "repos"],
+            "properties": {
+              "script": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "properties": {
+                  "max-script-bytes": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 65536 }
+                }
+              },
+              "repos": { "$ref": "#/$defs/enclave-repos" },
+              "runtime": { "type": "string", "enum": ["docker", "gvisor", "sbx"], "default": "docker" },
+              "image": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "timeout": { "type": "integer", "minimum": 1, "maximum": 540, "default": 30 },
+              "memory-limit": { "type": "string", "pattern": "^[1-9][0-9]*[bkmgBKMG]$", "default": "512m" },
+              "cpu-limit": { "type": "string", "pattern": "^(?:[0-9]{1,2})(?:\\.[0-9]{1,3})?$", "default": "1" },
+              "pids-limit": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 128 },
+              "tmpfs-limit": { "type": "string", "pattern": "^[1-9][0-9]*[bkmgBKMG]$", "default": "64m" },
+              "max-output-bytes": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 8192 },
+              "max-invocations": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 32 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent", "repos"],
+            "properties": {
+              "agent": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["model"],
+                "properties": {
+                  "engine": { "type": "string", "enum": ["copilot", "claude", "codex", "gemini"], "default": "copilot" },
+                  "profile": { "type": "string", "enum": ["openai", "anthropic"], "default": "openai" },
+                  "model": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$" },
+                  "max-task-bytes": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 4096 },
+                  "max-model-requests": { "type": "integer", "minimum": 1, "maximum": 64, "default": 8 },
+                  "max-model-tokens": { "type": "integer", "minimum": 1, "maximum": 32768, "default": 1024 }
+                }
+              },
+              "repos": { "$ref": "#/$defs/enclave-repos" },
+              "runtime": { "type": "string", "enum": ["docker", "gvisor", "sbx"], "default": "docker" },
+              "image": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "timeout": { "type": "integer", "minimum": 1, "maximum": 540, "default": 120 },
+              "memory-limit": { "type": "string", "pattern": "^[1-9][0-9]*[bkmgBKMG]$", "default": "512m" },
+              "cpu-limit": { "type": "string", "pattern": "^(?:[0-9]{1,2})(?:\\.[0-9]{1,3})?$", "default": "1" },
+              "pids-limit": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 128 },
+              "tmpfs-limit": { "type": "string", "pattern": "^[1-9][0-9]*[bkmgBKMG]$", "default": "64m" },
+              "max-output-bytes": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 8192 },
+              "max-invocations": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 8 }
+            }
+          }
+        ]
+      }
+    },
     "sandbox": {
       "description": "Sandbox configuration for AI engines. Controls agent sandbox (AWF) and MCP gateway. The MCP gateway is always enabled and cannot be disabled.",
       "oneOf": [
@@ -3371,7 +3548,7 @@
         },
         {
           "type": "object",
-          "description": "Object format for full sandbox configuration with agent and mcp options",
+          "description": "Object format for full sandbox configuration with agent and MCP gateway options",
           "properties": {
             "type": {
               "type": "string",
@@ -3382,6 +3559,10 @@
               "description": "Agent sandbox type: 'awf' uses AWF (Agent Workflow Firewall), or false to disable agent sandbox. Defaults to 'awf' if not specified. Note: Disabling the agent sandbox (false) removes firewall protection but keeps the MCP gateway enabled.",
               "default": "awf",
               "oneOf": [
+                {
+                  "type": "null",
+                  "description": "Null (an empty 'agent:' key) leaves the agent sandbox at its default of 'awf'"
+                },
                 {
                   "type": "boolean",
                   "const": false,
@@ -3414,10 +3595,6 @@
                       "type": "string",
                       "enum": ["github.com", "ghes", "ghec", "ghec-self-hosted"],
                       "description": "AWF platform.type override. Declares the GitHub deployment type so AWF can apply deterministic Copilot auth behavior without relying on host heuristics. Omit to let AWF use its default host heuristic behavior."
-                    },
-                    "sudo": {
-                      "type": "boolean",
-                      "description": "Controls whether AWF runs in root mode. When set to false, AWF runs without sudo in network-isolation topology egress mode (--network-isolation): MCP sidecars run as bridge containers and AWF attaches them to its internal awf-net network. Defaults to true (sudo enabled, normal mode)."
                     },
                     "command": {
                       "type": "string",
@@ -3453,7 +3630,7 @@
                     "memory": {
                       "type": "string",
                       "description": "Memory limit for the AWF container (e.g., '4g', '8g'). Passed as --memory-limit to AWF. If not specified, AWF's default memory limit is used.",
-                      "pattern": "^[0-9]+(b|k|m|g|kb|mb|gb|B|K|M|G|KB|MB|GB)$",
+                      "pattern": "^[1-9][0-9]*[bkmgBKMG]$",
                       "examples": ["4g", "8g", "512m"]
                     },
                     "model-fallback": {
@@ -3461,11 +3638,22 @@
                       "description": "Enable or disable model fallback for unresolved model selections. Set to false for BYOK Azure OpenAI deployments to prevent deployment-name rewriting. Supports literal boolean or GitHub Actions expression.",
                       "examples": [false, "${{ inputs.model-fallback }}"]
                     },
+                    "token-steering": {
+                      "type": "boolean",
+                      "description": "Enable or disable API proxy token steering. Set to false to preserve the explicitly configured provider and model.",
+                      "examples": [false]
+                    },
                     "runtime": {
                       "type": "string",
-                      "description": "Container runtime for the agent container. Use 'gvisor' to run the agent under gVisor's runsc runtime for additional kernel-level isolation. Requires sandbox.agent.sudo: true (root access is needed to install and register runsc). Incompatible with runner.topology: arc-dind.",
-                      "enum": ["gvisor"],
-                      "examples": ["gvisor"]
+                      "description": "Sandbox runtime profile for the agent container. Each value selects one supported security and topology profile: 'docker' (default) runs the agent under Docker with a rootless AWF and network isolation; 'docker-sudo-iptables' runs Docker with a privileged AWF, legacy iptables networking, and host/service access (required for allow-host-ports and GitHub Actions services: connectivity); 'gvisor' runs the agent under gVisor's runsc runtime with strict network isolation; 'docker-sbx' runs the agent inside a Docker sbx KVM microVM (requires DOCKER_PAT and DOCKER_USERNAME secrets and a KVM-capable runner; the compiler handles the required privileged setup); 'cloud-hypervisor' runs the agent in AWF's preview Cloud Hypervisor microVM runtime on GitHub-hosted Ubuntu x86_64, sized at 2 vCPUs and 4096 MiB. Omitting runtime is equivalent to 'docker'. gvisor, docker-sbx and cloud-hypervisor are incompatible with runner.topology: arc-dind.",
+                      "enum": ["docker", "docker-sudo-iptables", "gvisor", "docker-sbx", "cloud-hypervisor"],
+                      "default": "docker",
+                      "examples": ["docker", "docker-sudo-iptables", "gvisor", "docker-sbx", "cloud-hypervisor"]
+                    },
+                    "runtime-install": {
+                      "type": "boolean",
+                      "description": "Controls generation of sandbox runtime installation steps. Only valid with runtime: gvisor or runtime: docker-sbx. Defaults to true. Set to false when the runtime is already installed on the runner; docker-sbx credential refresh still runs.",
+                      "examples": [false]
                     },
                     "config": {
                       "type": "object",
@@ -3525,9 +3713,22 @@
                         },
                         "anthropic": {
                           "$ref": "#/$defs/sandbox_agent_api_target"
+                        },
+                        "copilot": {
+                          "$ref": "#/$defs/sandbox_copilot_api_target"
                         }
                       },
                       "additionalProperties": false
+                    },
+                    "allow-host-ports": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535
+                      },
+                      "uniqueItems": true,
+                      "description": "Additional host TCP ports the agent may connect to. Requires runtime: docker-sudo-iptables. Ports published by `services:` are reached via --allow-host-service-ports instead; use this only for host daemons not declared there."
                     }
                   },
                   "additionalProperties": false
@@ -3590,7 +3791,7 @@
                 "container": {
                   "type": "string",
                   "x-internal": true,
-                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*$",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*(?:@sha256:[a-f0-9]{64})?$",
                   "description": "Container image for the MCP gateway executable (required)"
                 },
                 "version": {
@@ -3833,7 +4034,7 @@
             [
               {
                 "name": "Verify Post-Steps Execution",
-                "run": "echo \"✅ Post-steps are executing correctly\"\necho \"This step runs after the AI agent completes\"\n"
+                "run": "echo \"\u2705 Post-steps are executing correctly\"\necho \"This step runs after the AI agent completes\"\n"
               },
               {
                 "name": "Upload Test Results",
@@ -3889,7 +4090,7 @@
       "type": "integer",
       "minimum": 1,
       "default": 5,
-      "description": "Maximum number of consecutive AWF cache misses allowed before the API proxy blocks further requests. Maps to `apiProxy.maxCacheMisses`. Precedence: frontmatter value → `GH_AW_DEFAULT_MAX_TURN_CACHE_MISSES` env override → built-in default `5`."
+      "description": "Maximum number of consecutive AWF cache misses allowed before the API proxy blocks further requests. Maps to `apiProxy.maxCacheMisses`. Precedence: frontmatter value \u2192 `GH_AW_DEFAULT_MAX_TURN_CACHE_MISSES` env override \u2192 built-in default `5`."
     },
     "max-daily-ai-credits": {
       "$ref": "#/$defs/max_daily_ai_credits_limit",
@@ -4043,7 +4244,7 @@
                   "default": true
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "Optional custom GitHub token (e.g., '${{ secrets.CUSTOM_PAT }}'). For 'remote' type, defaults to GH_AW_GITHUB_TOKEN if not specified."
                 },
                 "toolsets": {
@@ -4211,6 +4412,88 @@
                 "github-app": {
                   "$ref": "#/$defs/github_app",
                   "description": "GitHub App configuration for token minting. When configured, a GitHub App installation access token is minted at workflow start and used instead of the default token. This token overrides any custom github-token setting and provides fine-grained permissions matching the agent job requirements."
+                },
+                "private-to-public-flows": {
+                  "description": "Opts out of cross-visibility protections for private-to-public data flows. Set to 'allow' for a blanket opt-out (disables forcePublicRepos and default sink-visibility enforcement), or provide an array of MCP server IDs to exempt only those servers from default sink-visibility enforcement. Incompatible with strict mode when set to 'allow'. See MCP Gateway Specification Section 10.9.",
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "enum": ["allow"],
+                      "description": "Blanket opt-out: disables forcePublicRepos and sink-visibility enforcement for all servers. Not allowed in strict mode."
+                    },
+                    {
+                      "type": "array",
+                      "description": "Selective exemption: disables default sink-visibility enforcement for the listed MCP server IDs only. Compatible with strict mode.",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "MCP server ID to exempt from sink-visibility enforcement"
+                      },
+                      "minItems": 1
+                    }
+                  ]
+                },
+                "features": {
+                  "type": "string",
+                  "description": "Comma-separated list of GitHub MCP server feature flags to enable. Forwarded as GITHUB_FEATURES (Docker/local) or X-MCP-Features (remote). When omitted, 'fields_param' is enabled by default for server v1.6.0 and later. Set to an empty string to disable all feature flags."
+                },
+                "bounded-queries": {
+                  "type": "object",
+                  "description": "AWF bounded-query configuration for cross-repository private data access (AWF v0.27.44+). Requires the AWF sandbox (sandbox.agent.id: awf). Query execution is independent from the primary agent sandbox, and every query runs in a fresh backend-specific sandbox.",
+                  "additionalProperties": false,
+                  "required": ["private-repos"],
+                  "properties": {
+                    "private-repos": {
+                      "type": "array",
+                      "description": "List of private repositories the agent may query via bounded queries.",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["repo", "sensitivity"],
+                        "properties": {
+                          "repo": {
+                            "type": "string",
+                            "description": "Repository slug in 'owner/repo' format.",
+                            "pattern": "^[^/]+/[^/]+$",
+                            "minLength": 3
+                          },
+                          "sensitivity": {
+                            "type": "string",
+                            "description": "Confidentiality classification for this repository.",
+                            "enum": ["public", "internal", "confidential", "sealed"]
+                          }
+                        }
+                      }
+                    },
+                    "runtime": {
+                      "type": "string",
+                      "description": "Isolated backend used to execute each bounded-query script. Accepted values are docker, gvisor, and sbx. The sbx backend is experimental and capability-gated: AWF performs a fail-closed host preflight and never falls back to docker or gvisor. Current Docker Sandboxes v0.37.1 hosts do not provide all mandatory controls, so AWF rejects them unless the required capabilities become available. When omitted AWF uses its default.",
+                      "enum": ["docker", "gvisor", "sbx"]
+                    },
+                    "timeout": {
+                      "type": "integer",
+                      "description": "Maximum execution time in seconds for a single bounded-query invocation. When omitted AWF uses its default.",
+                      "minimum": 1,
+                      "maximum": 540
+                    },
+                    "memory-limit": {
+                      "type": "string",
+                      "description": "Memory limit for bounded-query container execution (e.g. \"512m\", \"2g\"). When omitted AWF uses its default.",
+                      "pattern": "^[1-9][0-9]*[bkmgBKMG]$"
+                    },
+                    "interpreter": {
+                      "type": "string",
+                      "description": "Script interpreter for bounded-query execution. When omitted AWF uses its default.",
+                      "enum": ["python3"]
+                    },
+                    "max-invocations": {
+                      "type": "integer",
+                      "description": "Maximum number of bounded-query invocations allowed per run. When omitted AWF uses its default.",
+                      "minimum": 1,
+                      "maximum": 10000
+                    }
+                  }
                 }
               },
               "additionalProperties": false,
@@ -4364,7 +4647,7 @@
                 },
                 "mode": {
                   "type": "string",
-                  "description": "Integration mode: 'cli' (recommended) installs @playwright/cli via npm for token-efficient CLI invocations — use playwright-cli commands in bash and localhost to reach local servers; 'mcp' (deprecated) runs a Docker-based MCP server.",
+                  "description": "Integration mode: 'cli' (recommended) installs @playwright/cli via npm for token-efficient CLI invocations \u2014 use playwright-cli commands in bash and localhost to reach local servers; 'mcp' (deprecated) runs a Docker-based MCP server.",
                   "enum": ["cli", "mcp"]
                 }
               },
@@ -4431,6 +4714,25 @@
                     "type": "string"
                   },
                   "description": "List of allowed file extensions (e.g., [\".json\", \".txt\"]). Default: [\".json\", \".jsonl\", \".txt\", \".md\", \".csv\"]"
+                },
+                "validation": {
+                  "type": "object",
+                  "properties": {
+                    "script": {
+                      "type": "string",
+                      "description": "JavaScript validator body that runs over the complete cache-memory directory before persistence. Throw, return false, or exit nonzero to reject the update."
+                    },
+                    "timeout-minutes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5,
+                      "default": 1,
+                      "description": "Maximum validator runtime in minutes (default: 1, max: 5)"
+                    }
+                  },
+                  "required": ["script"],
+                  "additionalProperties": false,
+                  "description": "Custom domain validation hook for this cache-memory entry"
                 }
               },
               "additionalProperties": false,
@@ -4484,6 +4786,25 @@
                       "type": "string"
                     },
                     "description": "List of allowed file extensions (e.g., [\".json\", \".txt\"]). Default: [\".json\", \".jsonl\", \".txt\", \".md\", \".csv\"]"
+                  },
+                  "validation": {
+                    "type": "object",
+                    "properties": {
+                      "script": {
+                        "type": "string",
+                        "description": "JavaScript validator body that runs over the complete cache-memory directory before persistence. Throw, return false, or exit nonzero to reject the update."
+                      },
+                      "timeout-minutes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 1,
+                        "description": "Maximum validator runtime in minutes (default: 1, max: 5)"
+                      }
+                    },
+                    "required": ["script"],
+                    "additionalProperties": false,
+                    "description": "Custom domain validation hook for this cache-memory entry"
                   }
                 },
                 "required": ["id", "key"],
@@ -4571,13 +4892,17 @@
                   "description": "Controls whether AI-generated footer is added to the managed comment. Defaults to true."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for comment-memory operations. Overrides global github-token if specified."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -4736,6 +5061,25 @@
                 "format-json": {
                   "type": "boolean",
                   "description": "When true, all .json files are pretty-printed (2-space indent) before being committed, making them human-readable in the repository (default: false)"
+                },
+                "validation": {
+                  "type": "object",
+                  "properties": {
+                    "script": {
+                      "type": "string",
+                      "description": "JavaScript validator body that runs over the complete repo-memory directory after optional JSON formatting and before persistence. Throw, return false, or exit nonzero to reject the update."
+                    },
+                    "timeout-minutes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 5,
+                      "default": 1,
+                      "description": "Maximum validator runtime in minutes (default: 1, max: 5)"
+                    }
+                  },
+                  "required": ["script"],
+                  "additionalProperties": false,
+                  "description": "Custom domain validation hook for this repo-memory entry"
                 }
               },
               "additionalProperties": false,
@@ -4831,6 +5175,25 @@
                   "format-json": {
                     "type": "boolean",
                     "description": "When true, all .json files are pretty-printed (2-space indent) before being committed, making them human-readable in the repository (default: false)"
+                  },
+                  "validation": {
+                    "type": "object",
+                    "properties": {
+                      "script": {
+                        "type": "string",
+                        "description": "JavaScript validator body that runs over the complete repo-memory directory after optional JSON formatting and before persistence. Throw, return false, or exit nonzero to reject the update."
+                      },
+                      "timeout-minutes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 1,
+                        "description": "Maximum validator runtime in minutes (default: 1, max: 5)"
+                      }
+                    },
+                    "required": ["script"],
+                    "additionalProperties": false,
+                    "description": "Custom domain validation hook for this repo-memory entry"
                   }
                 },
                 "additionalProperties": false
@@ -4875,7 +5238,7 @@
     },
     "lsp": {
       "type": "object",
-      "description": "⚠️ Experimental. Top-level Language Server Protocol (LSP) configuration for Copilot CLI. Each key is a language identifier and each value defines the server command, args, and file extension mappings. Using this field emits a compile-time warning.",
+      "description": "\u26a0\ufe0f Experimental. Top-level Language Server Protocol (LSP) configuration for Copilot CLI. Each key is a language identifier and each value defines the server command, args, and file extension mappings. Using this field emits a compile-time warning.",
       "patternProperties": {
         "^[a-zA-Z0-9_-]+$": {
           "type": "object",
@@ -5056,7 +5419,7 @@
     },
     "safe-outputs": {
       "type": "object",
-      "$comment": "Required if workflow creates or modifies GitHub resources. Operations requiring safe-outputs: autofix-code-scanning-alert, add-comment, add-labels, add-reviewer, assign-milestone, assign-to-agent, assign-to-user, close-discussion, close-issue, close-pull-request, create-agent-session, create-agent-task (deprecated, use create-agent-session), create-check-run, create-code-scanning-alert, create-discussion, create-issue, create-project, create-project-status-update, create-pull-request, create-pull-request-review-comment, dispatch-workflow, hide-comment, link-sub-issue, mark-pull-request-as-ready-for-review, merge-pull-request, missing-data, missing-tool, noop, push-to-pull-request-branch, remove-labels, reply-to-pull-request-review-comment, resolve-pull-request-review-thread, set-issue-field, set-issue-type, submit-pull-request-review, threat-detection, unassign-from-user, update-discussion, update-issue, update-project, update-pull-request, update-release, upload-artifact, upload-asset. See documentation for complete details.",
+      "$comment": "Required if workflow creates or modifies GitHub resources. Operations requiring safe-outputs: approve-workflow-run, autofix-code-scanning-alert, add-comment, add-labels, add-reviewer, assign-milestone, assign-to-agent, assign-to-user, close-discussion, close-issue, close-pull-request, create-agent-session, create-agent-task (deprecated, use create-agent-session), create-check-run, create-code-scanning-alert, create-discussion, create-issue, create-project, create-project-status-update, create-pull-request, create-pull-request-review-comment, dispatch-workflow, hide-comment, link-sub-issue, mark-pull-request-as-ready-for-review, merge-pull-request, missing-data, missing-tool, noop, push-to-pull-request-branch, remove-labels, reply-to-pull-request-review-comment, resolve-pull-request-review-thread, set-issue-field, set-issue-type, submit-pull-request-review, threat-detection, unassign-from-user, update-discussion, update-issue, update-project, update-pull-request, update-release, upload-artifact, upload-asset. See documentation for complete details.",
       "description": "Safe output processing configuration that automatically creates GitHub issues, comments, and pull requests from AI workflow output without requiring write permissions in the main job",
       "examples": [
         {
@@ -5089,6 +5452,23 @@
             "type": "string"
           }
         },
+        "data": {
+          "description": "Structured data configuration for body-based safe outputs. Set false (or omit) to disable data, true to allow any object data, provide an inline schema object to enforce shape, or provide a GitHub Actions expression string that resolves to one of those forms at runtime.",
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "additionalProperties": true
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{\\{.*\\}\\}$",
+              "description": "GitHub Actions expression resolving to false, true, or a JSON object schema at runtime"
+            }
+          ]
+        },
         "allowed-github-references": {
           "type": "array",
           "description": "List of allowed repositories for GitHub references (e.g., #123 or owner/repo#456). Use 'repo' to allow current repository. References to other repositories will be escaped with backticks. If not specified, all references are allowed.",
@@ -5106,6 +5486,10 @@
                 "title-prefix": {
                   "type": "string",
                   "description": "Optional prefix to add to the beginning of the issue title (e.g., '[ai] ' or '[analysis] ')"
+                },
+                "require-temporary-id": {
+                  "type": "boolean",
+                  "description": "Require create_issue tool calls to include a temporary_id."
                 },
                 "labels": {
                   "type": "array",
@@ -5165,7 +5549,7 @@
                       "$ref": "#/$defs/templatable_bool_or_int"
                     }
                   ],
-                  "description": "Title-based deduplication for create-issue. Set to true for exact title matching, or provide a non-negative integer (0–100) to deduplicate by Levenshtein edit distance (e.g., 1 allows one-character differences). Accepts a GitHub Actions expression that resolves to a boolean or integer at runtime. Applies within-run and against open/recently-closed repository issues."
+                  "description": "Title-based deduplication for create-issue. Set to true for exact title matching, or provide a non-negative integer (0\u2013100) to deduplicate by Levenshtein edit distance (e.g., 1 allows one-character differences). Accepts a GitHub Actions expression that resolves to a boolean or integer at runtime. Applies within-run and against open/recently-closed repository issues."
                 },
                 "target-repo": {
                   "type": "string",
@@ -5225,13 +5609,17 @@
                   "default": true
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -5251,8 +5639,12 @@
                 },
                 "normalize-closing-keywords": {
                   "type": "boolean",
-                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` → Closes #1) in body fields for this output type.",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
                   "examples": [true, false]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -5324,13 +5716,17 @@
                   "description": "List of additional repositories in format 'owner/repo' that agent sessions can be created in. When specified, the agent can use a 'repo' field in the output to specify which repository to create the agent session in. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -5347,6 +5743,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -5395,7 +5795,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that agent sessions can be created in. When specified, the agent can use a 'repo' field in the output to specify which repository to create the agent session in. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -5418,6 +5818,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -5452,7 +5856,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "project": {
@@ -5575,6 +5979,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -5617,7 +6025,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Must have Projects write permission. Overrides global github-token if specified."
                 },
                 "target-owner": {
@@ -5711,6 +6119,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -5748,7 +6160,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified. Must have Projects: Read+Write permission."
                 },
                 "project": {
@@ -5777,6 +6189,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -5904,7 +6320,7 @@
                   "description": "Time until the discussion expires and should be automatically closed. Supports integer (days), relative time format like '2h' (2 hours), '7d' (7 days), '2w' (2 weeks), '1m' (1 month), '1y' (1 year), or false to disable expiration. Minimum duration: 2 hours. When set, a maintenance workflow will be generated. Defaults to 7 days if not specified."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -5927,6 +6343,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -6022,6 +6442,14 @@
                     "type": "string"
                   },
                   "description": "List of additional repositories in format 'owner/repo' that discussions can be closed in. The target repository is always implicitly allowed."
+                },
+                "github-token": {
+                  "$ref": "#/$defs/github_token_same_job",
+                  "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
@@ -6145,8 +6573,12 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -6211,10 +6643,22 @@
                   },
                   "description": "List of additional repositories in format 'owner/repo' that issues can be closed in. When specified, the agent can use a 'repo' field in the output to specify which repository to close the issue in. The target repository (current or target-repo) is always implicitly allowed."
                 },
+                "github-token": {
+                  "$ref": "#/$defs/github_token_same_job",
+                  "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
+                },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -6233,10 +6677,24 @@
                   ]
                 },
                 "state-reason": {
-                  "type": "string",
-                  "enum": ["completed", "not_planned", "duplicate"],
-                  "default": "completed",
-                  "description": "Reason for closing the issue (default: completed)"
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "enum": ["completed", "not_planned", "duplicate"],
+                      "description": "Fixed reason for closing the issue; the agent cannot override this value."
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": ["completed", "not_planned", "duplicate"]
+                      },
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "description": "Restricted subset of allowed reasons; the agent may choose from this list at runtime."
+                    }
+                  ],
+                  "description": "Reason for closing the issue. Scalar: fixed reason (default: completed). Array: agent selects from the listed subset at runtime."
                 }
               },
               "additionalProperties": false,
@@ -6311,7 +6769,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that pull requests can be closed in. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -6334,6 +6792,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -6408,7 +6870,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that pull requests can be marked as ready in. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -6431,6 +6893,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -6450,6 +6916,113 @@
             }
           ],
           "description": "Enable AI agents to mark draft pull requests as ready for review when criteria are met."
+        },
+        "approve-workflow-run": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Configuration for approving workflow runs that are awaiting required approval.",
+              "properties": {
+                "max": {
+                  "description": "Maximum number of workflow runs to approve (default: 1). Supports an integer or GitHub Actions expression.",
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$",
+                      "description": "GitHub Actions expression that resolves to an integer at runtime"
+                    }
+                  ]
+                },
+                "fork": {
+                  "type": "boolean",
+                  "description": "Allow approval of workflow runs associated with fork pull requests. Defaults to false."
+                },
+                "comment": {
+                  "type": "boolean",
+                  "description": "Post a comment on the pull request associated with the approved workflow run announcing that the run has started. Defaults to true; set to false to disable."
+                },
+                "allowed-pull-requests": {
+                  "description": "Additional pull request numbers whose pending workflow runs may be approved. The triggering pull request is always allowed. Supports a list of strings or a GitHub Actions expression that resolves to a list.",
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$",
+                      "description": "GitHub Actions expression that resolves to a list of pull request numbers at runtime"
+                    }
+                  ]
+                },
+                "allowed-workflows": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": "Required workflow filename patterns allowed for approval. Patterns support wildcards and treat .yml and .yaml as equivalent."
+                },
+                "protected-files": {
+                  "type": "object",
+                  "description": "Protected files prevent workflow run approval when modified by the associated pull request. Use exclude to remove filenames or path prefixes from the default protected set.",
+                  "properties": {
+                    "exclude": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "github-token": {
+                  "$ref": "#/$defs/github_token_same_job",
+                  "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "staged": {
+                  "$ref": "#/$defs/templatable_boolean",
+                  "description": "When true, preview the approval without making the GitHub API call.",
+                  "examples": [true, false]
+                },
+                "samples": {
+                  "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler.",
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
+                }
+              },
+              "required": ["allowed-workflows"],
+              "additionalProperties": false
+            },
+            {
+              "type": "null",
+              "description": "Enable workflow run approval with default configuration"
+            }
+          ],
+          "description": "Enable AI agents to approve pending workflow runs in the action required state."
         },
         "add-comment": {
           "oneOf": [
@@ -6522,6 +7095,20 @@
                     }
                   ]
                 },
+                "allows-comment-ids": {
+                  "type": "array",
+                  "description": "Trusted allowlist of issue or pull request comment IDs the agent may update when target is '*'.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hide-older-comments-match": {
+                  "type": "array",
+                  "description": "Exact workflow IDs whose older comments are eligible to be hidden.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "allowed-reasons": {
                   "type": "array",
                   "description": "List of allowed reasons for hiding older comments when hide-older-comments is enabled. Default: all reasons allowed (spam, abuse, off_topic, outdated, resolved, low_quality).",
@@ -6548,7 +7135,7 @@
                   "default": true
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "required-labels": {
@@ -6587,8 +7174,12 @@
                 },
                 "normalize-closing-keywords": {
                   "type": "boolean",
-                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` → Closes #1) in body fields for this output type.",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
                   "examples": [true, false]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -6634,6 +7225,15 @@
                 "branch-prefix": {
                   "type": "string",
                   "description": "Optional prefix to prepend to the pull request branch name (e.g. \"signed/\"). Applied before the agent-specified or auto-generated branch name."
+                },
+                "require-temporary-id": {
+                  "type": "boolean",
+                  "description": "Require create_pull_request tool calls to include a temporary_id."
+                },
+                "pre-create": {
+                  "type": "boolean",
+                  "description": "\u26a0\ufe0f Experimental. Pre-create a draft pull request during activation, check out its branch in the agent job, and reuse it when processing create_pull_request output. This value is compile-time only and cannot be templated. Using this field emits a compile-time warning.",
+                  "default": false
                 },
                 "title-prefix": {
                   "type": "string",
@@ -6740,6 +7340,10 @@
                   "type": "string",
                   "description": "Target repository in format 'owner/repo' for cross-repository pull request creation, or '*' to let the agent choose the target repository at runtime (requires checkout: configs with path: for each possible target). Takes precedence over trial target repo settings."
                 },
+                "head-repo": {
+                  "type": "string",
+                  "description": "Optional fork or head repository in format 'owner/repo' where the pull request branch is pushed. When set, the pull request is still created in target-repo but uses an owner-qualified head."
+                },
                 "allowed-repos": {
                   "description": "List of additional repositories in format 'owner/repo' that pull requests can be created in. When specified, the agent can use a 'repo' field in the output to specify which repository to create the pull request in. The target repository (current or target-repo) is always implicitly allowed. Accepts an array or a GitHub Actions expression resolving to a comma-separated list (e.g. '${{ inputs[\\'allowed-repos\\'] }}').",
                   "oneOf": [
@@ -6758,8 +7362,16 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "head-github-token": {
+                  "$ref": "#/$defs/github_token_same_job",
+                  "description": "Optional GitHub token used only for branch writes to head-repo. Use this when the upstream PR repository and the fork head repository require different credentials."
+                },
+                "head-github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "Optional GitHub App credentials to mint an ephemeral token for head-repo branch writes at runtime. When configured, the minted token takes precedence over head-github-token. The app installation must have contents: write on head-repo."
                 },
                 "expires": {
                   "oneOf": [
@@ -6777,9 +7389,22 @@
                   "description": "Time until the pull request expires and should be automatically closed (only for same-repo PRs without target-repo). Supports integer (days) or relative time format. Minimum duration: 2 hours."
                 },
                 "auto-merge": {
-                  "type": "boolean",
-                  "description": "Enable auto-merge for the pull request. When enabled, the PR will be automatically merged once all required checks pass and required approvals are met. Defaults to false.",
-                  "default": false
+                  "description": "Enable auto-merge for the pull request. Accepts true/false, an explicit merge method (squash, merge, rebase), or a GitHub Actions expression resolving to any of those values. When enabled, the PR will be automatically merged once all required checks pass and required approvals are met. Defaults to false.",
+                  "default": false,
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "string",
+                      "enum": ["squash", "merge", "rebase"]
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$",
+                      "description": "GitHub Actions expression resolving to false, true, or a merge method string"
+                    }
+                  ]
                 },
                 "base-branch": {
                   "type": "string",
@@ -6818,6 +7443,11 @@
                       "description": "GitHub Actions expression resolving to a comma-separated list of base branch patterns (e.g. '${{ inputs[\\'allowed-base-branches\\'] }}')"
                     }
                   ]
+                },
+                "stacked": {
+                  "type": "boolean",
+                  "description": "Controls whether stacked pull requests (pull requests whose base branch is another pull request branch created by the same run) are allowed. Defaults to true. Set to false on GitHub Enterprise Server or other instances without stacked pull request support: create_pull_request outputs requesting a non-default base branch are then rejected with an explanatory error.",
+                  "default": true
                 },
                 "max-patch-size": {
                   "type": "integer",
@@ -6879,7 +7509,7 @@
                     {
                       "type": "string",
                       "pattern": "^\\$\\{\\{.*\\}\\}$",
-                      "description": "GitHub Actions expression that resolves to 'blocked', 'allowed', 'fallback-to-issue', or 'request_review' at runtime. Use in reusable workflow_call workflows to parameterise the policy per caller."
+                      "description": "GitHub Actions expression that resolves to 'blocked', 'allowed', 'fallback-to-issue', or 'request_review' at runtime. Use in reusable workflow_call workflows to parameterize the policy per caller."
                     },
                     {
                       "type": "object",
@@ -6912,14 +7542,14 @@
                       "description": "Object form for granular control over the protected-file set. Use the exclude list to remove specific files from the default protection while keeping the rest."
                     }
                   ],
-                  "description": "Controls protected-file protection. String form: request_review (default), blocked, allowed, or fallback-to-issue — or a GitHub Actions expression for reusable workflows. Object form: { policy, exclude } to customise the protected-file set."
+                  "description": "Controls protected-file protection. String form: request_review (default), blocked, allowed, or fallback-to-issue \u2014 or a GitHub Actions expression for reusable workflows. Object form: { policy, exclude } to customize the protected-file set."
                 },
                 "allowed-files": {
                   "type": "array",
                   "items": {
                     "type": "string"
                   },
-                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern — files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
+                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern \u2014 files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
                 },
                 "preserve-branch-name": {
                   "type": "boolean",
@@ -6949,7 +7579,7 @@
                     {
                       "type": "string",
                       "pattern": "^\\$\\{\\{.*\\}\\}$",
-                      "description": "GitHub Actions expression that resolves to 'am' or 'bundle' at runtime. Use in reusable workflow_call workflows to parameterise the transport format per caller."
+                      "description": "GitHub Actions expression that resolves to 'am' or 'bundle' at runtime. Use in reusable workflow_call workflows to parameterize the transport format per caller."
                     }
                   ],
                   "description": "Transport format for packaging changes. \"bundle\" (default) uses git bundle. \"am\" uses git format-patch/git am. Accepts a GitHub Actions expression for reusable workflows."
@@ -6988,8 +7618,12 @@
                 },
                 "normalize-closing-keywords": {
                   "type": "boolean",
-                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` → Closes #1) in body fields for this output type.",
+                  "description": "When true, strip backticks from recognized issue-closing keywords (e.g. `Closes #1` \u2192 Closes #1) in body fields for this output type.",
                   "examples": [true, false]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false,
@@ -7056,7 +7690,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that PR review comments can be created in. When specified, the agent can use a 'repo' field in the output to specify which repository to create the review comment in. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7090,6 +7724,14 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "commit-id": {
+                  "type": "string",
+                  "description": "Pin the review to this specific commit SHA. When set, the review is attributed to this commit instead of the current PR head. GitHub will mark the review as outdated if the PR head has since moved."
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7165,7 +7807,7 @@
                   "description": "When true, after posting a replacement review this workflow dismisses older REQUEST_CHANGES reviews previously posted by the same workflow on the same pull request. This is best-effort and requires workflow markers in prior review bodies."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7199,6 +7841,14 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "commit-id": {
+                  "type": "string",
+                  "description": "Pin the review to this specific commit SHA. When set, the review is attributed to this commit instead of the current PR head. GitHub will mark the review as outdated if the PR head has since moved."
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7247,7 +7897,7 @@
                   "description": "List of additional repositories in format 'owner/repo' where review dismissals are allowed. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7281,6 +7931,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7337,7 +7991,7 @@
                   "default": true
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7371,6 +8025,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7419,7 +8077,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that PR review threads can be resolved in. When specified, the agent can use a 'repo' field in the output to specify which repository to resolve threads in. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7453,6 +8111,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7489,7 +8151,7 @@
                   "description": "Driver name for SARIF tool.driver.name field (default: 'GitHub Agentic Workflows Security Scanner')"
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "target-repo": {
@@ -7523,6 +8185,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7555,7 +8221,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7578,6 +8244,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7599,6 +8269,10 @@
                   "type": "string",
                   "description": "Check run name shown in the GitHub Checks UI (e.g., 'Security Analysis'). If omitted, defaults to the workflow name."
                 },
+                "target": {
+                  "type": "string",
+                  "description": "Target pull request for check run attachment: 'triggering', '*' (any PR), or explicit PR number"
+                },
                 "max": {
                   "description": "Maximum number of check runs to create per workflow run (default: 1). Supports integer or GitHub Actions expression (e.g. '${{ inputs.max }}').",
                   "oneOf": [
@@ -7614,7 +8288,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7711,6 +8385,14 @@
                     }
                   ]
                 },
+                "issues": {
+                  "type": "boolean",
+                  "description": "When false, excludes issues:write from the minted GitHub App token for add-labels. Default (omitted or true) includes issues:write."
+                },
+                "pull-requests": {
+                  "type": "boolean",
+                  "description": "When false, excludes pull-requests:write from the minted GitHub App token for add-labels. Default (omitted or true) includes pull-requests:write."
+                },
                 "target": {
                   "type": "string",
                   "description": "Target for labels: 'triggering' (default), '*' (any issue/PR), or explicit issue/PR number"
@@ -7720,7 +8402,7 @@
                   "description": "Target repository in format 'owner/repo' for cross-repository label addition. Takes precedence over trial target repo settings."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "allowed-repos": {
@@ -7743,6 +8425,10 @@
                   "type": "string",
                   "description": "Title prefix constraint: the issue/PR title must start with this prefix for the operation to proceed."
                 },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
+                },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
@@ -7763,6 +8449,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7821,7 +8511,7 @@
                   "description": "Target repository in format 'owner/repo' for cross-repository label removal. Takes precedence over trial target repo settings."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "allowed-repos": {
@@ -7864,6 +8554,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -7965,7 +8659,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that reviewers can be added in. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -7999,6 +8693,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8024,6 +8722,10 @@
                   },
                   "minItems": 1,
                   "maxItems": 50
+                },
+                "auto_create": {
+                  "type": "boolean",
+                  "description": "Automatically create missing milestones from the allowed list."
                 },
                 "max": {
                   "description": "Optional maximum number of milestone assignments (default: 1) Supports integer or GitHub Actions expression (e.g. '${{ inputs.max }}').",
@@ -8055,7 +8757,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that milestone assignments can target. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8089,6 +8791,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8179,13 +8885,17 @@
                   "description": "Base branch for pull request creation in the target repository. Defaults to the target repo's default branch. Only relevant when pull-request-repo is configured."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -8202,6 +8912,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8261,7 +8975,7 @@
                   "default": false
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "allowed-repos": {
@@ -8275,6 +8989,10 @@
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub API calls for this specific output type (preview mode)",
                   "examples": [true, false]
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "samples": {
                   "description": "Internal hidden feature. Optional list of declarative sample payloads that exercise this safe-output handler. Used by the hidden `gh aw compile --use-samples` flag to replace the agentic step with a deterministic replay through the safe-outputs MCP server. Each entry should conform to the corresponding MCP tool inputSchema; recognized sidecar keys (currently `patch` for create-pull-request and push-to-pull-request-branch) are stripped before schema validation and consumed by the replay driver.",
@@ -8302,6 +9020,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8363,7 +9085,7 @@
                   "description": "List of allowed repositories in format 'owner/repo' for cross-repository unassignment operations. Use with 'repo' field in tool calls."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8397,6 +9119,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8481,7 +9207,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8504,6 +9230,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8570,7 +9300,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that issues can be updated in. When specified, the agent can use a 'repo' field in the output to specify which repository to update the issue in. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8604,6 +9334,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8636,6 +9370,10 @@
                 "update-branch": {
                   "type": "boolean",
                   "description": "When true, update the pull request branch with the latest base branch changes before applying other updates. Defaults to false."
+                },
+                "sync-stack": {
+                  "type": "boolean",
+                  "description": "When true, allow stacked-PR stack-sync fallback when update-branch is unsupported. Defaults to true. Set to false to disable stacked-PR sync fallback."
                 },
                 "operation": {
                   "type": "string",
@@ -8674,7 +9412,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that pull requests can be updated in. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8708,6 +9446,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8784,7 +9526,7 @@
                   "description": "List of additional repositories in format 'owner/repo' that pull requests can be merged in. The target repository is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8811,6 +9553,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -8847,6 +9593,10 @@
                 "branch": {
                   "type": "string",
                   "description": "The branch to push changes to (defaults to 'triggering')"
+                },
+                "base-branch": {
+                  "type": "string",
+                  "description": "Base branch of the target repository for incremental patch computation. Defaults to the local checkout branch or the repository default branch."
                 },
                 "target": {
                   "type": "string",
@@ -8919,7 +9669,7 @@
                   "maximum": 10240
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -8961,6 +9711,18 @@
                   "type": "string",
                   "description": "Target repository in format 'owner/repo' for cross-repository push to pull request branch, or '*' to let the agent choose the target repository at runtime (requires checkout: configs with path: for each possible target). Takes precedence over trial target repo settings."
                 },
+                "head-repo": {
+                  "type": "string",
+                  "description": "Optional head repository in format 'owner/repo' that is allowed for fork-backed pull request branch updates. When set, the pull request head repository must match exactly."
+                },
+                "head-github-token": {
+                  "$ref": "#/$defs/github_token",
+                  "description": "Optional GitHub token used only for branch writes to head-repo. Use this when the upstream pull request repository and the fork head repository require different credentials."
+                },
+                "head-github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "Optional GitHub App credentials to mint an ephemeral token for head-repo branch writes at runtime. When configured, the minted token takes precedence over head-github-token. The app installation must have contents: write on head-repo."
+                },
                 "allowed-repos": {
                   "description": "List of additional repositories in format 'owner/repo' that push to pull request branch can target. When specified, the agent can use a 'repo' field in the output to specify which repository to push to. The target repository (current or target-repo) is always implicitly allowed. Accepts an array or a GitHub Actions expression resolving to a comma-separated list (e.g. '${{ inputs[\\'allowed-repos\\'] }}').",
                   "oneOf": [
@@ -8989,7 +9751,7 @@
                     {
                       "type": "string",
                       "pattern": "^\\$\\{\\{.*\\}\\}$",
-                      "description": "GitHub Actions expression that resolves to 'blocked', 'allowed', or 'fallback-to-issue' at runtime. Use in reusable workflow_call workflows to parameterise the policy per caller."
+                      "description": "GitHub Actions expression that resolves to 'blocked', 'allowed', or 'fallback-to-issue' at runtime. Use in reusable workflow_call workflows to parameterize the policy per caller."
                     },
                     {
                       "type": "object",
@@ -9022,14 +9784,14 @@
                       "description": "Object form for granular control over the protected-file set. Use the exclude list to remove specific files from the default protection while keeping the rest."
                     }
                   ],
-                  "description": "Controls protected-file protection. String form: blocked (default), allowed, or fallback-to-issue — or a GitHub Actions expression for reusable workflows. Object form: { policy, exclude } to customise the protected-file set."
+                  "description": "Controls protected-file protection. String form: blocked (default), allowed, or fallback-to-issue \u2014 or a GitHub Actions expression for reusable workflows. Object form: { policy, exclude } to customize the protected-file set."
                 },
                 "allowed-files": {
                   "type": "array",
                   "items": {
                     "type": "string"
                   },
-                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern — files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
+                  "description": "Exclusive allowlist of glob patterns. When set, every file in the patch must match at least one pattern \u2014 files outside the list are always refused, including normal source files. This is a restriction, not an exception: setting allowed-files: [\".github/workflows/*\"] blocks all other files. To allow multiple sets of files, list all patterns explicitly. Acts independently of the protected-files policy; both checks must pass. To modify a protected file, it must both match allowed-files and be permitted by protected-files (e.g. protected-files: allowed). Supports * (any characters except /) and ** (any characters including /)."
                 },
                 "excluded-files": {
                   "type": "array",
@@ -9049,7 +9811,7 @@
                     {
                       "type": "string",
                       "pattern": "^\\$\\{\\{.*\\}\\}$",
-                      "description": "GitHub Actions expression that resolves to 'am' or 'bundle' at runtime. Use in reusable workflow_call workflows to parameterise the transport format per caller."
+                      "description": "GitHub Actions expression that resolves to 'am' or 'bundle' at runtime. Use in reusable workflow_call workflows to parameterize the transport format per caller."
                     }
                   ],
                   "description": "Transport format for packaging changes. \"bundle\" (default) uses git bundle. \"am\" uses git format-patch/git am. Accepts a GitHub Actions expression for reusable workflows."
@@ -9064,6 +9826,10 @@
                   "type": "boolean",
                   "description": "When false, skips the branch protection API pre-flight check before pushing. Set to false to avoid requiring administration: read permission. The GitHub platform will still enforce branch protection at push time. Default is true (check enabled).",
                   "default": true
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9121,7 +9887,7 @@
                 },
                 "discussions": {
                   "type": "boolean",
-                  "description": "Controls whether the workflow requests discussions:write permission for hide-comment. Default: true (includes discussions:write). Set to false if your GitHub App lacks Discussions permission to prevent 422 errors during token generation."
+                  "description": "Controls whether the workflow requests discussions:write permission for hide-comment. Default: false (excludes discussions:write). Set to true if you need to hide comments on discussions."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
@@ -9210,8 +9976,16 @@
                   "description": "List of additional repositories in format 'owner/repo' where issue types can be set. When specified, the agent can use a 'repo' field in the output to specify which repository to target. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "head-github-token": {
+                  "$ref": "#/$defs/github_token_same_job",
+                  "description": "Optional GitHub token used only for branch writes to head-repo. Use this when the upstream pull request repository and the fork head repository require different credentials."
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
@@ -9244,6 +10018,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9298,8 +10076,12 @@
                   "description": "List of additional repositories in format 'owner/repo' where issue fields can be updated. When specified, the agent can use a 'repo' field in the output to specify which repository to target. The target repository (current or target-repo) is always implicitly allowed."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
+                },
+                "issue-intent": {
+                  "type": "boolean",
+                  "description": "Enable issue-intent metadata support (rationale/confidence/suggest) for this output type."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
@@ -9332,6 +10114,10 @@
                 "required-title-prefix": {
                   "type": "string",
                   "description": "The target item's title must start with this prefix for this operation to proceed"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9372,7 +10158,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for dispatching workflows. Overrides global github-token if specified."
                 },
                 "target-repo": {
@@ -9392,6 +10178,22 @@
                       "type": "string",
                       "pattern": "^\\$\\{\\{.*\\}\\}$",
                       "description": "GitHub Actions expression resolving to a comma-separated list of repository slugs (e.g. '${{ inputs['allowed-repos'] }}')"
+                    }
+                  ]
+                },
+                "allowed-refs": {
+                  "description": "List of allowed ref glob patterns for per-call dispatch_workflow message.ref overrides. Supports arrays and GitHub Actions expressions resolving to a comma-separated list (e.g. '${{ inputs['allowed-refs'] }}').",
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\$\\{\\{.*\\}\\}$",
+                      "description": "GitHub Actions expression resolving to a comma-separated list of ref glob patterns (e.g. '${{ inputs['allowed-refs'] }}')"
                     }
                   ]
                 },
@@ -9419,6 +10221,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "required": ["workflows"],
@@ -9524,13 +10330,17 @@
                 ]
               },
               "github-token": {
-                "$ref": "#/$defs/github_token",
+                "$ref": "#/$defs/github_token_same_job",
                 "description": "GitHub token to use for dispatching. Overrides global github-token if specified."
               },
               "staged": {
                 "$ref": "#/$defs/templatable_boolean",
                 "description": "When true, emit step summary messages instead of making GitHub API calls (preview mode)",
                 "examples": [true, false]
+              },
+              "github-app": {
+                "$ref": "#/$defs/github_app",
+                "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
               }
             },
             "required": ["workflow", "event_type"],
@@ -9574,7 +10384,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token passed to called workflows. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -9597,6 +10407,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "required": ["workflows"],
@@ -9654,7 +10468,7 @@
                   "default": []
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -9677,6 +10491,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9732,7 +10550,7 @@
                   "default": []
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -9755,6 +10573,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9793,7 +10615,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "report-as-issue": {
@@ -9821,6 +10643,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -9879,7 +10705,7 @@
                   ]
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -9902,6 +10728,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -10000,13 +10830,17 @@
                   "additionalProperties": false
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true, emit step summary messages instead of making GitHub Actions artifact uploads (preview mode)",
                   "examples": [true, false]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -10098,7 +10932,7 @@
           "additionalProperties": false
         },
         "github-token": {
-          "$ref": "#/$defs/github_token",
+          "$ref": "#/$defs/github_token_same_job",
           "description": "GitHub token to use for safe output jobs. Typically a secret reference like ${{ secrets.GITHUB_TOKEN }} or ${{ secrets.CUSTOM_PAT }}",
           "examples": ["${{ secrets.GITHUB_TOKEN }}", "${{ secrets.CUSTOM_PAT }}", "${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}"]
         },
@@ -10155,6 +10989,14 @@
                     }
                   ]
                 },
+                "engine-config": {
+                  "$ref": "#/$defs/engine_config",
+                  "description": "Extended engine configuration for threat detection."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model override for threat detection engine execution."
+                },
                 "steps": {
                   "type": "array",
                   "description": "Array of extra job steps to run before engine execution",
@@ -10185,6 +11027,10 @@
                     }
                   ]
                 },
+                "environment": {
+                  "type": "string",
+                  "description": "GitHub Actions environment override for the detection job."
+                },
                 "continue-on-error": {
                   "$ref": "#/$defs/templatable_boolean",
                   "description": "When true (default), detection failures produce warnings and allow safe outputs to proceed with a caution notice and 'needs-review' label. When false, detection failures block safe outputs entirely. Accepts a boolean literal or a GitHub Actions expression."
@@ -10212,16 +11058,14 @@
                   "description": "Description of the safe-job (used in MCP tool registration)"
                 },
                 "runs-on": {
-                  "description": "Runner specification for this job",
-                  "oneOf": [
+                  "$ref": "#/$defs/github_actions_runs_on",
+                  "description": "Runner specification for this job. Supports string, array, or runner-group object forms. Defaults to 'ubuntu-latest'.",
+                  "examples": [
+                    "ubuntu-latest",
+                    ["self-hosted", "linux", "x64"],
                     {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
+                      "group": "larger-runners",
+                      "labels": ["ubuntu-latest-8-cores"]
                     }
                   ]
                 },
@@ -10257,7 +11101,7 @@
                   "$ref": "#/properties/permissions"
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token for this specific job"
                 },
                 "output": {
@@ -10327,23 +11171,13 @@
                     "$ref": "#/$defs/githubActionsStep"
                   }
                 },
-                "runner": {
-                  "description": "Runner specification for this job (alias for runs-on)",
-                  "oneOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  ]
-                },
                 "agent-output": {
                   "type": "string",
                   "description": "Agent output field to use as input for this safe job (alias for output)"
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -10353,7 +11187,7 @@
         },
         "scripts": {
           "type": "object",
-          "description": "Inline JavaScript script handlers that run inside the consolidated safe-outputs job handler loop. Unlike 'jobs' (which create separate GitHub Actions jobs), scripts execute in-process alongside the built-in handlers. Users write only the body of the main function — the compiler wraps it with 'async function main(config = {}) { ... }' and 'module.exports = { main };' automatically. Script names containing dashes will be automatically normalized to underscores (e.g., 'post-slack-message' becomes 'post_slack_message').",
+          "description": "Inline JavaScript script handlers that run inside the consolidated safe-outputs job handler loop. Unlike 'jobs' (which create separate GitHub Actions jobs), scripts execute in-process alongside the built-in handlers. Users write only the body of the main function \u2014 the compiler wraps it with 'async function main(config = {}) { ... }' and 'module.exports = { main };' automatically. Script names containing dashes will be automatically normalized to underscores (e.g., 'post-slack-message' becomes 'post_slack_message').",
           "patternProperties": {
             "^[a-zA-Z_][a-zA-Z0-9_-]*$": {
               "type": "object",
@@ -10411,7 +11245,7 @@
                 },
                 "script": {
                   "type": "string",
-                  "description": "JavaScript handler body. Write only the code that runs inside the handler for each item — the compiler generates the full outer wrapper including config input destructuring (`const { channel, message } = config;`) and the handler function (`return async function handleX(item, resolvedTemporaryIds) { ... }`). The body has access to `item` (runtime message with input values), `resolvedTemporaryIds` (map of temporary IDs), and config-destructured local variables for each declared input."
+                  "description": "JavaScript handler body. Write only the code that runs inside the handler for each item \u2014 the compiler generates the full outer wrapper including config input destructuring (`const { channel, message } = config;`) and the handler function (`return async function handleX(item, resolvedTemporaryIds) { ... }`). The body has access to `item` (runtime message with input values), `resolvedTemporaryIds` (map of temporary IDs), and config-destructured local variables for each declared input."
                 }
               },
               "required": ["script"],
@@ -10446,8 +11280,8 @@
             },
             "staged-title": {
               "type": "string",
-              "description": "Custom title template for staged mode preview. Available placeholders: {operation}. Example: '🎭 Preview: {operation}'",
-              "examples": ["🎭 Preview: {operation}", "## Staged Mode: {operation}"]
+              "description": "Custom title template for staged mode preview. Available placeholders: {operation}. Example: '\ud83c\udfad Preview: {operation}'",
+              "examples": ["\ud83c\udfad Preview: {operation}", "## Staged Mode: {operation}"]
             },
             "staged-description": {
               "type": "string",
@@ -10461,18 +11295,18 @@
             },
             "run-success": {
               "type": "string",
-              "description": "Custom message template for successful workflow completion. Available placeholders: {workflow_name}, {run_url}. Default: '✅ Agentic [{workflow_name}]({run_url}) completed successfully.'",
-              "examples": ["✅ Agentic [{workflow_name}]({run_url}) completed successfully.", "✅ [{workflow_name}]({run_url}) finished."]
+              "description": "Custom message template for successful workflow completion. Available placeholders: {workflow_name}, {run_url}. Default: '\u2705 Agentic [{workflow_name}]({run_url}) completed successfully.'",
+              "examples": ["\u2705 Agentic [{workflow_name}]({run_url}) completed successfully.", "\u2705 [{workflow_name}]({run_url}) finished."]
             },
             "run-failure": {
               "type": "string",
-              "description": "Custom message template for failed workflow. Available placeholders: {workflow_name}, {run_url}, {status}. Default: '❌ Agentic [{workflow_name}]({run_url}) {status} and wasn't able to produce a result.'",
-              "examples": ["❌ Agentic [{workflow_name}]({run_url}) {status} and wasn't able to produce a result.", "❌ [{workflow_name}]({run_url}) {status}."]
+              "description": "Custom message template for failed workflow. Available placeholders: {workflow_name}, {run_url}, {status}. Default: '\u274c Agentic [{workflow_name}]({run_url}) {status} and wasn't able to produce a result.'",
+              "examples": ["\u274c Agentic [{workflow_name}]({run_url}) {status} and wasn't able to produce a result.", "\u274c [{workflow_name}]({run_url}) {status}."]
             },
             "detection-failure": {
               "type": "string",
-              "description": "Custom message template for detection job failure. Available placeholders: {workflow_name}, {run_url}. Default: '⚠️ Security scanning failed for [{workflow_name}]({run_url}). Review the logs for details.'",
-              "examples": ["⚠️ Security scanning failed for [{workflow_name}]({run_url}). Review the logs for details.", "⚠️ Detection job failed in [{workflow_name}]({run_url})."]
+              "description": "Custom message template for detection job failure. Available placeholders: {workflow_name}, {run_url}. Default: '\u26a0\ufe0f Security scanning failed for [{workflow_name}]({run_url}). Review the logs for details.'",
+              "examples": ["\u26a0\ufe0f Security scanning failed for [{workflow_name}]({run_url}). Review the logs for details.", "\u26a0\ufe0f Detection job failed in [{workflow_name}]({run_url})."]
             },
             "agent-failure-issue": {
               "type": "string",
@@ -10502,7 +11336,7 @@
             "body-header": {
               "type": "string",
               "description": "Custom header text prepended to every message body generated by safe outputs (issues, comments, pull requests, discussions). Applied after any threat-detection caution alert and before the agent-generated content. Available placeholders: {workflow_name}, {run_url}.",
-              "examples": ["> ⚠️ This content was generated by [{workflow_name}]({run_url}).", "> 🤖 AI-generated output — please review before acting."]
+              "examples": ["> \u26a0\ufe0f This content was generated by [{workflow_name}]({run_url}).", "> \ud83e\udd16 AI-generated output \u2014 please review before acting."]
             },
             "disclosure-header": {
               "oneOf": [
@@ -10513,10 +11347,10 @@
                 {
                   "type": "string",
                   "description": "Custom AI authorship disclosure header prepended to every message body. Available placeholders: {workflow_name}, {run_url}.",
-                  "examples": ["> 🤖 This content was generated by [{workflow_name}]({run_url}) and was not written by the account owner."]
+                  "examples": ["> \ud83e\udd16 This content was generated by [{workflow_name}]({run_url}) and was not written by the account owner."]
                 }
               ],
-              "description": "AI authorship disclosure header prepended to every message body. Set to true for built-in default text, or provide a custom template string. Insertion order from top to bottom: threat-detection caution alert (if any) → disclosure-header → body-header → agent-generated content. Available placeholders: {workflow_name}, {run_url}."
+              "description": "AI authorship disclosure header prepended to every message body. Set to true for built-in default text, or provide a custom template string. Insertion order from top to bottom: threat-detection caution alert (if any) \u2192 disclosure-header \u2192 body-header \u2192 agent-generated content. Available placeholders: {workflow_name}, {run_url}."
             },
             "append-only-comments": {
               "type": "boolean",
@@ -10563,7 +11397,7 @@
                 },
                 "allowed-teams": {
                   "type": "array",
-                  "description": "List of team slugs whose members are always allowed to be mentioned. Accepts 'team-slug' (resolved against the current org) or 'org/team-slug' format. Team members are fetched from the GitHub API at runtime; bots are excluded. IMPORTANT: requires read:org scope — not available with the default GITHUB_TOKEN. Use a classic PAT with read:org, a fine-grained PAT with Members:Read, or a GitHub App with the Members:Read permission. Without the required scope, team lookups fail with a warning and those members are skipped.",
+                  "description": "List of team slugs whose members are always allowed to be mentioned. Accepts 'team-slug' (resolved against the current org) or 'org/team-slug' format. Team members are fetched from the GitHub API at runtime; bots are excluded. IMPORTANT: requires read:org scope \u2014 not available with the default GITHUB_TOKEN. Use a classic PAT with read:org, a fine-grained PAT with Members:Read, or a GitHub App with the Members:Read permission. Without the required scope, team lookups fail with a warning and those members are skipped.",
                   "items": {
                     "type": "string",
                     "minLength": 1
@@ -10632,6 +11466,12 @@
           "description": "Repository to create failure tracking issues in, in the format 'owner/repo'. Useful when the current repository has issues disabled. Defaults to the current repository.",
           "pattern": "^[^/]+/[^/]+$",
           "examples": ["github/docs-engineering", "myorg/infra-alerts"]
+        },
+        "report-failed-jobs": {
+          "type": "boolean",
+          "description": "Controls whether to report failed non-builtin jobs as issues (default: true). Set to false to disable.",
+          "default": true,
+          "examples": [false, true]
         },
         "max-bot-mentions": {
           "description": "Maximum number of bot trigger references (e.g. 'fixes #123', 'closes #456') allowed in output before all of them are neutralized. Default: 10. Supports integer or GitHub Actions expression (e.g. '${{ inputs.max-bot-mentions }}').",
@@ -10829,7 +11669,7 @@
                   "default": []
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "staged": {
@@ -10852,6 +11692,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -10876,11 +11720,11 @@
             },
             {
               "type": "object",
-              "description": "Configuration for replacing one label with another on issues/PRs in a single atomic operation. Enables clear state transitions (e.g. 'in-progress' → 'done').",
+              "description": "Configuration for replacing one label with another on issues/PRs in a single atomic operation. Enables clear state transitions (e.g. 'in-progress' \u2192 'done').",
               "properties": {
                 "allowed-transitions": {
                   "type": "array",
-                  "description": "Optional list of allowed label state transitions. Each entry specifies a (from, to) pair that is permitted. When specified, the agent may ONLY perform the listed transitions, regardless of allowed-add/allowed-remove. Useful for enforcing a strict state machine (e.g. only 'in-review' → 'approved' is allowed).",
+                  "description": "Optional list of allowed label state transitions. Each entry specifies a (from, to) pair that is permitted. When specified, the agent may ONLY perform the listed transitions, regardless of allowed-add/allowed-remove. Useful for enforcing a strict state machine (e.g. only 'in-review' \u2192 'approved' is allowed).",
                   "items": {
                     "type": "object",
                     "properties": {
@@ -10949,7 +11793,7 @@
                   "description": "Target repository in format 'owner/repo' for cross-repository label replacement. Takes precedence over trial target repo settings."
                 },
                 "github-token": {
-                  "$ref": "#/$defs/github_token",
+                  "$ref": "#/$defs/github_token_same_job",
                   "description": "GitHub token to use for this specific output type. Overrides global github-token if specified."
                 },
                 "allowed-repos": {
@@ -10992,6 +11836,10 @@
                       "additionalProperties": true
                     }
                   ]
+                },
+                "github-app": {
+                  "$ref": "#/$defs/github_app",
+                  "description": "GitHub App authentication. Mints a short-lived installation access token via actions/create-github-app-token. Mutually exclusive with github-token."
                 }
               },
               "additionalProperties": false
@@ -11154,6 +12002,31 @@
                 "ignore-if-missing": {
                   "type": "boolean",
                   "description": "If true, skip token minting when client-id/private-key resolve to empty strings at runtime. Defaults to false."
+                },
+                "audience": {
+                  "type": "string",
+                  "description": "Optional OIDC audience passed to core.getIDToken(audience) when using credential-less OIDC mode (github-app present without app-id/private-key). Leave omitted to use the default audience."
+                }
+              },
+              "additionalProperties": false
+            },
+            "workload-identity": {
+              "type": "object",
+              "description": "Exchange a GitHub Actions OIDC token for a cloud access token before OTLP export. Google Workload Identity Federation is currently supported.",
+              "required": ["provider", "audience"],
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["google"],
+                  "description": "Cloud workload identity provider."
+                },
+                "audience": {
+                  "type": "string",
+                  "description": "Google Workload Identity Provider resource name (e.g. projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER). The GitHub OIDC audience (https://iam.googleapis.com/...) and Google STS audience (//iam.googleapis.com/...) are derived from it; either fully-qualified form is also accepted."
+                },
+                "service-account": {
+                  "type": "string",
+                  "description": "Optional Google service account email to impersonate after STS token exchange."
                 }
               },
               "additionalProperties": false
@@ -11196,7 +12069,7 @@
           "description": "Optional list of event types to apply rate limiting to. If not specified, rate limiting applies to all programmatically triggered events (e.g., workflow_dispatch, issue_comment, pull_request_review).",
           "items": {
             "type": "string",
-            "enum": ["workflow_dispatch", "issue_comment", "pull_request_review", "pull_request_review_comment", "issues", "pull_request", "discussion_comment", "discussion"]
+            "enum": ["workflow_dispatch", "issue_comment", "pull_request_review", "pull_request_review_comment", "issues", "pull_request", "discussion_comment", "discussion", "repository_dispatch"]
           },
           "minItems": 1
         },
@@ -11246,6 +12119,16 @@
       "default": true,
       "description": "Control whether the compile-agentic version update check runs in the activation job. When true (default), the activation job downloads config.json from the gh-aw repository and verifies the compiled version is not blocked and meets the minimum supported version. Set to false to disable the check (not allowed in strict mode). See: https://github.github.com/gh-aw/reference/frontmatter/#check-for-updates",
       "examples": [true, false]
+    },
+    "excluded-env": {
+      "type": "array",
+      "description": "Optional list of environment variable names to unconditionally exclude from the AWF agent container via --exclude-env. Use when an env var is set from a source the compiler cannot auto-detect as credential-bearing (e.g. a workflow_dispatch input carrying a token). Names are deduplicated and merged with those auto-detected from secrets.* and needs.*.outputs.* references.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Environment variable name to exclude from the agent container."
+      },
+      "examples": [["MY_DISPATCH_TOKEN", "ANOTHER_SENSITIVE_VAR"], ["GH_TOKEN"]]
     },
     "mcp-scripts": {
       "type": "object",
@@ -11438,6 +12321,7 @@
     "runtimes": {
       "type": "object",
       "description": "Runtime environment version overrides. Allows customizing runtime versions (e.g., Node.js, Python) or defining new runtimes. Runtimes from imported shared workflows are also merged.",
+      "x-example-key": "node",
       "patternProperties": {
         "^[a-z][a-z0-9-]*$": {
           "type": "object",
@@ -11641,8 +12525,13 @@
         }
       ]
     },
+    "model": {
+      "type": "string",
+      "description": "Optional top-level LLM model override. Sets the model used by the agentic engine for this workflow. Takes precedence over engine.model when both are specified. Supports full model IDs (e.g. 'claude-3-5-sonnet-20241022', 'gpt-5.4') and model aliases (e.g. 'small', 'large').",
+      "examples": ["gpt-5.4", "claude-3-5-sonnet-20241022", "gpt-4"]
+    },
     "evals": {
-      "description": "⚠️ Experimental. BinEval binary evaluation questions to run after safe-outputs and before the conclusion job. Can be a plain list of questions (shorthand) or an object with questions, model, and runs-on fields.",
+      "description": "\u26a0\ufe0f Experimental. BinEval binary evaluation questions to run after safe-outputs and before the conclusion job. Can be a plain list of questions (shorthand) or an object with questions, model, and runs-on fields.",
       "oneOf": [
         {
           "type": "array",
@@ -11797,6 +12686,26 @@
     }
   ],
   "$defs": {
+    "enclave-repos": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repo", "sensitivity"],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "maxLength": 140,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$"
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": ["public", "internal", "confidential", "sealed"]
+          }
+        }
+      }
+    },
     "github_actions_runs_on": {
       "description": "Runner type for workflow execution (GitHub Actions standard field). Supports multiple forms: simple string for single runner label (e.g., 'ubuntu-latest'), array for runner selection with fallbacks, or object for GitHub-hosted runner groups with specific labels. For agentic workflows, runner selection matters when AI workloads require specific compute resources or when using self-hosted runners with specialized capabilities. Typically configured at the job level instead. See https://docs.github.com/en/actions/using-jobs/choosing-the-runner-for-a-job",
       "oneOf": [
@@ -11892,7 +12801,7 @@
       ]
     },
     "templatable_bool_or_int": {
-      "description": "A boolean or non-negative integer (0–100) value that may also be specified as a GitHub Actions expression string that resolves to a boolean or integer at runtime (e.g. '${{ inputs.dedup }}').",
+      "description": "A boolean or non-negative integer (0\u2013100) value that may also be specified as a GitHub Actions expression string that resolves to a boolean or integer at runtime (e.g. '${{ inputs.dedup }}').",
       "oneOf": [
         {
           "type": "boolean"
@@ -12126,7 +13035,7 @@
       "oneOf": [
         {
           "type": "string",
-          "description": "Engine name: built-in ('claude', 'codex', 'copilot', 'gemini', 'opencode', 'crush', 'pi') or a named catalog entry"
+          "description": "Engine name: built-in ('claude', 'codex', 'copilot', 'gemini', 'pi') or a named catalog entry"
         },
         {
           "type": "object",
@@ -12134,7 +13043,7 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "AI engine identifier: built-in ('claude', 'codex', 'copilot', 'gemini', 'opencode', 'crush', 'pi') or a named catalog entry"
+              "description": "AI engine identifier: built-in ('claude', 'codex', 'copilot', 'gemini', 'pi') or a named catalog entry"
             },
             "version": {
               "type": ["string", "number"],
@@ -12143,7 +13052,9 @@
             },
             "model": {
               "type": "string",
-              "description": "Optional specific LLM model to use (e.g., 'claude-3-5-sonnet-20241022', 'gpt-4'). Has sensible defaults and can typically be omitted."
+              "description": "Optional specific LLM model to use (e.g., 'claude-3-5-sonnet-20241022', 'gpt-4'). Has sensible defaults and can typically be omitted.",
+              "deprecated": true,
+              "x-deprecation-message": "'engine.model' is deprecated. Use top-level 'model' instead. Run 'gh aw fix' to automatically migrate."
             },
             "model-provider": {
               "type": "string",
@@ -12268,6 +13179,18 @@
                         }
                       ],
                       "description": "Maximum delay cap in ms. Accepts a literal integer or a GitHub Actions expression."
+                    },
+                    "watchdog-timeout": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "description": "Post-result idle watchdog timeout in seconds. Accepts a literal integer or a GitHub Actions expression."
                     }
                   },
                   "additionalProperties": false
@@ -12313,7 +13236,7 @@
                 },
                 "provider": {
                   "type": "string",
-                  "description": "Optional WIF provider discriminator. Recognized values are 'azure' and 'anthropic'."
+                  "description": "Optional WIF provider discriminator. Recognized values are 'azure', 'anthropic', and 'gcp'."
                 },
                 "federation-rule-id": {
                   "type": "string",
@@ -12330,6 +13253,22 @@
                 "workspace-id": {
                   "type": "string",
                   "description": "Anthropic WIF workspace ID (e.g., ws_...)."
+                },
+                "workload-identity-provider": {
+                  "type": "string",
+                  "description": "Google Cloud WIF workload identity provider resource name (e.g., projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER)."
+                },
+                "service-account": {
+                  "type": "string",
+                  "description": "Google Cloud service account email to impersonate via WIF (e.g., my-sa@my-project.iam.gserviceaccount.com)."
+                },
+                "project": {
+                  "type": "string",
+                  "description": "Google Cloud project ID used for Vertex AI / Gemini Enterprise inference."
+                },
+                "location": {
+                  "type": "string",
+                  "description": "Google Cloud region for Vertex AI inference (e.g., us-central1). Defaults to us-central1 when omitted."
                 }
               },
               "required": ["type"],
@@ -12347,59 +13286,6 @@
               "type": "string",
               "description": "Custom API endpoint hostname for the agentic engine. Used for GitHub Enterprise Cloud (GHEC), GitHub Enterprise Server (GHES), or custom AI endpoints. Example: 'api.acme.ghe.com' for GHEC, 'api.enterprise.githubcopilot.com' for GHES, or custom endpoint hostnames.",
               "examples": ["api.acme.ghe.com", "api.enterprise.githubcopilot.com", "api.custom.endpoint.com"]
-            },
-            "token-weights": {
-              "type": "object",
-              "description": "Custom model token weights for AI Credits cost ratio adjustment. Overrides or extends built-in model cost defaults. Useful for custom models or adjusted cost ratios.",
-              "properties": {
-                "multipliers": {
-                  "type": "object",
-                  "description": "Per-model cost multipliers relative to the reference model (claude-sonnet-4.5 = 1.0). Keys are model names (case-insensitive, prefix matching supported). Values are numeric multipliers.",
-                  "additionalProperties": {
-                    "type": "number",
-                    "minimum": 0
-                  },
-                  "examples": [
-                    {
-                      "my-custom-model": 2.5,
-                      "gpt-5": 3.0
-                    }
-                  ]
-                },
-                "token-class-weights": {
-                  "type": "object",
-                  "description": "Per-token-class weights applied before the model multiplier. Any specified weight overrides the corresponding default.",
-                  "properties": {
-                    "input": {
-                      "type": "number",
-                      "exclusiveMinimum": 0,
-                      "description": "Weight for input tokens (default: 1.0)"
-                    },
-                    "cached-input": {
-                      "type": "number",
-                      "exclusiveMinimum": 0,
-                      "description": "Weight for cached input tokens (default: 0.1)"
-                    },
-                    "output": {
-                      "type": "number",
-                      "exclusiveMinimum": 0,
-                      "description": "Weight for output tokens (default: 4.0)"
-                    },
-                    "reasoning": {
-                      "type": "number",
-                      "exclusiveMinimum": 0,
-                      "description": "Weight for reasoning tokens (default: 4.0)"
-                    },
-                    "cache-write": {
-                      "type": "number",
-                      "exclusiveMinimum": 0,
-                      "description": "Weight for cache write tokens (default: 1.0)"
-                    }
-                  },
-                  "additionalProperties": false
-                }
-              },
-              "additionalProperties": false
             },
             "args": {
               "type": "array",
@@ -12435,9 +13321,39 @@
               "description": "Enables the experimental GitHub Copilot SDK integration (copilot engine only). When true, the harness starts a separate headless Copilot CLI sidecar on the configured localhost port and sets COPILOT_SDK_URI on child processes."
             },
             "driver": {
-              "type": "string",
-              "pattern": "^(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*)(?:/(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*))*$",
-              "description": "Custom driver script or command for the engine. Accepts a workspace-relative path or bare name. Supported extensions depend on the engine: the copilot engine accepts .js, .cjs, .mjs (Node.js), .py (Python), .ts or .mts (TypeScript), or .rb (Ruby); other engines (e.g. pi) accept .js, .cjs, or .mjs only. A bare name without an extension is also valid for any engine (treated as a built-in driver or executable in PATH). Examples: `.github/drivers/my_driver.cjs`, `.github/drivers/my_driver.py`, `my-copilot-driver`."
+              "description": "Custom driver script, command, or inline source for the engine. String values accept a workspace-relative path or bare name. Inline object values are supported for the Copilot engine and materialize runtime files before execution. Supported inline runtimes are node, python, go, and java.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*)(?:/(?:(?:\\.[A-Za-z0-9_]|[A-Za-z0-9_])[A-Za-z0-9._-]*))*$",
+                  "description": "Workspace-relative driver path or bare command name. The copilot engine accepts .js, .cjs, .mjs, .py, .ts, .mts, and .rb drivers; other engines accept .js, .cjs, and .mjs. Bare names without an extension are treated as built-in drivers or executables in PATH."
+                },
+                {
+                  "type": "object",
+                  "description": "Inline Copilot SDK driver source. Provide exactly one runtime key.",
+                  "properties": {
+                    "node": {
+                      "type": "string",
+                      "description": "Inline Node.js driver source written to a generated .cjs file."
+                    },
+                    "python": {
+                      "type": "string",
+                      "description": "Inline Python driver source written to a generated .py file."
+                    },
+                    "go": {
+                      "type": "string",
+                      "description": "Inline Go driver source written to a generated .go file."
+                    },
+                    "java": {
+                      "type": "string",
+                      "description": "Inline Java driver source written to a generated .java file."
+                    }
+                  },
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "maxProperties": 1
+                }
+              ]
             },
             "extensions": {
               "type": "array",
@@ -12464,8 +13380,8 @@
               "properties": {
                 "id": {
                   "type": "string",
-                  "description": "Runtime adapter identifier (e.g. 'codex', 'claude', 'copilot', 'gemini', 'opencode', 'crush', 'pi')",
-                  "examples": ["codex", "claude", "copilot", "gemini", "opencode", "crush", "pi"]
+                  "description": "Runtime adapter identifier (e.g. 'codex', 'claude', 'copilot', 'gemini', 'pi')",
+                  "examples": ["codex", "claude", "copilot", "gemini", "pi"]
                 },
                 "version": {
                   "type": ["string", "number"],
@@ -12586,7 +13502,11 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "Unique engine identifier (e.g. 'copilot', 'claude', 'codex', 'gemini', 'opencode', 'crush', 'pi')"
+              "description": "Unique engine identifier (e.g. 'copilot', 'claude', 'codex', 'gemini', 'pi')"
+            },
+            "version": {
+              "type": ["string", "number"],
+              "description": "Default CLI version applied when a workflow references this engine without specifying engine.version"
             },
             "display-name": {
               "type": "string",
@@ -12596,9 +13516,37 @@
               "type": "string",
               "description": "Human-readable description of the engine"
             },
+            "experimental": {
+              "type": "boolean",
+              "description": "Marks the engine as experimental so compiled workflows can surface an explicit warning."
+            },
+            "mcp": {
+              "type": "boolean",
+              "description": "Whether the engine supports MCP. When false, the compiler automatically enables gh-proxy and cli-proxy and rejects attempts to disable either proxy.",
+              "default": true
+            },
             "runtime-id": {
               "type": "string",
               "description": "Runtime adapter identifier. Maps to the CodingAgentEngine registered in the engine registry. Defaults to id when omitted."
+            },
+            "auth": {
+              "type": "array",
+              "description": "Optional engine-specific secret bindings for behavior-defined engines.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "description": "Logical authentication role name."
+                  },
+                  "secret": {
+                    "type": "string",
+                    "description": "GitHub Actions secret name exposed to the engine runtime."
+                  }
+                },
+                "required": ["role", "secret"],
+                "additionalProperties": false
+              }
             },
             "provider": {
               "type": "object",
@@ -12694,6 +13642,240 @@
               "type": "object",
               "description": "Additional engine-specific options",
               "additionalProperties": true
+            },
+            "behaviors": {
+              "type": "object",
+              "description": "Declarative custom-engine runtime behavior used to materialize a shared CLI engine from frontmatter.",
+              "properties": {
+                "secret-strategy": {
+                  "type": "string",
+                  "description": "Secret resolution mode for the engine (for example 'universal-llm-consumer')."
+                },
+                "supported-env-var-keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Secret or env var keys the engine accepts through engine.env."
+                },
+                "capabilities": {
+                  "type": "object",
+                  "properties": {
+                    "tools-allowlist": {
+                      "type": "boolean"
+                    },
+                    "max-turns": {
+                      "type": "boolean"
+                    },
+                    "web-search": {
+                      "type": "boolean"
+                    },
+                    "max-continuations": {
+                      "type": "boolean"
+                    },
+                    "native-agent-file": {
+                      "type": "boolean"
+                    },
+                    "bare-mode": {
+                      "type": "boolean"
+                    },
+                    "bash-command-allowlist": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "manifest": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "path-prefixes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "network": {
+                  "type": "object",
+                  "description": "Declarative default network requirements for the engine. 'defaults' are always allowed; the domain in 'provider-domains' matching the model's provider prefix is added on top.",
+                  "properties": {
+                    "defaults": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Domains always required by the engine CLI (for example package registries and telemetry endpoints)."
+                    },
+                    "provider-domains": {
+                      "type": "object",
+                      "description": "Maps a model provider prefix (the part before '/' in 'provider/model') to the API domain required for that provider.",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "default-provider": {
+                      "type": "string",
+                      "description": "Provider key used to resolve a provider domain when the model carries no 'provider/' prefix."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "installation": {
+                  "type": "object",
+                  "properties": {
+                    "package-manager": {
+                      "type": "string"
+                    },
+                    "package-name": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "step-name": {
+                      "type": "string"
+                    },
+                    "binary-name": {
+                      "type": "string"
+                    },
+                    "include-node-setup": {
+                      "type": "boolean"
+                    },
+                    "post-install-scripts": {
+                      "type": "boolean"
+                    },
+                    "cooldown": {
+                      "type": "boolean"
+                    },
+                    "verify-command": {
+                      "type": "string"
+                    },
+                    "verify-step-name": {
+                      "type": "string"
+                    },
+                    "docs-url": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "plugins": {
+                  "type": "object",
+                  "description": "\u26a0\ufe0f Experimental. Declares Agent Plugins (https://agent-plugins.org) support for the engine. Plugins are checked out at their pinned commit SHA, then staged in 'directory' and/or installed with the engine CLI using 'install-args'.",
+                  "properties": {
+                    "directory": {
+                      "type": "string",
+                      "description": "Folder the engine scans for plugins. Workspace-relative (for example '.kiro/powers') or home-relative (for example '~/.cursor/plugins/local')."
+                    },
+                    "command-name": {
+                      "type": "string",
+                      "description": "CLI executable used with 'install-args'. Defaults to the execution command name."
+                    },
+                    "install-args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "CLI arguments placed before the local plugin path (for example ['plugin', 'install'])."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "config-file": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "step-name": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "merge-strategy": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "execution": {
+                  "type": "object",
+                  "properties": {
+                    "command-name": {
+                      "type": "string"
+                    },
+                    "args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "step-name": {
+                      "type": "string"
+                    },
+                    "model-env-var": {
+                      "type": "string"
+                    },
+                    "model-env-provider-prefix": {
+                      "type": "string"
+                    },
+                    "model-flag": {
+                      "type": "string"
+                    },
+                    "mcp-config-env-var": {
+                      "type": "string"
+                    },
+                    "mcp-config-flag": {
+                      "type": "string"
+                    },
+                    "write-timestamp": {
+                      "type": "boolean"
+                    },
+                    "provider-env-mode": {
+                      "type": "string"
+                    },
+                    "env": {
+                      "type": "object",
+                      "description": "Additional static environment variables injected into the execution step. Values are rendered verbatim and must not contain secrets.",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "mcp": {
+                  "type": "object",
+                  "properties": {
+                    "config-path": {
+                      "type": "string"
+                    },
+                    "config-adapter": {
+                      "type": "string",
+                      "description": "JavaScript source of a Node.js script that converts the MCP gateway's raw output configuration into the format expected by this engine. When set, the script is written to ${RUNNER_TEMP}/gh-aw/actions/<engine-id>_mcp_config_adapter.cjs before the MCP gateway starts, and start_mcp_gateway.cjs executes it (instead of a built-in per-engine converter) once the gateway has produced its output."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "harness-script": {
+                  "type": "string",
+                  "description": "JavaScript source of a Node.js harness that spawns the engine CLI. When set, the script is written to ${RUNNER_TEMP}/gh-aw/actions/<engine-id>_harness.cjs before execution and the engine is launched as: node <harness-path> <command-name> [args...]. The harness reads process.env.GH_AW_PROMPT for the prompt-file path and, when the AWF firewall is active, process.env.AWF_REFLECT_ENABLED is set to '1' so the harness can read /reflect data to dynamically configure the engine CLI."
+                },
+                "log-parser": {
+                  "type": "string",
+                  "description": "JavaScript source of a log-parser function for the engine. When set, the script is written to ${RUNNER_TEMP}/gh-aw/actions/<engine-id>_log_parser.cjs and used in the post-agent log-parsing step. The script must define a parseLog(logContent) function (not export it) that returns {markdown, logEntries, mcpFailures, maxTurnsHit}. A createEngineLogParser wrapper from log_parser_shared.cjs is automatically appended so the author only provides the parsing function; the wrapper handles exports and bootstrap. This enables behavior-defined engines (e.g. crush, opencode, goose, aider) to produce normalized events files like built-in engine parsers."
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": ["id", "display-name"],
@@ -12730,7 +13912,9 @@
           "properties": {
             "model": {
               "type": "string",
-              "description": "Model preference or size category (e.g. 'small', 'large', 'gpt-4.1'). Applied to the default engine when engine.id is not specified."
+              "description": "Model preference or size category (e.g. 'small', 'large', 'gpt-4.1'). Applied to the default engine when engine.id is not specified.",
+              "deprecated": true,
+              "x-deprecation-message": "'engine.model' is deprecated. Use top-level 'model' instead. Run 'gh aw fix' to automatically migrate."
             }
           },
           "required": ["model"],
@@ -12760,7 +13944,7 @@
         },
         "container": {
           "type": "string",
-          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*$",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/:_.-]*(?:@sha256:[a-f0-9]{64})?$",
           "$comment": "Mutually exclusive with 'command' - only one execution mode can be specified. Validated by 'not.allOf' constraint below.",
           "description": "Container image for stdio MCP connections"
         },
@@ -12850,6 +14034,11 @@
             "type": "string"
           },
           "description": "Custom proxy arguments for container-based MCP servers (e.g., DIFC proxy configuration)"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this MCP server must pass the startup connectivity check. When false, a server that cannot be reached at startup logs a warning and the workflow continues without it."
         }
       },
       "additionalProperties": false,
@@ -12936,6 +14125,11 @@
         },
         "auth": {
           "$ref": "#/$defs/http_mcp_auth"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this MCP server must pass the startup connectivity check. When false, a server that cannot be reached at startup logs a warning and the workflow continues without it."
         }
       },
       "required": ["url"],
@@ -12962,8 +14156,14 @@
     "github_token": {
       "type": "string",
       "pattern": "^\\$\\{\\{\\s*(secrets\\.[A-Za-z_][A-Za-z0-9_]*(\\s*\\|\\|\\s*secrets\\.[A-Za-z_][A-Za-z0-9_]*)*|needs\\.[A-Za-z_][A-Za-z0-9_]*\\.outputs\\.[A-Za-z_][A-Za-z0-9_]*)\\s*\\}\\}$",
-      "description": "GitHub token expression. Accepts a secrets expression (e.g., `${{ secrets.NAME }}` or `${{ secrets.NAME1 || secrets.NAME2 }}`) or a job output expression (e.g., `${{ needs.auth.outputs.token }}`). Pattern details: secret names match `[A-Za-z_][A-Za-z0-9_]*`; job IDs and output names in dot notation match `[A-Za-z_][A-Za-z0-9_]*` (identifiers without hyphens).",
+      "description": "GitHub token expression for cross-job or activation-time contexts. Accepts a secrets expression (e.g., `${{ secrets.NAME }}` or `${{ secrets.NAME1 || secrets.NAME2 }}`) or a cross-job output expression (e.g., `${{ needs.auth.outputs.token }}`). Pattern details: secret names, job IDs, and output names in dot notation match `[A-Za-z_][A-Za-z0-9_]*` (identifiers without hyphens).",
       "examples": ["${{ secrets.GITHUB_TOKEN }}", "${{ secrets.CUSTOM_PAT }}", "${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}", "${{ needs.auth.outputs.token }}"]
+    },
+    "github_token_same_job": {
+      "type": "string",
+      "pattern": "^\\$\\{\\{\\s*(secrets\\.[A-Za-z_][A-Za-z0-9_]*(\\s*\\|\\|\\s*secrets\\.[A-Za-z_][A-Za-z0-9_]*)*|needs\\.[A-Za-z_][A-Za-z0-9_]*\\.outputs\\.[A-Za-z_][A-Za-z0-9_]*|steps\\.[A-Za-z_][A-Za-z0-9_-]*\\.outputs\\.[A-Za-z_][A-Za-z0-9_-]*)\\s*\\}\\}$",
+      "description": "GitHub token expression for same-job contexts. Accepts a secrets expression (e.g., `${{ secrets.NAME }}` or `${{ secrets.NAME1 || secrets.NAME2 }}`), a cross-job output expression (e.g., `${{ needs.auth.outputs.token }}`), or a same-job step output expression (e.g., `${{ steps.fetch-token.outputs.my-token }}`). Pattern details: secret names and job IDs match `[A-Za-z_][A-Za-z0-9_]*`; same-job step IDs and output names match `[A-Za-z_][A-Za-z0-9_-]*`.",
+      "examples": ["${{ secrets.GITHUB_TOKEN }}", "${{ secrets.CUSTOM_PAT }}", "${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}", "${{ needs.auth.outputs.token }}", "${{ steps.fetch-token.outputs.my-token }}"]
     },
     "github_app": {
       "type": "object",
@@ -13466,6 +14666,11 @@
           "enum": ["read", "none", "write"],
           "description": "Permission level for repository custom properties (read/none; \"write\" is rejected by the compiler). GitHub App-only permission."
         },
+        "secret-scanning-alerts": {
+          "type": "string",
+          "enum": ["read", "none"],
+          "description": "Permission level for secret scanning alerts (read/none). Forwarded as permission-secret-scanning-alerts input for actions/create-github-app-token."
+        },
         "repository-hooks": {
           "type": "string",
           "enum": ["read", "none", "write"],
@@ -13512,6 +14717,76 @@
         }
       },
       "additionalProperties": false
+    },
+    "sandbox_copilot_api_target": {
+      "type": "object",
+      "description": "AWF API proxy target configuration for the Copilot BYOK provider. Supports injecting additional headers, body fields, and an optional session ID on upstream requests.",
+      "properties": {
+        "authHeader": {
+          "type": "string",
+          "description": "Custom authentication header name to use when forwarding requests to the Copilot API. Example: \"api-key\" for Azure OpenAI gateways."
+        },
+        "extraHeaders": {
+          "type": "object",
+          "description": "Additional non-sensitive HTTP headers to inject on Copilot BYOK upstream requests. Maps to AWF_BYOK_EXTRA_HEADERS. Example: { \"x-openrouter-title\": \"my-workflow\" }.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "extraBodyFields": {
+          "type": "object",
+          "description": "Additional non-sensitive JSON body fields to inject on Copilot BYOK upstream requests. Maps to AWF_BYOK_EXTRA_BODY_FIELDS. Example: { \"custom-field\": \"custom-value\" }.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Optional session identifier injected as the x-session-id request header and session_id body field on Copilot BYOK upstream requests. Maps to AWF_PROVIDER_SESSION_ID. Only set this field when your upstream supports it \u2014 strict OpenAI-compatible upstreams (e.g. Azure OpenAI) reject the unknown session_id body field with HTTP 400. Example: \"${{ github.run_id }}\"."
+        }
+      },
+      "additionalProperties": false
+    },
+    "numeric_or_numeric_string": {
+      "description": "Accepts a JSON number, or a numeric string in integer, decimal, or scientific notation (for example: 123, 12.34, 1.23e-4, +5.67E+8). Rejects trailing/non-numeric formats (for example: 123abc, free, 1.2.3).",
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?$"
+        }
+      ]
+    },
+    "ai_credits_pricing": {
+      "type": "object",
+      "description": "Token-class pricing map. Keys are token classes (for example: input, output, cache_read, cache_write, reasoning) and values are numeric prices (number or numeric string).",
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/numeric_or_numeric_string",
+          "description": "Cost per input token in USD."
+        },
+        "output": {
+          "$ref": "#/$defs/numeric_or_numeric_string",
+          "description": "Cost per output token in USD."
+        },
+        "cache_read": {
+          "$ref": "#/$defs/numeric_or_numeric_string",
+          "description": "Cost per cached-read token in USD."
+        },
+        "cache_write": {
+          "$ref": "#/$defs/numeric_or_numeric_string",
+          "description": "Cost per cache-write token in USD."
+        },
+        "reasoning": {
+          "$ref": "#/$defs/numeric_or_numeric_string",
+          "description": "Cost per reasoning token in USD."
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/numeric_or_numeric_string"
+      }
     }
   }
 }

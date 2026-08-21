@@ -51,14 +51,21 @@ imports:
       description: "Historical audit data and patterns"
       max-patch-size: 51200
   - ../skills/jqschema/SKILL.md
+  - shared/reporting.md
 
 
   - shared/otlp.md
+  - shared/default-ai-credits-pricing.md
 features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
+evals:
+  - id: workflow_runs_audited
+    question: Did the agent audit agentic workflow runs from the last 24 hours?
+  - id: issues_identified_or_noop
+    question: Were issues, missing tools, errors, and improvement opportunities identified, or was noop used when no problems were found?
 ---
 
 # Agentic Workflow Audit Agent
@@ -100,6 +107,12 @@ Output is saved to: /tmp/gh-aw/aw-mcp/logs
 
 **IMPORTANT**: Do NOT infer engine type by scanning `.lock.yml` files. Lock files contain the word `copilot` in allowed-domains lists and workflow source paths regardless of which engine the workflow uses, causing false positives.
 
+**Success Rate Rollups — Exclude Intentional-Failure Workflows**: When computing the fleet-wide or prod-main success rate, **exclude** runs where `intentional_failure` is `true`. These workflows (e.g. `Daily Credit Limit Test`, `Daily Max AI Credits Test`) are credit-guardrail stress tests that are *designed* to fail; including them would depress the real-regression baseline. The `logs` tool marks them in `runs[].intentional_failure` and counts them in `summary.intentional_failure_runs`. Always report the adjusted rate alongside the raw rate, e.g. `"92.7% raw (94.2% excl. intentional failures)"`.
+
+**Intentional-failure workflows that MUST be excluded from all success-rate and health rollups**:
+- `Daily Credit Limit Test` (`daily-credit-limit-test`) — trips the `max-daily-ai-credits` guardrail by design
+- `Daily Max AI Credits Test` (`daily-max-ai-credits-test`) — trips the `max-ai-credits` per-run firewall by design
+
 {{#if experiments.audit_decomposition == 'phased_sub_agents'}}
 **Analyze** in explicit phases:
 1. **Collection phase**: summarize missing tools, hard failures, and token/runtime outliers.
@@ -130,6 +143,7 @@ Before writing the final report, verify recommendations are concrete and evidenc
 
 When updating repo memory:
 - merge with existing data instead of overwriting useful history
+- serialize `workflow-trends.json` and `recommendations.json` as pretty-printed JSON with two-space indentation and a trailing newline; never store them as minified single-line JSON
 - keep stable IDs so issues, recommendations, and anomalies can be cross-referenced across days
 - increment recurrence and persistence counters when the same problem reappears
 - compare the current audit with prior entries before deciding whether something is new or ongoing
@@ -139,7 +153,6 @@ When updating repo memory:
 **Security**: Never execute untrusted code, validate data, sanitize paths
 **Quality**: Be thorough, specific, actionable, accurate  
 **Efficiency**: Use repo memory, batch operations, respect timeouts
-**Report Formatting**: Use h3 (###) or lower for all headers in your report to maintain proper document hierarchy. Wrap long sections in `<details><summary>Section Name</summary>` tags to improve readability and reduce scrolling.
 
 Memory structure: `/tmp/gh-aw/repo-memory/default/{audit-history.jsonl,workflow-trends.json,known-issues.json,recommendations.json,anomalies.json,metrics-summary.json}`
 

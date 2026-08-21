@@ -28,14 +28,34 @@ experiments:
     start_date: "2026-06-02"
 engine: claude
 strict: true
+runtimes:
+  uv: {}
 network:
   allowed: [defaults, python-native, github]
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: cloud-hypervisor
 tools:
   agentic-workflows: true
   bash: true
+steps:
+  - name: Install AgentRx with a sandbox-compatible CPython
+    env:
+      UV_PYTHON_INSTALL_DIR: /tmp/gh-aw/python/uv-python
+      AGENTRX_HOME: /tmp/gh-aw/python/agentrx
+    run: |
+      set -euo pipefail
+      # The agent sandbox cannot run the runner's CPython (glibc mismatch) and only
+      # ships PyPy, which has no wheels for AgentRx dependencies. Install a portable
+      # uv-managed CPython plus AgentRx under /tmp/gh-aw, which is mounted read-write
+      # into the sandbox.
+      rm -rf "$AGENTRX_HOME"
+      mkdir -p "$AGENTRX_HOME"
+      git clone --depth 1 https://github.com/microsoft/AgentRx.git "$AGENTRX_HOME/src"
+      uv venv --python 3.12 --python-preference only-managed "$AGENTRX_HOME/.venv"
+      uv pip install --python "$AGENTRX_HOME/.venv/bin/python" "$AGENTRX_HOME/src"
+      "$AGENTRX_HOME/.venv/bin/python" "$AGENTRX_HOME/src/run.py" --help >/dev/null
 safe-outputs:
   mentions: false
   allowed-github-references: []
@@ -47,15 +67,21 @@ safe-outputs:
     max: 1
 timeout-minutes: 45
 imports:
+  - shared/aw-logs-24h-fetch-setup.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[agentrx-optimizer] "
       expires: 7d
 features:
   gh-aw-detection: true
+evals:
+  - id: sub_agent_strategy_goal_met
+    question: Does the agent output show that the objective for experiment sub_agent_strategy was successfully completed?
+
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
+{{#runtime-import? shared/aw-logs-24h-fetch-prompt.md}}
 
 # Daily AgentRx Trace Optimizer
 
@@ -72,17 +98,28 @@ Focus on:
 
 ## Data and Tooling Requirements
 
-1. Start with `tools.agentic-workflows` MCP tools to download and analyze recent runs:
+1. Start with the pre-downloaded logs bundle. Use `tools.agentic-workflows` MCP tools only for additional run data:
    - Use `status` to list workflows/runs.
-   - Use `logs` to download parsed logs for recent runs.
-   - Use `audit` for selected failing or high-latency runs.
-2. Use only MCP-downloaded run data and logs as the telemetry source, prioritizing `runs[]` session fields over OTEL spans.
-3. Use Python in `/tmp/gh-aw/agent/agentrx` to avoid polluting the repository.
-4. Install AgentRx from GitHub:
-   - `python -m venv /tmp/gh-aw/agent/agentrx/.venv`
-   - `source /tmp/gh-aw/agent/agentrx/.venv/bin/activate`
-   - `pip install --upgrade pip`
-   - `pip install git+https://github.com/microsoft/AgentRx.git`
+   - Use `logs` to download parsed logs for recent runs, specifying `artifacts: ["agent"]` to include agent telemetry (turns, token usage, stdout) needed for AgentRx trajectory analysis.
+     **`logs` precondition rules (follow strictly):**
+     - Always include `workflow_name` — never call `logs` without it; an unfiltered scan will time out.
+     - Cap retries at **2 attempts** per workflow. If both return empty or time out, stop retrying and fall back to `audit` using any known `run_id` (from `status` or prior context).
+     - If `logs` returns `total_runs=0` for a workflow with confirmed completed runs, treat this as a tool-health failure. Surface it via `missing_tool` and proceed with `audit`-only data; do not vary parameters and retry further.
+     ```json
+     {
+       "workflow_name": "<workflow-id>",
+       "count": 50,
+       "start_date": "-2d",
+       "artifacts": ["agent"]
+     }
+     ```
+   - Use `audit` for selected failing or high-latency runs, and as the primary fallback whenever `logs` is unavailable or returns empty.
+2. Use only pre-downloaded or MCP-downloaded run data and logs as the telemetry source, prioritizing `runs[]` session fields over OTEL spans.
+3. Use `/tmp/gh-aw/agent/agentrx` as the working and output directory for AgentRx data to avoid polluting the repository (the interpreter itself lives elsewhere, see below).
+4. AgentRx is already installed by a setup step; do not install it yourself.
+   - Interpreter: `/tmp/gh-aw/python/agentrx/.venv/bin/python`
+   - AgentRx checkout (contains `run.py`): `/tmp/gh-aw/python/agentrx/src`
+   - **Do NOT run `pip install`, `python -m venv`, or any other AgentRx installation command.** The sandbox has no compatible CPython for building those dependencies. If the interpreter is missing, report it with `missing_tool` and continue with the available evidence.
 
 ## Analysis Procedure
 
@@ -115,12 +152,15 @@ Run the pipeline in stages and preserve outputs under `/tmp/gh-aw/agent/agentrx/
 - `report`: generate aggregate diagnostic artifacts
 
 ```bash
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-name gh-aw-daily --stage ir
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir /tmp/gh-aw/agent/agentrx/runs/gh-aw-daily --stage static
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir /tmp/gh-aw/agent/agentrx/runs/gh-aw-daily --stage dynamic
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir /tmp/gh-aw/agent/agentrx/runs/gh-aw-daily --stage check
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir /tmp/gh-aw/agent/agentrx/runs/gh-aw-daily --stage judge
-python run.py /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir /tmp/gh-aw/agent/agentrx/runs/gh-aw-daily --stage report
+AGENTRX_PY=/tmp/gh-aw/python/agentrx/.venv/bin/python
+AGENTRX_RUN=/tmp/gh-aw/python/agentrx/src/run.py
+RUN_DIR=/tmp/gh-aw/agent/agentrx/runs/gh-aw-daily
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage ir
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage static
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage dynamic
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage check
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage judge
+$AGENTRX_PY $AGENTRX_RUN /tmp/gh-aw/agent/agentrx/trajectory.json --run-dir $RUN_DIR --stage report
 ```
 
 If a later stage fails (for example due to endpoint/auth constraints), continue with completed artifacts and still produce a grounded recommendation.

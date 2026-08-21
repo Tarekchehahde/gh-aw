@@ -269,8 +269,8 @@ imports:
 	// Parse the main workflow - should fail with conflict error
 	_, err = compiler.ParseWorkflowFile("main.md")
 	require.Error(t, err, "Expected conflict error")
-	assert.Contains(t, err.Error(), "safe-outputs conflict")
-	assert.Contains(t, err.Error(), "create-issue")
+	require.ErrorContains(t, err, "safe-outputs conflict")
+	require.ErrorContains(t, err, "create-issue")
 }
 
 // TestSafeOutputsImportNoConflictDifferentTypes tests that importing different safe-output types does not cause a conflict
@@ -550,7 +550,7 @@ func TestMergeSafeOutputsUnit(t *testing.T) {
 
 			if tt.expectError {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errorContains)
+				require.ErrorContains(t, err, tt.errorContains)
 				return
 			}
 
@@ -786,7 +786,8 @@ This workflow uses the imported meta configuration.
 	assert.True(t, templatableBoolIsTrue(workflowData.SafeOutputs.Staged), "Staged should be imported and set to true")
 	assert.Equal(t, map[string]string{"TEST_VAR": "test_value"}, workflowData.SafeOutputs.Env, "Env should be imported")
 	assert.Equal(t, "${{ secrets.CUSTOM_TOKEN }}", workflowData.SafeOutputs.GitHubToken, "GitHubToken should be imported")
-	assert.Equal(t, "${{ inputs.report-failure-as-issue }}", workflowData.SafeOutputs.ReportFailureAsIssue, "ReportFailureAsIssue should be imported as templatable bool")
+	require.NotNil(t, workflowData.SafeOutputs.ReportFailureAsIssue, "ReportFailureAsIssue should be imported")
+	assert.Equal(t, "${{ inputs.report-failure-as-issue }}", workflowData.SafeOutputs.ReportFailureAsIssue.String(), "ReportFailureAsIssue should be imported as templatable bool")
 	// Note: When main workflow has safe-outputs section, extractSafeOutputsConfig sets MaximumPatchSize default (4096)
 	// before merge happens, so imported value is not used. User should specify max-patch-size in main workflow.
 	assert.Equal(t, 4096, workflowData.SafeOutputs.MaximumPatchSize, "MaximumPatchSize defaults to 4096 when main has safe-outputs")
@@ -860,7 +861,8 @@ This workflow has its own meta configuration that should take precedence.
 
 	// Verify main workflow meta fields take precedence
 	assert.Equal(t, []string{"main.example.com"}, workflowData.SafeOutputs.AllowedDomains, "AllowedDomains from main should take precedence")
-	assert.Equal(t, "${{ inputs.report-failure-as-issue }}", workflowData.SafeOutputs.ReportFailureAsIssue, "ReportFailureAsIssue from main should take precedence")
+	require.NotNil(t, workflowData.SafeOutputs.ReportFailureAsIssue, "ReportFailureAsIssue from main should be set")
+	assert.Equal(t, "${{ inputs.report-failure-as-issue }}", workflowData.SafeOutputs.ReportFailureAsIssue.String(), "ReportFailureAsIssue from main should take precedence")
 	assert.Equal(t, "${{ secrets.MAIN_TOKEN }}", workflowData.SafeOutputs.GitHubToken, "GitHubToken from main should take precedence")
 	assert.Equal(t, 2048, workflowData.SafeOutputs.MaximumPatchSize, "MaximumPatchSize from main should take precedence")
 }
@@ -1008,7 +1010,7 @@ This workflow imports safe-jobs from a shared workflow.
 	// Verify job configuration
 	job := workflowData.SafeOutputs.Jobs["my-custom-job"]
 	assert.Equal(t, "My Custom Job", job.Name, "Job name should match")
-	assert.Equal(t, "ubuntu-latest", job.RunsOn, "Job runs-on should match")
+	assert.Equal(t, "runs-on: ubuntu-latest", job.RunsOn, "Job runs-on should match")
 	assert.Len(t, job.Steps, 1, "Job should have 1 step")
 	assert.Contains(t, job.Permissions, "contents", "Job should have contents permission")
 	assert.Contains(t, job.Permissions, "issues", "Job should have issues permission")
@@ -1157,8 +1159,8 @@ safe-outputs:
 	// Parse the main workflow - should fail with conflict error
 	_, err = compiler.ParseWorkflowFile("main.md")
 	require.Error(t, err, "Expected conflict error")
-	assert.Contains(t, err.Error(), "duplicate-job", "Error should mention the conflicting job name")
-	assert.Contains(t, err.Error(), "conflict", "Error should mention conflict")
+	require.ErrorContains(t, err, "duplicate-job", "Error should mention the conflicting job name")
+	require.ErrorContains(t, err, "conflict", "Error should mention conflict")
 }
 
 // TestSafeOutputsImportMessagesFromSharedWorkflow tests that safe-outputs.messages can be imported from shared workflows
@@ -1395,7 +1397,7 @@ func TestMergeSafeOutputsJobsNotMerged(t *testing.T) {
 		Jobs: map[string]*SafeJobConfig{
 			"existing-job": {
 				Name:   "Existing Job",
-				RunsOn: "ubuntu-latest",
+				RunsOn: "runs-on: ubuntu-latest",
 			},
 		},
 	}
@@ -1488,7 +1490,7 @@ func TestMergeSafeOutputsErrorPropagation(t *testing.T) {
 
 			if tt.expectError {
 				require.Error(t, err, "Expected error")
-				assert.Contains(t, err.Error(), tt.errorContains, "Error message should contain expected text")
+				require.ErrorContains(t, err, tt.errorContains, "Error message should contain expected text")
 				return
 			}
 

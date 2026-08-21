@@ -196,6 +196,19 @@ When filing issues with agentic plans:
 
 **Quality of the agentic plan directly impacts implementation success.** Provide comprehensive, step-by-step instructions with specific details.
 
+#### ✍️ Writing Prompts for Copilot-Assigned Issues
+
+When an issue will be assigned to Copilot coding agent (or another SWE agent), how you write the task description measurably affects whether the resulting PR merges. Recurring "Copilot PR Prompt Pattern Analysis" reports (see [discussion #53203](https://github.com/github/gh-aw/discussions/53203)) show a consistent trend: merged PRs average **~151 words** per task prompt and name concrete files or subsystems (e.g. `pkg`, `engine`, a specific package), while closed/unsuccessful PRs average **~229 words** — roughly 50% longer — and skew toward open-ended, exploratory language without a concrete acceptance criterion.
+
+To improve merge rate for agent-assigned work:
+
+- **Be concise.** Aim for a short, focused prompt rather than a long, exploratory one. Prompts longer than ~200 words without a concrete acceptance criterion correlate with lower merge rates.
+- **Name concrete files or subsystems.** Reference specific packages, files, or functions (e.g. `pkg/workflow`, `cmd/gh-aw`) instead of describing the problem in the abstract.
+- **State an explicit acceptance criterion.** Describe what "done" looks like (e.g. "the CLI flag `--foo` is parsed and validated" or "add a test in `pkg/parser/parser_test.go` covering X") instead of open-ended language like "investigate and fix as appropriate."
+- **Avoid pure exploration prompts.** Prompts that only ask the agent to "look into" or "figure out" a problem without a concrete target tend to result in longer, less-scoped PRs that are more likely to be closed.
+
+Note: automated CVE/dependency-tracker PRs are excluded from this signal, since their close rate reflects triage policy rather than prompt quality.
+
 ### Code Quality Standards
 
 Core team members and the agents they use follow these standards:
@@ -353,6 +366,21 @@ When implementing community contributions using an agent:
 - For features that deeply impact the engine, add the `smoke` label and approve workflows.
 - If no smoke run is queued after setting `smoke`, or additional changes require another smoke run, toggle the `smoke` label (remove and re-add) and approve workflows again.
 
+### PR Triage Labels (Core Team)
+
+PR triage assigns one risk label (`pr-risk:low`, `pr-risk:medium`, or
+`pr-risk:high`), a priority label (`pr-priority:*`), and one action label.
+Priority reflects impact, urgency, and quality; quality includes CI status,
+test coverage, and the PR description.
+
+- `pr-action:fast_track` identifies a high-value, high-priority PR that is
+  ready for expedited human review. The risk label determines the review
+  scope; fast-track does not bypass required CI or approvals.
+- `pr-action:batch_review` groups similar low- or medium-risk PRs for review
+  together, typically when a cluster contains three or more related PRs.
+- `pr-action:defer` identifies lower-value, lower-priority work that remains
+  open but is not currently prioritized.
+
 **Remember: As a community contributor, you don't create the PR yourself.** You create an issue with a detailed plan, discuss it with the team, and a core team member creates the PR using agents.
 
 ### What Gets Validated
@@ -362,7 +390,7 @@ Every agent-created PR automatically runs:
 - `make build` - Ensures Go code compiles
 - `make test` - Runs all unit and integration tests
 - `make lint` - Checks code quality and style
-- `make recompile` - Recompiles all workflows to ensure compatibility
+- `make recompile` - Recompiles all workflows to ensure compatibility. If you edit `.github/workflows/*.md`, run this before committing so the paired `.lock.yml` files stay in sync with CI.
 - `make fmt` - Formats Go code
 - `make lint-errors` - Validates error message quality
 
@@ -406,6 +434,16 @@ The following licenses are **not allowed** as they conflict with our MIT license
 - **GPL, LGPL, AGPL** - Copyleft licenses that would force us to release under GPL
 - **SSPL** - Server Side Public License with restrictive requirements
 - **Proprietary/Commercial** - Closed-source licenses requiring payment or special terms
+
+### Container Base OS Packages
+
+The license policy in `.grant.yaml` is also applied to the container images referenced by compiled workflows (`gh aw compile --grant`). Packages that ship with the upstream base images are listed under `ignore-packages` as a documented exception: the Alpine base OS packages (`busybox`, `apk-tools`, `alpine-baselayout`, `musl-utils`, `git`, `libgcc`, `libstdc++`, and their variants), the Debian base OS packages of the `ghcr.io/github/github-mcp-server` image (`base-files`, `libc6`, `libssl3`, `media-types`, `netbase`, `tzdata`), and the Node.js/npm runtime with npm's bundled dependencies (`node`, `npm`, `tar`, `glob`, `minipass`, and friends). They are executed as part of a third-party image, never linked into or redistributed with gh-aw, and cannot be changed without replacing the upstream image. Every other package in those images is still evaluated against the allowlist above.
+
+`.grant.yaml` also supports an `ignore-images` list of glob patterns matched against the image reference. It excludes an entire image from license scanning and is reserved for third-party images whose bundled toolchains produce license findings that cannot be acted on, such as `ghcr.io/oraios/serena` (a Debian development image whose cargo registry ships hundreds of crates without SPDX license metadata). This key is specific to gh-aw; grant ignores it. Vulnerability scanning still covers every image, including the ignored ones.
+
+### Container Vulnerability Exceptions
+
+`gh aw compile --grype` reads the optional `.grype.yaml` file at the repository root and applies its `ignore` rules. The file is reserved for documented risk acceptances: findings that have no fixed version available upstream, where there is nothing to upgrade to. Each rule is scoped to a specific vulnerability ID, package, and affected version so newly disclosed vulnerabilities and rebuilt packages are still reported, and each carries a `reason` explaining the acceptance. Remove a rule as soon as the upstream image ships a fix — the daily container scan runs `gh aw compile --force-refresh-container-pins` and picks up rebuilt base images automatically. When `.grype.yaml` is absent, grype runs with its defaults.
 
 ### Before Adding a Dependency
 
@@ -641,3 +679,14 @@ Community members contribute by crafting detailed agentic plans that the core te
 The [Development Guide](DEVGUIDE.md) is the reference guide used by core team members and their agents.
 
 Thank you for contributing to GitHub Agentic Workflows! 🤖🎉
+
+
+## Repository Topics (Maintainer Note)
+
+To improve discoverability in GitHub search and AI assistant recommendations, the repository should have these topics set (via repository Settings → Topics — must be done by a maintainer with admin access):
+
+```
+github-actions  ai-agents  claude  copilot  automation  openai  gemini  agentic-workflows  continuous-ai  safe-outputs
+```
+
+These map to the most common search queries the project serves: "claude code github actions", "ai agents github", "copilot automation", "automated pr review ai", etc.

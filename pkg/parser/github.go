@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/envutil"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/stringutil"
 )
@@ -41,6 +40,19 @@ func GetGitHubHost() string {
 	return defaultHost
 }
 
+// IsAnyGitHubHostEnvVarSet returns true when at least one of the environment
+// variables consulted by GetGitHubHost is explicitly set to a non-empty value.
+// This indicates the caller has made an explicit host choice and automatic
+// fallback heuristics (such as git-remote detection) should not be consulted.
+func IsAnyGitHubHostEnvVarSet() bool {
+	for _, envVar := range []string{"GITHUB_SERVER_URL", "GITHUB_ENTERPRISE_HOST", "GITHUB_HOST", "GH_HOST"} {
+		if os.Getenv(envVar) != "" { //nolint:osgetenvlibrary
+			return true
+		}
+	}
+	return false
+}
+
 // GetGitHubHostForRepo returns the GitHub host URL for a specific repository.
 // Repositories under the github, githubnext, and microsoft organizations are
 // fetched from public GitHub (https://github.com) in cross-host contexts.
@@ -63,10 +75,7 @@ func GetGitHubToken() (string, error) {
 	githubLog.Print("Getting GitHub token")
 
 	// First try environment variable
-	if token := envutil.GetStringFromEnv("GITHUB_TOKEN", "", githubLog); token != "" {
-		return token, nil
-	}
-	if token := envutil.GetStringFromEnv("GH_TOKEN", "", githubLog); token != "" {
+	if token := githubTokenFromEnv(githubLog); token != "" {
 		return token, nil
 	}
 

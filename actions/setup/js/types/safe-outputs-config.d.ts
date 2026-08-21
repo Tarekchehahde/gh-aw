@@ -73,6 +73,15 @@ interface MarkPullRequestAsReadyForReviewConfig extends SafeOutputConfig {
 }
 
 /**
+ * Configuration for approving pending workflow runs awaiting required approval
+ */
+interface ApproveWorkflowRunConfig extends SafeOutputConfig {
+  fork?: boolean;
+  comment?: boolean;
+  "allowed-workflows": string[];
+}
+
+/**
  * Configuration for adding comments to issues or PRs
  */
 interface AddCommentConfig extends SafeOutputConfig {
@@ -91,6 +100,11 @@ interface CreatePullRequestConfig extends SafeOutputConfig {
   assignees?: string | string[];
   draft?: boolean;
   "if-no-changes"?: string;
+  "target-repo"?: string;
+  "head-repo"?: string;
+  "allowed-repos"?: string[];
+  "head-github-token"?: string;
+  "base-branch"?: string;
   "allowed-branches"?: string[];
   footer?: boolean;
   "auto-close-issue"?: boolean | string;
@@ -212,6 +226,11 @@ interface PushToPullRequestBranchConfig extends SafeOutputConfig {
   "required-labels"?: string[];
   labels?: string[];
   "if-no-changes"?: string;
+  "target-repo"?: string;
+  "head-repo"?: string;
+  "allowed-repos"?: string[];
+  "head-github-token"?: string;
+  "base-branch"?: string;
 }
 
 /**
@@ -344,6 +363,7 @@ type SpecificSafeOutputConfig =
   | CloseIssueConfig
   | ClosePullRequestConfig
   | MarkPullRequestAsReadyForReviewConfig
+  | ApproveWorkflowRunConfig
   | AddCommentConfig
   | CreatePullRequestConfig
   | CreatePullRequestReviewCommentConfig
@@ -381,6 +401,7 @@ export {
   CloseIssueConfig,
   ClosePullRequestConfig,
   MarkPullRequestAsReadyForReviewConfig,
+  ApproveWorkflowRunConfig,
   AddCommentConfig,
   CreatePullRequestConfig,
   CreatePullRequestReviewCommentConfig,

@@ -12,6 +12,11 @@ var sanitizeLog = logger.New("stringutil:sanitize")
 
 var multipleHyphens = regexp.MustCompile(`-+`)
 
+// isASCIIAlphanumeric reports whether r is an ASCII letter or decimal digit.
+func isASCIIAlphanumeric(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
 var sanitizePatterns = map[string]*regexp.Regexp{
 	"a-z0-9-":   regexp.MustCompile(`[^a-z0-9-]+`),
 	"a-z0-9-.":  regexp.MustCompile(`[^a-z0-9-.]+`),
@@ -160,7 +165,12 @@ func buildSanitizePreservePattern(opts *SanitizeOptions) string {
 func applySanitizePattern(result, allowedChars string, preserveSpecialChars bool) string {
 	pattern, ok := sanitizePatterns[allowedChars]
 	if !ok {
-		pattern = regexp.MustCompile(`[^` + allowedChars + `]+`)
+		var err error
+		//nolint:regexpdynamicpattern // Allowed characters are generated internally and compilation failures use the strict default.
+		pattern, err = regexp.Compile(`[^` + allowedChars + `]+`)
+		if err != nil {
+			pattern = sanitizePatterns["a-z0-9-"]
+		}
 	}
 	if preserveSpecialChars {
 		return pattern.ReplaceAllString(result, "-")
@@ -217,7 +227,7 @@ func SanitizeErrorMessage(message string) string {
 // instead, which produces hyphen-separated lowercase output.
 func SanitizeIdentifierName(name string, extraAllowed func(rune) bool) string {
 	result := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+		if isASCIIAlphanumeric(r) || r == '_' {
 			return r
 		}
 		if extraAllowed != nil && extraAllowed(r) {
@@ -323,7 +333,7 @@ func SanitizeForFilename(slug string) string {
 	}
 	var sb strings.Builder
 	for _, r := range strings.ReplaceAll(slug, "/", "-") {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+		if isASCIIAlphanumeric(r) || r == '-' || r == '_' || r == '.' {
 			sb.WriteRune(r)
 		} else {
 			sb.WriteRune('-')

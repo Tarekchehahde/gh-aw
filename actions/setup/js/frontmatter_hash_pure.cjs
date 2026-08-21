@@ -3,10 +3,19 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { ERR_PARSE, ERR_SYSTEM } = require("./error_codes.cjs");
+const { ERR_PARSE, ERR_SYSTEM, ERR_VALIDATION } = require("./error_codes.cjs");
 const { getErrorMessage } = require("./error_helpers.cjs");
 
 const MAX_FRONTMATTER_HASH_INPUT_BYTES = 1 << 20; // 1 MiB
+const HTTP_STATUS_UNAUTHORIZED = 401;
+const HTTP_STATUS_FORBIDDEN = 403;
+const HTTP_STATUS_NOT_FOUND = 404;
+
+/**
+ * Maximum depth for recursive symlink resolution when fetching remote files via the GitHub API.
+ * Mirrors the Go constant pkg/constants/constants.go MaxSymlinkDepth.
+ */
+const MAX_SYMLINK_DEPTH = 5;
 
 /**
  * Default file reader using Node.js fs module
@@ -14,7 +23,11 @@ const MAX_FRONTMATTER_HASH_INPUT_BYTES = 1 << 20; // 1 MiB
  * @returns {Promise<string>} File content
  */
 async function defaultFileReader(filePath) {
-  return fs.readFileSync(filePath, "utf8");
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath}: ${getErrorMessage(err)}`, { cause: err });
+  }
 }
 
 /**
@@ -263,6 +276,14 @@ function extractImportsFromText(frontmatterText) {
       // Extract array item
       if (trimmed.startsWith("-")) {
         let item = trimmed.substring(1).trim();
+        // Extract path from object-form imports (uses: <path> / path: <path>).
+        // These are valid import forms that the compiler accepts; extract the path
+        // value so that changes to imported files are reflected in the hash.
+        if (item.startsWith("uses:")) {
+          item = item.substring("uses:".length).trim();
+        } else if (item.startsWith("path:")) {
+          item = item.substring("path:".length).trim();
+        }
         // Remove quotes if present
         item = item.replace(/^["']|["']$/g, "");
         if (item) {
@@ -299,7 +320,7 @@ function validateNormalizedFrontmatterHashInputSize(normalizedFrontmatterText, n
   }
 
   if (totalBytes > MAX_FRONTMATTER_HASH_INPUT_BYTES) {
-    throw new Error(`frontmatter hash input exceeds ${MAX_FRONTMATTER_HASH_INPUT_BYTES} bytes after normalization`);
+    throw new Error(`${ERR_VALIDATION}: frontmatter hash input exceeds ${MAX_FRONTMATTER_HASH_INPUT_BYTES} bytes after normalization`);
   }
 }
 
@@ -503,7 +524,148 @@ function extractHashFromLockFile(lockFileContent) {
 }
 
 /**
- * Creates a file reader that uses GitHub's getFileContent API
+ * Checks whether a single path component in a remote GitHub repository is a symlink.
+ * Returns the symlink target string if it is one, or null for regular files/directories.
+ * Errors (including 404) are treated as "not a symlink" to allow the caller to continue
+ * walking the remaining path components.
+ * Mirrors the Go logic in pkg/parser/remote_download_file.go checkRemoteSymlink.
+ *
+ * @param {Object} github - GitHub API client (@actions/github)
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @param {string} dirPath - Repository-relative path of the component to inspect
+ * @param {string} ref - Git reference (branch, tag, or commit SHA)
+ * @param {Map<string, Promise<string|null>>} [symlinkLookupCache] - Optional cache for symlink lookups
+ * @returns {Promise<string|null>} Symlink target, or null if not a symlink
+ */
+async function checkRemoteSymlink(github, owner, repo, dirPath, ref, symlinkLookupCache) {
+  const cachedLookup = symlinkLookupCache && symlinkLookupCache.get(dirPath);
+  if (cachedLookup) {
+    return await cachedLookup;
+  }
+
+  const lookupPromise = (async () => {
+    try {
+      const response = await github.rest.repos.getContent({
+        owner,
+        repo,
+        path: dirPath,
+        ref,
+      });
+      // Array response → directory listing, not a symlink
+      if (Array.isArray(response.data)) {
+        return null;
+      }
+      // An empty string target is treated as absent (falsy); only non-empty targets are valid.
+      if (response.data.type === "symlink" && response.data.target) {
+        return response.data.target;
+      }
+      return null;
+    } catch (err) {
+      const errAny = /** @type {any} */ err;
+      const status = errAny?.status || (errAny?.response && errAny.response.status);
+      if (status === HTTP_STATUS_NOT_FOUND || status === HTTP_STATUS_FORBIDDEN || status === HTTP_STATUS_UNAUTHORIZED) {
+        return null;
+      }
+      throw err;
+    }
+  })();
+
+  if (symlinkLookupCache) {
+    symlinkLookupCache.set(dirPath, lookupPromise);
+  }
+
+  try {
+    return await lookupPromise;
+  } catch (err) {
+    if (symlinkLookupCache && symlinkLookupCache.get(dirPath) === lookupPromise) {
+      symlinkLookupCache.delete(dirPath);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Resolves symlinks in a remote GitHub repository path by walking each directory component.
+ * The GitHub Contents API does not follow symlinks in path components. For example, if
+ * .github/agents is a symlink to ../.ai/agents, requesting .github/agents/e2etest.md
+ * returns a 404. This function detects the symlink and returns the equivalent resolved path.
+ * Mirrors the Go logic in pkg/parser/remote_download_file.go resolveRemoteSymlinks.
+ *
+ * @param {Object} github - GitHub API client (@actions/github)
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @param {string} filePath - Repository-relative path to resolve (e.g. ".github/agents/e2etest.md")
+ * @param {string} ref - Git reference (branch, tag, or commit SHA)
+ * @param {Map<string, Promise<string|null>>} [symlinkLookupCache] - Optional cache for path-component symlink lookups
+ * @returns {Promise<string|null>} Resolved repository-relative path, or null if no symlinks found
+ */
+async function resolveRemoteSymlinks(github, owner, repo, filePath, ref, symlinkLookupCache) {
+  const parts = filePath.split("/");
+  if (parts.length <= 1) {
+    return null; // No directory components to resolve
+  }
+
+  // Resolve at most one symlink per call so each retry validates the next
+  // filesystem view independently. If the resolved path also contains a
+  // symlink, fetchFile will re-invoke resolveRemoteSymlinks via another 404
+  // retry (bounded by MAX_SYMLINK_DEPTH).
+  //
+  // Skip well-known non-symlink prefix components to avoid spurious API calls:
+  //   - ".github" alone is never a symlink
+  //   - ".github/workflows" is a reserved GitHub Actions directory and never a symlink
+  // Starting at a higher index reduces unnecessary probes when a path 404s for unrelated
+  // reasons (e.g. malformed nested import resolution that produces double directory names).
+  let startIndex = 1;
+  if (filePath.startsWith(".github/workflows/")) {
+    startIndex = 3; // Skip ".github" and ".github/workflows" components
+  } else if (filePath.startsWith(".github/")) {
+    startIndex = 2; // Skip ".github" component; still check e.g. ".github/agents"
+  }
+  for (let i = startIndex; i < parts.length; i++) {
+    const dirPath = parts.slice(0, i).join("/");
+    const target = await checkRemoteSymlink(github, owner, repo, dirPath, ref, symlinkLookupCache);
+    if (target === null) {
+      continue;
+    }
+
+    // Resolve the symlink: join the parent directory with the symlink target, then normalize.
+    // Uses path.posix to ensure forward-slash handling for repository-relative paths.
+    const parentDir = i > 1 ? parts.slice(0, i - 1).join("/") : "";
+    let resolvedBase;
+    if (parentDir) {
+      resolvedBase = path.posix.normalize(path.posix.join(parentDir, target));
+    } else {
+      resolvedBase = path.posix.normalize(target);
+    }
+
+    // Safety: resolved base must not escape repository root.
+    // path.posix.normalize has already been applied, so a path starting with ".." genuinely
+    // escapes the root — there are no remaining "../" segments that normalize would have collapsed.
+    if (!resolvedBase || resolvedBase === "." || path.posix.isAbsolute(resolvedBase) || resolvedBase.startsWith("..")) {
+      return null;
+    }
+
+    const remaining = parts.slice(i).join("/");
+    const resolvedPath = path.posix.normalize(path.posix.join(resolvedBase, remaining));
+
+    // Same safety check on the final resolved path after appending the remaining components.
+    if (!resolvedPath || resolvedPath === "." || path.posix.isAbsolute(resolvedPath) || resolvedPath.startsWith("..")) {
+      return null;
+    }
+
+    return resolvedPath;
+  }
+
+  return null; // No symlinks found
+}
+
+/**
+ * Creates a file reader that uses GitHub's getFileContent API.
+ * When a file is not found (HTTP 404), the reader automatically attempts to resolve symlinks
+ * in the path components and retries with the resolved path. This handles the case where an
+ * import path traverses a symlinked directory (e.g. .github/agents → ../.ai/agents) because
+ * the GitHub Contents API does not follow symlinks in path components.
  * @param {Object} github - GitHub API client (@actions/github)
  * @param {string} owner - Repository owner
  * @param {string} repo - Repository name
@@ -511,7 +673,30 @@ function extractHashFromLockFile(lockFileContent) {
  * @returns {Function} File reader function compatible with computeFrontmatterHash
  */
 function createGitHubFileReader(github, owner, repo, ref) {
-  return async function (filePath) {
+  /** @type {Map<string, Promise<string|null>>} */
+  const symlinkLookupCache = new Map();
+  /** @type {Map<string, Promise<string|null>>} */
+  const resolvedPathCache = new Map();
+
+  async function resolveRemoteSymlinksCached(filePath) {
+    const cachedResolution = resolvedPathCache.get(filePath);
+    if (cachedResolution) {
+      return await cachedResolution;
+    }
+
+    const resolutionPromise = resolveRemoteSymlinks(github, owner, repo, filePath, ref, symlinkLookupCache);
+    resolvedPathCache.set(filePath, resolutionPromise);
+    try {
+      return await resolutionPromise;
+    } catch (err) {
+      if (resolvedPathCache.get(filePath) === resolutionPromise) {
+        resolvedPathCache.delete(filePath);
+      }
+      throw err;
+    }
+  }
+
+  async function fetchFile(filePath, symlinkDepth) {
     try {
       const response = await github.rest.repos.getContent({
         owner,
@@ -527,10 +712,27 @@ function createGitHubFileReader(github, owner, repo, ref) {
 
       return response.data.content;
     } catch (error) {
+      // When the file is not found, attempt symlink resolution on path components.
+      // This handles the case where an import path traverses a symlinked directory
+      // (e.g. .github/agents → ../.ai/agents), which the GitHub Contents API cannot
+      // follow automatically. Mirrors the Go logic in remote_download_file.go.
+      const status = error.status || (error.response && error.response.status);
+      if (status === HTTP_STATUS_NOT_FOUND) {
+        if (symlinkDepth >= MAX_SYMLINK_DEPTH) {
+          throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath} from GitHub: symlink chain exceeded maximum depth of ${MAX_SYMLINK_DEPTH}`);
+        }
+        const resolvedPath = await resolveRemoteSymlinksCached(filePath);
+        if (resolvedPath !== null && resolvedPath !== filePath) {
+          return fetchFile(resolvedPath, symlinkDepth + 1);
+        }
+      }
+
       const errorMessage = getErrorMessage(error);
       throw new Error(`${ERR_SYSTEM}: Failed to read file ${filePath} from GitHub: ${errorMessage}`);
     }
-  };
+  }
+
+  return filePath => fetchFile(filePath, 0);
 }
 
 module.exports = {
@@ -549,4 +751,6 @@ module.exports = {
   collectImportedBodies,
   defaultFileReader,
   createGitHubFileReader,
+  checkRemoteSymlink,
+  resolveRemoteSymlinks,
 };

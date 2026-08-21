@@ -12,17 +12,15 @@ import (
 )
 
 func TestComputeFirewallDiff_NewDomains(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
-		TotalRequests:   5,
-		AllowedRequests: 5,
+		AnalysisBase: AnalysisBase{TotalRequests: 5, AllowedRequests: 5},
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443": {Allowed: 5, Blocked: 0},
 		},
 	}
 	run2 := &FirewallAnalysis{
-		TotalRequests:   20,
-		AllowedRequests: 17,
-		BlockedRequests: 3,
+		AnalysisBase: AnalysisBase{TotalRequests: 20, AllowedRequests: 17, BlockedRequests: 3},
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":        {Allowed: 5, Blocked: 0},
 			"registry.npmjs.org:443":    {Allowed: 15, Blocked: 0},
@@ -56,6 +54,7 @@ func TestComputeFirewallDiff_NewDomains(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_RemovedDomains(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":       {Allowed: 5, Blocked: 0},
@@ -86,6 +85,7 @@ func TestComputeFirewallDiff_RemovedDomains(t *testing.T) {
 // covers the false-red scenario where awmg-mcpg:8080 is blocked in the failed run but
 // is simply absent (no traffic) in the green run — the block should still be surfaced.
 func TestComputeFirewallDiff_RemovedDeniedDomain(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443": {Allowed: 10, Blocked: 0},
@@ -113,6 +113,7 @@ func TestComputeFirewallDiff_RemovedDeniedDomain(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_StatusChanges(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"staging.api.com:443":    {Allowed: 10, Blocked: 0},
@@ -150,6 +151,7 @@ func TestComputeFirewallDiff_StatusChanges(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_VolumeChanges(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":  {Allowed: 23, Blocked: 0},
@@ -176,6 +178,7 @@ func TestComputeFirewallDiff_VolumeChanges(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	diff := computeFirewallDiff(100, 200, nil, nil)
 
 	assert.Empty(t, diff.NewDomains, "Should have no new domains")
@@ -186,6 +189,7 @@ func TestComputeFirewallDiff_BothNil(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_Run1Nil(t *testing.T) {
+	t.Parallel()
 	run2 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443": {Allowed: 5, Blocked: 0},
@@ -199,6 +203,7 @@ func TestComputeFirewallDiff_Run1Nil(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_Run2Nil(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443": {Allowed: 5, Blocked: 0},
@@ -212,6 +217,7 @@ func TestComputeFirewallDiff_Run2Nil(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_NoChanges(t *testing.T) {
+	t.Parallel()
 	stats := map[string]DomainRequestStats{
 		"api.github.com:443": {Allowed: 5, Blocked: 0},
 	}
@@ -227,10 +233,9 @@ func TestComputeFirewallDiff_NoChanges(t *testing.T) {
 }
 
 func TestComputeFirewallDiff_CompleteScenario(t *testing.T) {
+	t.Parallel()
 	run1 := &FirewallAnalysis{
-		TotalRequests:   46,
-		AllowedRequests: 38,
-		BlockedRequests: 8,
+		AnalysisBase: AnalysisBase{TotalRequests: 46, AllowedRequests: 38, BlockedRequests: 8},
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":       {Allowed: 23, Blocked: 0},
 			"old-api.internal.com:443": {Allowed: 8, Blocked: 0},
@@ -239,9 +244,7 @@ func TestComputeFirewallDiff_CompleteScenario(t *testing.T) {
 		},
 	}
 	run2 := &FirewallAnalysis{
-		TotalRequests:   108,
-		AllowedRequests: 106,
-		BlockedRequests: 2,
+		AnalysisBase: AnalysisBase{TotalRequests: 108, AllowedRequests: 106, BlockedRequests: 2},
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443":        {Allowed: 89, Blocked: 0},
 			"registry.npmjs.org:443":    {Allowed: 15, Blocked: 0},
@@ -264,6 +267,7 @@ func TestComputeFirewallDiff_CompleteScenario(t *testing.T) {
 }
 
 func TestDomainStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		stats    DomainRequestStats
@@ -284,6 +288,7 @@ func TestDomainStatus(t *testing.T) {
 }
 
 func TestFormatVolumeChange(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		total1   int
@@ -306,6 +311,7 @@ func TestFormatVolumeChange(t *testing.T) {
 }
 
 func TestFirewallDiffJSONSerialization(t *testing.T) {
+	t.Parallel()
 	diff := computeFirewallDiff(100, 200, &FirewallAnalysis{
 		RequestsByDomain: map[string]DomainRequestStats{
 			"api.github.com:443": {Allowed: 5, Blocked: 0},
@@ -331,6 +337,7 @@ func TestFirewallDiffJSONSerialization(t *testing.T) {
 }
 
 func TestStatusEmoji(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "✅", firewallStatusEmoji("allowed"), "Allowed should show checkmark")
 	assert.Equal(t, "❌", firewallStatusEmoji("denied"), "Denied should show X")
 	assert.Equal(t, "⚠️", firewallStatusEmoji("mixed"), "Mixed should show warning")
@@ -339,6 +346,7 @@ func TestStatusEmoji(t *testing.T) {
 }
 
 func TestIsEmptyDiff(t *testing.T) {
+	t.Parallel()
 	emptyDiff := &FirewallDiff{}
 	assert.True(t, isEmptyFirewallDiff(emptyDiff), "Empty diff should be detected")
 
@@ -369,6 +377,7 @@ func findMCPToolDiffEntry(entries []MCPToolDiffEntry, serverName, toolName strin
 }
 
 func TestComputeMCPToolsDiff_NewTools(t *testing.T) {
+	t.Parallel()
 	run1 := &MCPToolUsageData{
 		Summary: []MCPToolSummary{
 			{ServerName: "github", ToolName: "issue_read", CallCount: 5, ErrorCount: 0},
@@ -406,6 +415,7 @@ func TestComputeMCPToolsDiff_NewTools(t *testing.T) {
 }
 
 func TestComputeMCPToolsDiff_RemovedTools(t *testing.T) {
+	t.Parallel()
 	run1 := &MCPToolUsageData{
 		Summary: []MCPToolSummary{
 			{ServerName: "github", ToolName: "issue_read", CallCount: 10, ErrorCount: 0},
@@ -428,6 +438,7 @@ func TestComputeMCPToolsDiff_RemovedTools(t *testing.T) {
 }
 
 func TestComputeMCPToolsDiff_ChangedTools(t *testing.T) {
+	t.Parallel()
 	run1 := &MCPToolUsageData{
 		Summary: []MCPToolSummary{
 			{ServerName: "github", ToolName: "issue_read", CallCount: 5, ErrorCount: 0},
@@ -466,6 +477,7 @@ func TestComputeMCPToolsDiff_ChangedTools(t *testing.T) {
 }
 
 func TestComputeMCPToolsDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	diff := computeMCPToolsDiff(nil, nil)
 
 	assert.Empty(t, diff.NewTools, "Should have no new tools")
@@ -475,6 +487,7 @@ func TestComputeMCPToolsDiff_BothNil(t *testing.T) {
 }
 
 func TestComputeMCPToolsDiff_NoChanges(t *testing.T) {
+	t.Parallel()
 	toolSummary := []MCPToolSummary{
 		{ServerName: "github", ToolName: "issue_read", CallCount: 5, ErrorCount: 0},
 	}
@@ -489,6 +502,7 @@ func TestComputeMCPToolsDiff_NoChanges(t *testing.T) {
 }
 
 func TestComputeMCPToolsDiff_SortedOutput(t *testing.T) {
+	t.Parallel()
 	run1 := &MCPToolUsageData{}
 	run2 := &MCPToolUsageData{
 		Summary: []MCPToolSummary{
@@ -507,20 +521,25 @@ func TestComputeMCPToolsDiff_SortedOutput(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_WithData(t *testing.T) {
+	t.Parallel()
 	summary1 := &RunSummary{
 		RunID: 100,
-		Run: WorkflowRun{
-			TokenUsage: 5000,
-			Duration:   10 * time.Minute,
-			Turns:      8,
+		RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{
+				TokenUsage: 5000,
+				Duration:   10 * time.Minute,
+				Turns:      8,
+			},
 		},
 	}
 	summary2 := &RunSummary{
 		RunID: 200,
-		Run: WorkflowRun{
-			TokenUsage: 7500,
-			Duration:   15 * time.Minute,
-			Turns:      12,
+		RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{
+				TokenUsage: 7500,
+				Duration:   15 * time.Minute,
+				Turns:      12,
+			},
 		},
 	}
 
@@ -541,19 +560,22 @@ func TestComputeRunMetricsDiff_WithData(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_NegativeChange(t *testing.T) {
-	summary1 := &RunSummary{
+	t.Parallel()
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 8000,
 			Duration:   20 * time.Minute,
 			Turns:      15,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 4000,
 			Duration:   12 * time.Minute,
 			Turns:      10,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -565,48 +587,55 @@ func TestComputeRunMetricsDiff_NegativeChange(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	diff := computeRunMetricsDiff(nil, nil)
 	assert.Nil(t, diff, "Should return nil when both summaries are nil")
 }
 
 func TestComputeRunMetricsDiff_AllZero(t *testing.T) {
-	summary1 := &RunSummary{Run: WorkflowRun{}}
-	summary2 := &RunSummary{Run: WorkflowRun{}}
+	t.Parallel()
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{Run: WorkflowRun{}}}
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{Run: WorkflowRun{}}}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
 	assert.Nil(t, diff, "Should return nil when all metrics are zero")
 }
 
 func TestComputeAuditDiff_CombinesAllSections(t *testing.T) {
+	t.Parallel()
 	summary1 := &RunSummary{
 		RunID: 100,
-		FirewallAnalysis: &FirewallAnalysis{
-			RequestsByDomain: map[string]DomainRequestStats{
-				"api.github.com:443": {Allowed: 5, Blocked: 0},
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis: &FirewallAnalysis{
+				RequestsByDomain: map[string]DomainRequestStats{
+					"api.github.com:443": {Allowed: 5, Blocked: 0},
+				},
 			},
-		},
-		MCPToolUsage: &MCPToolUsageData{
-			Summary: []MCPToolSummary{
-				{ServerName: "github", ToolName: "issue_read", CallCount: 3, ErrorCount: 0},
+			MCPToolUsage: &MCPToolUsageData{
+				Summary: []MCPToolSummary{
+					{ServerName: "github", ToolName: "issue_read", CallCount: 3, ErrorCount: 0},
+				},
 			},
+			Run: WorkflowRun{TokenUsage: 2000, Turns: 5},
 		},
-		Run: WorkflowRun{TokenUsage: 2000, Turns: 5},
 	}
 	summary2 := &RunSummary{
 		RunID: 200,
-		FirewallAnalysis: &FirewallAnalysis{
-			RequestsByDomain: map[string]DomainRequestStats{
-				"api.github.com:443":  {Allowed: 5, Blocked: 0},
-				"new.example.com:443": {Allowed: 3, Blocked: 0},
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis: &FirewallAnalysis{
+				RequestsByDomain: map[string]DomainRequestStats{
+					"api.github.com:443":  {Allowed: 5, Blocked: 0},
+					"new.example.com:443": {Allowed: 3, Blocked: 0},
+				},
 			},
-		},
-		MCPToolUsage: &MCPToolUsageData{
-			Summary: []MCPToolSummary{
-				{ServerName: "github", ToolName: "issue_read", CallCount: 7, ErrorCount: 0},
-				{ServerName: "github", ToolName: "create_issue", CallCount: 2, ErrorCount: 0},
+			MCPToolUsage: &MCPToolUsageData{
+				Summary: []MCPToolSummary{
+					{ServerName: "github", ToolName: "issue_read", CallCount: 7, ErrorCount: 0},
+					{ServerName: "github", ToolName: "create_issue", CallCount: 2, ErrorCount: 0},
+				},
 			},
+			Run: WorkflowRun{TokenUsage: 3000, Turns: 8},
 		},
-		Run: WorkflowRun{TokenUsage: 3000, Turns: 8},
 	}
 
 	diff := computeAuditDiff(100, 200, summary1, summary2)
@@ -627,6 +656,7 @@ func TestComputeAuditDiff_CombinesAllSections(t *testing.T) {
 }
 
 func TestComputeAuditDiff_NilSummaries(t *testing.T) {
+	t.Parallel()
 	diff := computeAuditDiff(100, 200, nil, nil)
 
 	assert.Equal(t, int64(100), diff.Run1ID, "Run1ID should be set even with nil summaries")
@@ -637,7 +667,8 @@ func TestComputeAuditDiff_NilSummaries(t *testing.T) {
 }
 
 func TestAuditDiffJSONSerialization(t *testing.T) {
-	summary1 := &RunSummary{
+	t.Parallel()
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		FirewallAnalysis: &FirewallAnalysis{
 			RequestsByDomain: map[string]DomainRequestStats{
 				"api.github.com:443": {Allowed: 5},
@@ -649,8 +680,9 @@ func TestAuditDiffJSONSerialization(t *testing.T) {
 			},
 		},
 		Run: WorkflowRun{TokenUsage: 1000, Turns: 4},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		FirewallAnalysis: &FirewallAnalysis{
 			RequestsByDomain: map[string]DomainRequestStats{
 				"api.github.com:443":  {Allowed: 5},
@@ -663,6 +695,7 @@ func TestAuditDiffJSONSerialization(t *testing.T) {
 			},
 		},
 		Run: WorkflowRun{TokenUsage: 1500, Turns: 6},
+	},
 	}
 
 	diff := computeAuditDiff(100, 200, summary1, summary2)
@@ -684,6 +717,7 @@ func TestAuditDiffJSONSerialization(t *testing.T) {
 }
 
 func TestFormatCountChange(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		count1   int
@@ -706,6 +740,7 @@ func TestFormatCountChange(t *testing.T) {
 }
 
 func TestIsEmptyMCPToolsDiff(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isEmptyMCPToolsDiff(&MCPToolsDiff{}), "Empty MCPToolsDiff should be detected")
 	assert.False(t, isEmptyMCPToolsDiff(&MCPToolsDiff{
 		NewTools: []MCPToolDiffEntry{{ToolName: "test"}},
@@ -713,6 +748,7 @@ func TestIsEmptyMCPToolsDiff(t *testing.T) {
 }
 
 func TestIsEmptyAuditDiff(t *testing.T) {
+	t.Parallel()
 	assert.True(t, isEmptyAuditDiff(&AuditDiff{}), "Empty AuditDiff should be detected")
 	assert.True(t, isEmptyAuditDiff(&AuditDiff{
 		FirewallDiff: &FirewallDiff{},
@@ -729,11 +765,13 @@ func TestIsEmptyAuditDiff(t *testing.T) {
 }
 
 func TestComputeTokenUsageDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	diff := computeTokenUsageDiff(nil, nil)
 	assert.Nil(t, diff, "Should return nil when both summaries are nil")
 }
 
 func TestComputeTokenUsageDiff_WithData(t *testing.T) {
+	t.Parallel()
 	tu1 := &TokenUsageSummary{
 		TotalInputTokens:      10000,
 		TotalOutputTokens:     2000,
@@ -786,6 +824,7 @@ func TestComputeTokenUsageDiff_WithData(t *testing.T) {
 }
 
 func TestComputeTokenUsageDiff_Run1Nil(t *testing.T) {
+	t.Parallel()
 	tu2 := &TokenUsageSummary{
 		TotalInputTokens:  5000,
 		TotalOutputTokens: 1000,
@@ -801,6 +840,7 @@ func TestComputeTokenUsageDiff_Run1Nil(t *testing.T) {
 }
 
 func TestComputeTokenUsageDiff_Run2Nil(t *testing.T) {
+	t.Parallel()
 	tu1 := &TokenUsageSummary{
 		TotalInputTokens:  5000,
 		TotalOutputTokens: 1000,
@@ -815,26 +855,31 @@ func TestComputeTokenUsageDiff_Run2Nil(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_WithTokenUsageDetails(t *testing.T) {
+	t.Parallel()
 	summary1 := &RunSummary{
 		RunID: 100,
-		Run:   WorkflowRun{Duration: 5 * time.Minute, Turns: 4},
-		TokenUsage: &TokenUsageSummary{
-			TotalInputTokens:  8000,
-			TotalOutputTokens: 1500,
-			TotalAIC:          0.6,
-			TotalRequests:     8,
-			CacheEfficiency:   0.25,
+		RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{Duration: 5 * time.Minute, Turns: 4},
+			TokenUsage: &TokenUsageSummary{
+				TotalInputTokens:  8000,
+				TotalOutputTokens: 1500,
+				TotalAIC:          0.6,
+				TotalRequests:     8,
+				CacheEfficiency:   0.25,
+			},
 		},
 	}
 	summary2 := &RunSummary{
 		RunID: 200,
-		Run:   WorkflowRun{Duration: 7 * time.Minute, Turns: 6},
-		TokenUsage: &TokenUsageSummary{
-			TotalInputTokens:  12000,
-			TotalOutputTokens: 2000,
-			TotalAIC:          0.9,
-			TotalRequests:     11,
-			CacheEfficiency:   0.30,
+		RunAnalysis: RunAnalysis{
+			Run: WorkflowRun{Duration: 7 * time.Minute, Turns: 6},
+			TokenUsage: &TokenUsageSummary{
+				TotalInputTokens:  12000,
+				TotalOutputTokens: 2000,
+				TotalAIC:          0.9,
+				TotalRequests:     11,
+				CacheEfficiency:   0.30,
+			},
 		},
 	}
 
@@ -853,21 +898,24 @@ func TestComputeRunMetricsDiff_WithTokenUsageDetails(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_TokenUsageDetailsAloneNotNil(t *testing.T) {
+	t.Parallel()
 	// Verify that detailed token usage data alone (without Run.TokenUsage set)
 	// still produces a non-nil RunMetricsDiff
-	summary1 := &RunSummary{
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{},
 		TokenUsage: &TokenUsageSummary{
 			TotalInputTokens: 5000,
 			TotalRequests:    5,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{},
 		TokenUsage: &TokenUsageSummary{
 			TotalInputTokens: 8000,
 			TotalRequests:    7,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -879,60 +927,67 @@ func TestComputeRunMetricsDiff_TokenUsageDetailsAloneNotNil(t *testing.T) {
 }
 
 func TestComputeAuditDiff_MultipleRuns(t *testing.T) {
+	t.Parallel()
 	base := &RunSummary{
 		RunID: 100,
-		FirewallAnalysis: &FirewallAnalysis{
-			RequestsByDomain: map[string]DomainRequestStats{
-				"api.github.com:443": {Allowed: 5, Blocked: 0},
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis: &FirewallAnalysis{
+				RequestsByDomain: map[string]DomainRequestStats{
+					"api.github.com:443": {Allowed: 5, Blocked: 0},
+				},
 			},
-		},
-		MCPToolUsage: &MCPToolUsageData{
-			Summary: []MCPToolSummary{
-				{ServerName: "github", ToolName: "issue_read", CallCount: 3, ErrorCount: 0},
+			MCPToolUsage: &MCPToolUsageData{
+				Summary: []MCPToolSummary{
+					{ServerName: "github", ToolName: "issue_read", CallCount: 3, ErrorCount: 0},
+				},
 			},
-		},
-		Run: WorkflowRun{Turns: 5},
-		TokenUsage: &TokenUsageSummary{
-			TotalInputTokens:  10000,
-			TotalOutputTokens: 2000,
-			TotalRequests:     10,
+			Run: WorkflowRun{Turns: 5},
+			TokenUsage: &TokenUsageSummary{
+				TotalInputTokens:  10000,
+				TotalOutputTokens: 2000,
+				TotalRequests:     10,
+			},
 		},
 	}
 
 	compare1 := &RunSummary{
 		RunID: 200,
-		FirewallAnalysis: &FirewallAnalysis{
-			RequestsByDomain: map[string]DomainRequestStats{
-				"api.github.com:443":   {Allowed: 5, Blocked: 0},
-				"new1.example.com:443": {Allowed: 3, Blocked: 0},
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis: &FirewallAnalysis{
+				RequestsByDomain: map[string]DomainRequestStats{
+					"api.github.com:443":   {Allowed: 5, Blocked: 0},
+					"new1.example.com:443": {Allowed: 3, Blocked: 0},
+				},
 			},
-		},
-		MCPToolUsage: &MCPToolUsageData{
-			Summary: []MCPToolSummary{
-				{ServerName: "github", ToolName: "issue_read", CallCount: 5, ErrorCount: 0},
+			MCPToolUsage: &MCPToolUsageData{
+				Summary: []MCPToolSummary{
+					{ServerName: "github", ToolName: "issue_read", CallCount: 5, ErrorCount: 0},
+				},
 			},
-		},
-		Run: WorkflowRun{Turns: 7},
-		TokenUsage: &TokenUsageSummary{
-			TotalInputTokens:  15000,
-			TotalOutputTokens: 3000,
-			TotalRequests:     12,
+			Run: WorkflowRun{Turns: 7},
+			TokenUsage: &TokenUsageSummary{
+				TotalInputTokens:  15000,
+				TotalOutputTokens: 3000,
+				TotalRequests:     12,
+			},
 		},
 	}
 
 	compare2 := &RunSummary{
 		RunID: 300,
-		FirewallAnalysis: &FirewallAnalysis{
-			RequestsByDomain: map[string]DomainRequestStats{
-				"api.github.com:443":   {Allowed: 5, Blocked: 0},
-				"new2.example.com:443": {Allowed: 1, Blocked: 2},
+		RunAnalysis: RunAnalysis{
+			FirewallAnalysis: &FirewallAnalysis{
+				RequestsByDomain: map[string]DomainRequestStats{
+					"api.github.com:443":   {Allowed: 5, Blocked: 0},
+					"new2.example.com:443": {Allowed: 1, Blocked: 2},
+				},
 			},
-		},
-		Run: WorkflowRun{Turns: 4},
-		TokenUsage: &TokenUsageSummary{
-			TotalInputTokens:  8000,
-			TotalOutputTokens: 1500,
-			TotalRequests:     8,
+			Run: WorkflowRun{Turns: 4},
+			TokenUsage: &TokenUsageSummary{
+				TotalInputTokens:  8000,
+				TotalOutputTokens: 1500,
+				TotalRequests:     8,
+			},
 		},
 	}
 
@@ -966,11 +1021,13 @@ func TestComputeAuditDiff_MultipleRuns(t *testing.T) {
 }
 
 func TestComputeGitHubRateLimitDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	diff := computeGitHubRateLimitDiff(nil, nil)
 	assert.Nil(t, diff, "both nil should return nil")
 }
 
 func TestComputeGitHubRateLimitDiff_WithData(t *testing.T) {
+	t.Parallel()
 	rl1 := &GitHubRateLimitUsage{
 		TotalRequestsMade: 40,
 		CoreConsumed:      40,
@@ -1000,6 +1057,7 @@ func TestComputeGitHubRateLimitDiff_WithData(t *testing.T) {
 }
 
 func TestComputeGitHubRateLimitDiff_Run1Nil(t *testing.T) {
+	t.Parallel()
 	rl2 := &GitHubRateLimitUsage{
 		TotalRequestsMade: 30,
 		CoreConsumed:      30,
@@ -1014,7 +1072,8 @@ func TestComputeGitHubRateLimitDiff_Run1Nil(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_WithRateLimitData(t *testing.T) {
-	summary1 := &RunSummary{
+	t.Parallel()
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 1000,
 			Duration:   2 * time.Minute,
@@ -1026,8 +1085,9 @@ func TestComputeRunMetricsDiff_WithRateLimitData(t *testing.T) {
 			CoreRemaining:     4960,
 			CoreLimit:         5000,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 1200,
 			Duration:   3 * time.Minute,
@@ -1039,6 +1099,7 @@ func TestComputeRunMetricsDiff_WithRateLimitData(t *testing.T) {
 			CoreRemaining:     4940,
 			CoreLimit:         5000,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -1050,16 +1111,19 @@ func TestComputeRunMetricsDiff_WithRateLimitData(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_RateLimitAloneNotNil(t *testing.T) {
+	t.Parallel()
 	// RunMetricsDiff should be non-nil when only rate limit data is present
-	summary1 := &RunSummary{
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		GitHubRateLimitUsage: &GitHubRateLimitUsage{
 			TotalRequestsMade: 10,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		GitHubRateLimitUsage: &GitHubRateLimitUsage{
 			TotalRequestsMade: 15,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -1070,11 +1134,13 @@ func TestComputeRunMetricsDiff_RateLimitAloneNotNil(t *testing.T) {
 // --- Tool calls diff tests ---
 
 func TestComputeToolCallsDiff_BothNil(t *testing.T) {
+	t.Parallel()
 	result := computeToolCallsDiff(nil, nil)
 	assert.Nil(t, result, "Should return nil when both metrics are nil")
 }
 
 func TestComputeToolCallsDiff_BothEmpty(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{}
 	m2 := &LogMetrics{}
 	result := computeToolCallsDiff(m1, m2)
@@ -1082,6 +1148,7 @@ func TestComputeToolCallsDiff_BothEmpty(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_DuplicateToolNames(t *testing.T) {
+	t.Parallel()
 	// When the same tool name appears multiple times (e.g. metrics aggregated from multiple log files),
 	// call counts should be summed and max sizes kept.
 	m1 := &LogMetrics{
@@ -1116,6 +1183,7 @@ func TestComputeToolCallsDiff_DuplicateToolNames(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_NewTools(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{
 		ToolCalls: []ToolCallInfo{
 			{Name: "gh", CallCount: 5},
@@ -1150,6 +1218,7 @@ func TestComputeToolCallsDiff_NewTools(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_RemovedTools(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{
 		ToolCalls: []ToolCallInfo{
 			{Name: "bash", CallCount: 8},
@@ -1175,6 +1244,7 @@ func TestComputeToolCallsDiff_RemovedTools(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_ChangedTools(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{
 		ToolCalls: []ToolCallInfo{
 			{Name: "bash", CallCount: 5, MaxOutputSize: 300},
@@ -1208,6 +1278,7 @@ func TestComputeToolCallsDiff_ChangedTools(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_AllToolsContainsEverything(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{
 		ToolCalls: []ToolCallInfo{
 			{Name: "bash", CallCount: 4},
@@ -1237,6 +1308,7 @@ func TestComputeToolCallsDiff_AllToolsContainsEverything(t *testing.T) {
 }
 
 func TestComputeToolCallsDiff_SortedOutput(t *testing.T) {
+	t.Parallel()
 	m1 := &LogMetrics{}
 	m2 := &LogMetrics{
 		ToolCalls: []ToolCallInfo{
@@ -1259,6 +1331,7 @@ func TestComputeToolCallsDiff_SortedOutput(t *testing.T) {
 // --- Bash commands diff tests ---
 
 func TestComputeBashCommandsDiff_NoBash(t *testing.T) {
+	t.Parallel()
 	// computeBashCommandsDiff receives pre-filtered maps; passing no bash tools → nil
 	run1Tools := map[string]ToolCallInfo{}
 	run2Tools := map[string]ToolCallInfo{}
@@ -1267,6 +1340,7 @@ func TestComputeBashCommandsDiff_NoBash(t *testing.T) {
 }
 
 func TestComputeBashCommandsDiff_GenericBash(t *testing.T) {
+	t.Parallel()
 	// Only bash tools are passed to computeBashCommandsDiff
 	run1Tools := map[string]ToolCallInfo{
 		"bash": {Name: "bash", CallCount: 5},
@@ -1289,6 +1363,7 @@ func TestComputeBashCommandsDiff_GenericBash(t *testing.T) {
 }
 
 func TestComputeBashCommandsDiff_PerCommandTracking(t *testing.T) {
+	t.Parallel()
 	// Codex-style per-command bash tracking
 	run1Tools := map[string]ToolCallInfo{
 		"bash_git_status": {Name: "bash_git_status", CallCount: 3},
@@ -1321,6 +1396,7 @@ func TestComputeBashCommandsDiff_PerCommandTracking(t *testing.T) {
 }
 
 func TestComputeBashCommandsDiff_BashCapitalized(t *testing.T) {
+	t.Parallel()
 	// Claude uses "Bash" (capitalized)
 	run1Tools := map[string]ToolCallInfo{
 		"Bash": {Name: "Bash", CallCount: 7},
@@ -1338,17 +1414,20 @@ func TestComputeBashCommandsDiff_BashCapitalized(t *testing.T) {
 // --- Tokens per turn tests ---
 
 func TestComputeRunMetricsDiff_TokensPerTurn(t *testing.T) {
-	summary1 := &RunSummary{
+	t.Parallel()
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 10000,
 			Turns:      5,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 18000,
 			Turns:      6,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -1361,8 +1440,9 @@ func TestComputeRunMetricsDiff_TokensPerTurn(t *testing.T) {
 }
 
 func TestComputeRunMetricsDiff_TokensPerTurnIgnoresEffectiveTokenTotals(t *testing.T) {
+	t.Parallel()
 	// Tokens/turn should continue to use engine token usage even when effective totals exist.
-	summary1 := &RunSummary{
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 10000,
 			Turns:      4,
@@ -1372,8 +1452,9 @@ func TestComputeRunMetricsDiff_TokensPerTurnIgnoresEffectiveTokenTotals(t *testi
 			TotalInputTokens:     10000,
 			TotalRequests:        4,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 16000,
 			Turns:      4,
@@ -1383,6 +1464,7 @@ func TestComputeRunMetricsDiff_TokensPerTurnIgnoresEffectiveTokenTotals(t *testi
 			TotalInputTokens:     16000,
 			TotalRequests:        4,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -1393,18 +1475,21 @@ func TestComputeRunMetricsDiff_TokensPerTurnIgnoresEffectiveTokenTotals(t *testi
 }
 
 func TestComputeRunMetricsDiff_TokensPerTurnZeroTurns(t *testing.T) {
+	t.Parallel()
 	// When turns = 0, tokens per turn should remain 0 (no division)
-	summary1 := &RunSummary{
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 5000,
 			Turns:      0,
 		},
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run: WorkflowRun{
 			TokenUsage: 8000,
 			Turns:      4,
 		},
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)
@@ -1417,6 +1502,7 @@ func TestComputeRunMetricsDiff_TokensPerTurnZeroTurns(t *testing.T) {
 // --- Tool calls diff in RunMetricsDiff integration test ---
 
 func TestComputeRunMetricsDiff_WithToolCallsDiff(t *testing.T) {
+	t.Parallel()
 	m1 := LogMetrics{
 		ToolCalls: []ToolCallInfo{
 			{Name: "bash", CallCount: 5},
@@ -1432,13 +1518,15 @@ func TestComputeRunMetricsDiff_WithToolCallsDiff(t *testing.T) {
 		},
 		Turns: 6,
 	}
-	summary1 := &RunSummary{
+	summary1 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run:     WorkflowRun{TokenUsage: 5000, Turns: 4},
 		Metrics: m1,
+	},
 	}
-	summary2 := &RunSummary{
+	summary2 := &RunSummary{RunAnalysis: RunAnalysis{
 		Run:     WorkflowRun{TokenUsage: 9000, Turns: 6},
 		Metrics: m2,
+	},
 	}
 
 	diff := computeRunMetricsDiff(summary1, summary2)

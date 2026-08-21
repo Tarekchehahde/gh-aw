@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -97,6 +98,29 @@ func readSourceRepoFromFile(path string) string {
 	return repo
 }
 
+// readFullSourceFromFile reads the full 'source' frontmatter field from a local workflow file
+// (e.g. "owner/repo/.github/workflows/worker.md@main"). Returns "" if the file cannot be
+// read, has no source field, or the field value is not a string.
+func readFullSourceFromFile(filePath string) string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return ""
+	}
+	result, err := parser.ExtractFrontmatterFromContent(string(content))
+	if err != nil || result.Frontmatter == nil {
+		return ""
+	}
+	sourceRaw, ok := result.Frontmatter["source"]
+	if !ok {
+		return ""
+	}
+	source, ok := sourceRaw.(string)
+	if !ok {
+		return ""
+	}
+	return source
+}
+
 // sourceRepoLabel returns the source repo string for display in error messages.
 // When the repo string is empty (file has no source field or is not a markdown file),
 // a human-readable placeholder is returned so the error message is not confusing.
@@ -105,4 +129,15 @@ func sourceRepoLabel(repo string) string {
 		return "(no source field)"
 	}
 	return repo
+}
+
+// marshalIndentJSONOrWrap marshals v as indented JSON, wrapping any error with a
+// short description of what was being marshaled so failures are easier to debug.
+// The label string should name the value, e.g. "outcomes report".
+func marshalIndentJSONOrWrap(v any, label string) ([]byte, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s to JSON: %w", label, err)
+	}
+	return data, nil
 }

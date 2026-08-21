@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/github/gh-aw/pkg/constants"
 	"github.com/github/gh-aw/pkg/logger"
@@ -112,6 +114,9 @@ type EngineCapabilities struct {
 	// ToolsAllowlist reports whether the engine supports MCP tool allow-listing.
 	ToolsAllowlist bool
 
+	// MCP reports whether the engine supports MCP servers directly.
+	MCP bool
+
 	// MaxTurns reports whether the engine supports the max-turns feature.
 	MaxTurns bool
 
@@ -133,12 +138,42 @@ type EngineCapabilities struct {
 	// which suppresses automatic loading of context and custom instructions. When false,
 	// specifying bare: true emits a warning and has no effect.
 	BareMode bool
+
+	// BashCommandAllowlist reports whether the engine enforces a bash command allowlist
+	// derived from tools.bash: [cmd1, cmd2, ...]. When true, the engine maps the
+	// allowlist to its own CLI syntax (e.g. --allowed-tools Bash(cmd), run_shell_command(cmd)).
+	// When false, a restricted tools.bash allowlist is silently ignored at runtime,
+	// so the compiler emits an error to prevent the allowlist illusion.
+	BashCommandAllowlist bool
+
+	// BashDisable reports whether the engine can fully refuse all bash/shell tool calls
+	// when tools.bash is completely disabled (tools.bash: false, or tools.bash: []).
+	// This is a coarser capability than BashCommandAllowlist: an engine may be unable to
+	// enforce a partial per-command allowlist yet still be able to turn shell execution
+	// off entirely (e.g. Codex's `features.shell_tool=false` config flag). When true, the
+	// compiler allows a fully-disabled tools.bash even if BashCommandAllowlist is false.
+	BashDisable bool
+
+	// Plugins reports whether the engine can install Agent Plugins.
+	Plugins bool
+}
+
+// PluginInstallationProvider generates installation steps for Agent Plugins.
+type PluginInstallationProvider interface {
+	GetPluginInstallationSteps(workflowData *WorkflowData) []GitHubActionStep
 }
 
 // CapabilityProvider detects what capabilities an engine supports.
 // Engines can optionally implement this to indicate feature support.
 type CapabilityProvider interface {
 	GetCapabilities() EngineCapabilities
+}
+
+// MCPProxyEngine provides the identity and MCP capability information needed to
+// configure CLI proxy tools.
+type MCPProxyEngine interface {
+	Engine
+	CapabilityProvider
 }
 
 // WorkflowExecutor handles workflow compilation and execution
@@ -155,6 +190,11 @@ type WorkflowExecutor interface {
 	// This step is added to the activation job before context variable validation.
 	// Returns an empty GitHubActionStep if no secret validation is needed.
 	GetSecretValidationStep(workflowData *WorkflowData) GitHubActionStep
+
+	// GetSecretFailureMessage returns an engine-specific markdown message shown in the
+	// agentic failure issue when the secret validation step fails. Return an empty string
+	// if the engine has no specific guidance beyond the default error message.
+	GetSecretFailureMessage(workflowData *WorkflowData) string
 
 	// GetExecutionSteps returns the GitHub Actions steps for executing this engine
 	GetExecutionSteps(workflowData *WorkflowData, logFile string) []GitHubActionStep
@@ -229,20 +269,23 @@ type SecurityProvider interface {
 // The default implementation in BaseEngine returns "" (no native env var).
 type ModelEnvVarProvider interface {
 	// GetModelEnvVarName returns the name of the native environment variable the CLI
-	// uses for model selection (e.g., "COPILOT_MODEL", "ANTHROPIC_MODEL", "ANTIGRAVITY_MODEL").
+	// uses for model selection (e.g., "COPILOT_MODEL", "ANTHROPIC_MODEL", "GEMINI_MODEL").
 	// Returns an empty string if the engine does not support a native model env var.
 	GetModelEnvVarName() string
 }
 
-// LLMProviderResolver is implemented by engines that support selecting
-// different inference providers at runtime (for example engine.model-provider).
+// InferenceProviderResolver is implemented by engines that support selecting
+// different inference providers at runtime (for example engine.provider).
 // This interface is intentionally separate from CodingAgentEngine so provider
 // concerns remain decoupled from core engine execution capabilities.
-type LLMProviderResolver interface {
+type InferenceProviderResolver interface {
 	// ResolveLLMProvider returns the effective provider for the workflow
 	// (for example "github", "anthropic", or "openai").
-	ResolveLLMProvider(workflowData *WorkflowData) string
+	ResolveLLMProvider(workflowData *WorkflowData) LLMProvider
 }
+
+// LLMProviderResolver is kept as a backward-compatible alias.
+type LLMProviderResolver = InferenceProviderResolver
 
 // AgentFileProvider is an optional interface implemented by engines that have
 // engine-specific instruction or configuration files that should be treated as
@@ -271,15 +314,33 @@ type ConfigRenderer interface {
 	RenderConfig(target *ResolvedEngineTarget) ([]map[string]any, error)
 }
 
-// HarnessProvider is an optional interface implemented by engines that provide a
+// HarnessRunner is an optional interface implemented by engines that provide a
 // JavaScript harness script to wrap CLI execution with retry and recovery logic.
 // The harness is placed in the setup actions directory and executed via Node.js
 // as a transparent subprocess wrapper around the engine CLI.
-type HarnessProvider interface {
+type HarnessRunner interface {
 	// GetHarnessScriptName returns the filename of the JavaScript harness script
 	// (located in the setup actions directory) used to wrap CLI execution.
 	// Returns an empty string if no harness is needed.
 	GetHarnessScriptName() string
+}
+
+// HarnessProvider is kept as a backward-compatible alias.
+type HarnessProvider = HarnessRunner
+
+// MCPConfigAdapterProvider is an optional interface implemented by engines that provide
+// a JavaScript config-adapter script to convert the MCP gateway's raw output
+// configuration into the engine-specific format (e.g. Goose's .goose/mcp.json).
+// The script is written to the setup actions directory and executed by
+// start_mcp_gateway.cjs in place of a built-in per-engine converter.
+type MCPConfigAdapterProvider interface {
+	// GetMCPConfigAdapterWriteStep returns a GitHub Actions step that writes the
+	// config-adapter script to disk, or nil if the engine has no config-adapter script.
+	GetMCPConfigAdapterWriteStep() GitHubActionStep
+	// GetMCPConfigAdapterFilename returns the filename (not path) of the
+	// config-adapter script located in the setup actions directory, or an empty
+	// string if the engine has no config-adapter script.
+	GetMCPConfigAdapterFilename() string
 }
 
 // engineRequiresNodeHarness reports whether the engine's execution command wraps
@@ -291,7 +352,7 @@ func engineRequiresNodeHarness(engine CodingAgentEngine) bool {
 	if engine == nil {
 		return false
 	}
-	hp, ok := engine.(HarnessProvider)
+	hp, ok := engine.(HarnessRunner)
 	if !ok {
 		return false
 	}
@@ -395,6 +456,12 @@ func (e *BaseEngine) GetSecretValidationStep(workflowData *WorkflowData) GitHubA
 	return GitHubActionStep{}
 }
 
+// GetSecretFailureMessage returns an empty string by default.
+// Engines that want to provide custom guidance when secret validation fails must override this method.
+func (e *BaseEngine) GetSecretFailureMessage(workflowData *WorkflowData) string {
+	return ""
+}
+
 // GetFirewallLogsCollectionStep returns an empty slice by default.
 // Firewall logs are written to a known location (/tmp/gh-aw/sandbox/firewall/logs/)
 // and do not require a separate collection step. The method is still called from
@@ -491,9 +558,6 @@ func NewEngineRegistry() *EngineRegistry {
 		NewCodexEngine(),
 		NewCopilotEngine(),
 		NewGeminiEngine(),
-		NewAntigravityEngine(),
-		NewOpenCodeEngine(),
-		NewCrushEngine(),
 		NewPiEngine(),
 	}
 	for _, engine := range builtins {
@@ -528,10 +592,15 @@ func GetGlobalEngineRegistry() *EngineRegistry {
 func (r *EngineRegistry) Register(engine CodingAgentEngine) error {
 	type portProvider interface{ getDedicatedLLMGatewayPort() int }
 	if p, ok := engine.(portProvider); ok && p.getDedicatedLLMGatewayPort() < 0 {
-		return fmt.Errorf("engine '%s': dedicatedLLMGatewayPort must be >= 0, got %d", engine.GetID(), p.getDedicatedLLMGatewayPort())
+		return fmt.Errorf("engine '%s': dedicatedLLMGatewayPort must be >= 0, got %d; expected a non-negative port number or 0 to disable the dedicated gateway", engine.GetID(), p.getDedicatedLLMGatewayPort())
 	}
 	agenticEngineLog.Printf("Registering engine: id=%s, name=%s", engine.GetID(), engine.GetDisplayName())
 	r.engines[engine.GetID()] = engine
+	// Invalidate the pre-computed manifest caches so engines registered after
+	// construction (e.g. behavior-defined engines imported from shared workflows)
+	// contribute their manifest files and folders.
+	r.cachedManifestFolders = nil
+	r.cachedManifestFiles = nil
 	return nil
 }
 
@@ -545,6 +614,20 @@ func (r *EngineRegistry) GetEngine(id string) (CodingAgentEngine, error) {
 	}
 	agenticEngineLog.Printf("Found engine: id=%s, name=%s", id, engine.GetDisplayName())
 	return engine, nil
+}
+
+// EnginesWithCapability returns a sorted list of engine IDs for which the given capability
+// predicate returns true. It is used to build accurate, registry-driven lists of supported
+// engines in error messages and documentation so those lists stay correct as engines evolve.
+func (r *EngineRegistry) EnginesWithCapability(predicate func(EngineCapabilities) bool) []string {
+	var ids []string
+	for id, engine := range r.engines {
+		if predicate(engine.GetCapabilities()) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // GetSupportedEngines returns a list of all supported engine IDs
@@ -609,20 +692,6 @@ func (r *EngineRegistry) computeAllAgentManifestFolders() []string {
 	return result
 }
 
-// GetAllAgentManifestFiles returns the union of all engines' GetAgentManifestFiles().
-// The returned list is sorted and deduplicated, making the engine implementations the
-// single source of truth for which root-level instruction files the save/restore scripts protect.
-//
-// When created via NewEngineRegistry the result is pre-computed at construction time
-// so subsequent calls are allocation-free.  Registries created directly (e.g. in tests)
-// fall back to computing on demand.
-func (r *EngineRegistry) GetAllAgentManifestFiles() []string {
-	if r.cachedManifestFiles != nil {
-		return r.cachedManifestFiles
-	}
-	return r.computeAllAgentManifestFiles()
-}
-
 // computeAllAgentManifestFiles computes the manifest files list from the registered engines.
 // Called once during NewEngineRegistry to populate cachedManifestFiles.
 func (r *EngineRegistry) computeAllAgentManifestFiles() []string {
@@ -676,4 +745,42 @@ func (r *EngineRegistry) GetEngineByPrefix(prefix string) (CodingAgentEngine, er
 	})
 	agenticEngineLog.Printf("Found %d engine candidate(s) for prefix %s, using: %s", len(candidates), prefix, candidates[0].id)
 	return candidates[0].engine, nil
+}
+
+// resolveStepTimeoutValue returns the timeout value string to emit on an
+// agentic_execution step's timeout-minutes field.  Resolution uses the
+// following precedence:
+//  1. ParsedFrontmatter.TimeoutMinutes — the already-typed value; supports
+//     both integer literals and GitHub Actions expressions.
+//  2. WorkflowData.TimeoutMinutes — the raw extracted YAML string (e.g.
+//     "timeout-minutes: 30"); the "timeout-minutes:" prefix is stripped before
+//     use.  Only positive integers and GitHub Actions expressions are accepted;
+//     any other value is rejected to prevent malformed YAML output.
+//  3. DefaultAgenticWorkflowTimeout — used when workflowData is nil or neither
+//     of the above sources yields a valid non-empty value.
+func resolveStepTimeoutValue(workflowData *WorkflowData) string {
+	defaultValue := strconv.Itoa(int(constants.DefaultAgenticWorkflowTimeout / time.Minute))
+	if workflowData == nil {
+		return defaultValue
+	}
+	if workflowData.ParsedFrontmatter != nil && workflowData.ParsedFrontmatter.TimeoutMinutes != nil {
+		if v := workflowData.ParsedFrontmatter.TimeoutMinutes.String(); v != "" {
+			return v
+		}
+	}
+	if raw := strings.TrimSpace(workflowData.TimeoutMinutes); raw != "" {
+		if after, ok := strings.CutPrefix(raw, "timeout-minutes:"); ok {
+			raw = strings.TrimSpace(after)
+		}
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return raw
+		}
+		if isExpression(raw) {
+			return raw
+		}
+		if raw != "" {
+			agenticEngineLog.Printf("resolveStepTimeoutValue: ignoring non-integer, non-expression timeout-minutes %q; using default %s", raw, defaultValue)
+		}
+	}
+	return defaultValue
 }

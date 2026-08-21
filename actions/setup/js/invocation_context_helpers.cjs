@@ -190,7 +190,7 @@ function checkAllowedRepo(workflowRepo, targetRepo) {
 
   const validation = validateTargetRepo(targetRepoSlug, defaultRepo, allowedRepos);
   if (!validation.valid) {
-    throw new Error(`${ERR_VALIDATION}: ${validation.error}`);
+    throw Object.assign(new Error(`${ERR_VALIDATION}: ${validation.error}`), { code: ERR_VALIDATION });
   }
 }
 
@@ -215,7 +215,7 @@ function resolveInvocationContext(rawContext) {
 
   /** @type {"native" | "workflow_dispatch" | "repository_dispatch"} */
   let source = "native";
-  let eventName = rawContext?.eventName || "";
+  let eventName = rawContext?.eventName || process.env.GITHUB_EVENT_NAME || "";
   let eventPayload = rawContext?.payload || {};
   let eventRepo = normalizeRepo(rawContext?.eventRepo);
 

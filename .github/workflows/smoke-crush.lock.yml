@@ -1,5 +1,5 @@
-# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"8137dad322d50cb949a65af7f22d3232bdded2ba5029f75a51656d1d1180d491","body_hash":"9521ff284311fc5d6253340f4bee1caa10e519fdf49d1a628dc5084bfd4bb9a8","strict":true,"agent_id":"crush","agent_model":"anthropic/claude-sonnet-4-20250514","engine_versions":{"crush":"0.59.0"}}
-# gh-aw-manifest: {"version":1,"secrets":["ANTHROPIC_API_KEY","COPILOT_GITHUB_TOKEN","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GH_AW_OTEL_GRAFANA_AUTHORIZATION","GH_AW_OTEL_GRAFANA_ENDPOINT","GH_AW_OTEL_SENTRY_AUTHORIZATION","GH_AW_OTEL_SENTRY_ENDPOINT","GITHUB_TOKEN"],"actions":[{"repo":"actions/cache/restore","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/cache/save","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/checkout","sha":"9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","version":"v7.0.0"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e","version":"v6.4.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.27.29","digest":"sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.27.29@sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.29","digest":"sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.27.29@sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.27.29","digest":"sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.27.29@sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.1","digest":"sha256:ad2a979c2cd8b50098e84938ca9c9c1580eb8e91526f101a90adfba7859b2c32","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.1@sha256:ad2a979c2cd8b50098e84938ca9c9c1580eb8e91526f101a90adfba7859b2c32"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b","pinned_image":"ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b"},{"image":"ghcr.io/github/github-mcp-server:v1.5.0","digest":"sha256:e25564dccc9110a70a77b9df560cbde11aa392fcb5f08b9abe5c4ebc6d146ea4","pinned_image":"ghcr.io/github/github-mcp-server:v1.5.0@sha256:e25564dccc9110a70a77b9df560cbde11aa392fcb5f08b9abe5c4ebc6d146ea4"}]}
+# gh-aw-metadata: {"schema_version":"v4","frontmatter_hash":"772640a41ae4d436fe7874d6f26798333008f963505ab2bbaaee0fda48ab92e6","body_hash":"e5ee7908c0ded99864054d63fdfda9d352a7f6bbd6ae09ed51ee0f31773ecbf1","strict":true,"agent_id":"crush","agent_model":"copilot/claude-sonnet-4.5","engine_versions":{"crush":"0.88.0"}}
+# gh-aw-manifest: {"version":1,"secrets":["GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GH_AW_OTEL_GRAFANA_AUTHORIZATION","GH_AW_OTEL_GRAFANA_ENDPOINT","GH_AW_OTEL_SENTRY_AUTHORIZATION","GH_AW_OTEL_SENTRY_ENDPOINT","GITHUB_TOKEN"],"actions":[{"repo":"actions/cache/restore","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/cache/save","sha":"55cc8345863c7cc4c66a329aec7e433d2d1c52a9","version":"v6.1.0"},{"repo":"actions/checkout","sha":"3d3c42e5aac5ba805825da76410c181273ba90b1","version":"v7.0.1"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-node","sha":"820762786026740c76f36085b0efc47a31fe5020","version":"v7.0.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.28.3","digest":"sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505","pinned_image":"ghcr.io/github/gh-aw-firewall/agent:0.28.3@sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.3","digest":"sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90","pinned_image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.28.3@sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.28.3","digest":"sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0","pinned_image":"ghcr.io/github/gh-aw-firewall/squid:0.28.3@sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.4.10","digest":"sha256:08bb5fa417aed94b40a14e2b7b3ae457531a5f22b143a32fe58317139d9b8f42","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.4.10@sha256:08bb5fa417aed94b40a14e2b7b3ae457531a5f22b143a32fe58317139d9b8f42"},{"image":"ghcr.io/github/gh-aw-node","digest":"sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196","pinned_image":"ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196"},{"image":"ghcr.io/github/github-mcp-server:v1.10.0","digest":"sha256:097512ddf58af80a620c177ae9cad93448f9a2a55c70ee8fde5cec6714522a8c","pinned_image":"ghcr.io/github/github-mcp-server:v1.10.0@sha256:097512ddf58af80a620c177ae9cad93448f9a2a55c70ee8fde5cec6714522a8c"}],"has_pull_request":true}
 # This file was automatically generated by gh-aw. DO NOT EDIT. To debug this workflow, load the skill at https://github.com/github/gh-aw/blob/main/debug.md
 #
 #    ___                   _   _
@@ -27,14 +27,15 @@
 #
 # Resolved workflow manifest:
 #   Imports:
+#     - shared/crush.md
 #     - shared/gh.md
 #     - shared/otlp.md
 #     - shared/reporting.md
+#     - shared/reporting-otlp.md
+#     - shared/smoke-test-brevity.md
 #     - shared/token-telemetry-check.md
 #
 # Secrets used:
-#   - ANTHROPIC_API_KEY
-#   - COPILOT_GITHUB_TOKEN
 #   - GH_AW_GITHUB_MCP_SERVER_TOKEN
 #   - GH_AW_GITHUB_TOKEN
 #   - GH_AW_OTEL_GRAFANA_AUTHORIZATION
@@ -46,26 +47,26 @@
 # Custom actions used:
 #   - actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
 #   - actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-#   - actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+#   - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 #   - actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
 #   - actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
 #   - actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 (source v9)
-#   - actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+#   - actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
 #   - actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 #
 # Container images used:
-#   - ghcr.io/github/gh-aw-firewall/agent:0.27.29@sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe
-#   - ghcr.io/github/gh-aw-firewall/api-proxy:0.27.29@sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde
-#   - ghcr.io/github/gh-aw-firewall/squid:0.27.29@sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f
-#   - ghcr.io/github/gh-aw-mcpg:v0.4.1@sha256:ad2a979c2cd8b50098e84938ca9c9c1580eb8e91526f101a90adfba7859b2c32
-#   - ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b
-#   - ghcr.io/github/github-mcp-server:v1.5.0@sha256:e25564dccc9110a70a77b9df560cbde11aa392fcb5f08b9abe5c4ebc6d146ea4
+#   - ghcr.io/github/gh-aw-firewall/agent:0.28.3@sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505
+#   - ghcr.io/github/gh-aw-firewall/api-proxy:0.28.3@sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90
+#   - ghcr.io/github/gh-aw-firewall/squid:0.28.3@sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0
+#   - ghcr.io/github/gh-aw-mcpg:v0.4.10@sha256:08bb5fa417aed94b40a14e2b7b3ae457531a5f22b143a32fe58317139d9b8f42
+#   - ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196
+#   - ghcr.io/github/github-mcp-server:v1.10.0@sha256:097512ddf58af80a620c177ae9cad93448f9a2a55c70ee8fde5cec6714522a8c
 
 name: "Smoke Crush"
 on:
   pull_request:
     # names: # Label filtering applied via job conditions
-      # - water # Label filtering applied via job conditions
+    # - water # Label filtering applied via job conditions
     types:
       - labeled
   workflow_dispatch:
@@ -80,6 +81,7 @@ permissions: {}
 
 concurrency:
   group: "gh-aw-${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}"
+  queue: max
 
 run-name: "Smoke Crush"
 
@@ -95,8 +97,10 @@ jobs:
   activation:
     needs: pre_activation
     if: >
-      needs.pre_activation.outputs.activated == 'true' && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
-      (github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'water'))
+      needs.pre_activation.outputs.activated == 'true' && (((github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
+      ((github.event_name != 'pull_request' && github.event_name != 'pull_request_review') || github.event.pull_request.stack == null ||
+      github.event.pull_request.stack.position == github.event.pull_request.stack.size)) && (github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' || github.event.label.name == 'water'))
     runs-on: ubuntu-slim
     permissions:
       actions: read
@@ -112,13 +116,13 @@ jobs:
       comment_repo: ${{ steps.add-comment.outputs.comment-repo }}
       comment_url: ${{ steps.add-comment.outputs.comment-url }}
       daily_ai_credits_exceeded: ${{ steps.daily-effective-workflow-guardrail.outputs.daily_ai_credits_exceeded == 'true' }}
+      daily_ai_credits_guardrail_status: ${{ steps.daily-effective-workflow-guardrail.outputs.daily_ai_credits_guardrail_status || '' }}
       daily_ai_credits_threshold: ${{ steps.daily-effective-workflow-guardrail.outputs.daily_ai_credits_threshold || '' }}
       daily_ai_credits_total_effective_tokens: ${{ steps.daily-effective-workflow-guardrail.outputs.daily_ai_credits_total_effective_tokens || '' }}
       engine_id: ${{ steps.generate_aw_info.outputs.engine_id }}
       lockdown_check_failed: ${{ steps.generate_aw_info.outputs.lockdown_check_failed == 'true' }}
       model: ${{ steps.generate_aw_info.outputs.model }}
       oauth_token_check_failed: ${{ steps.check-oauth-tokens.outputs.oauth_token_check_failed == 'true' }}
-      secret_verification_result: ${{ steps.validate-secret.outputs.verification_result }}
       setup-parent-span-id: ${{ steps.setup.outputs.parent-span-id || steps.setup.outputs.span-id }}
       setup-span-id: ${{ steps.setup.outputs.span-id }}
       setup-trace-id: ${{ steps.setup.outputs.trace-id }}
@@ -128,7 +132,7 @@ jobs:
       title: ${{ steps.sanitized.outputs.title }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -147,7 +151,7 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
       - name: Mask OTLP telemetry headers
         run: bash "${RUNNER_TEMP}/gh-aw/actions/mask_otlp_headers.sh"
@@ -156,27 +160,30 @@ jobs:
         env:
           GH_AW_INFO_ENGINE_ID: "crush"
           GH_AW_INFO_ENGINE_NAME: "Crush"
-          GH_AW_INFO_MODEL: "anthropic/claude-sonnet-4-20250514"
-          GH_AW_INFO_VERSION: "0.59.0"
-          GH_AW_INFO_AGENT_VERSION: "0.59.0"
+          GH_AW_INFO_MODEL: "copilot/claude-sonnet-4.5"
+          GH_AW_INFO_VERSION: "0.88.0"
+          GH_AW_INFO_AGENT_VERSION: "0.88.0"
           GH_AW_INFO_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_INFO_EXPERIMENTAL: "true"
           GH_AW_INFO_SUPPORTS_TOOLS_ALLOWLIST: "false"
           GH_AW_INFO_STAGED: "false"
-          GH_AW_INFO_ALLOWED_DOMAINS: '["*.grafana.net","*.sentry.io","defaults","github"]'
+          GH_AW_INFO_ALLOWED_DOMAINS: '["*.grafana.net","*.sentry.io"]'
           GH_AW_INFO_FIREWALL_ENABLED: "false"
           GH_AW_INFO_AWF_VERSION: ""
           GH_AW_INFO_AWMG_VERSION: ""
           GH_AW_INFO_FIREWALL_TYPE: "squid"
+          GH_AW_INFO_AGENT_RUNTIME: ""
           GH_AW_INFO_FRONTMATTER_EMOJI: "🧪"
           GH_AW_COMPILED_STRICT: "true"
           GH_AW_INFO_FEATURES: '{"gh-aw-detection":false}'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/generate_aw_info.cjs');
+            const { main } = require(path.join(actionsDir, 'generate_aw_info.cjs'));
             await main(core, context);
       - name: Restore daily AIC usage cache
         id: restore-daily-aic-cache
@@ -198,9 +205,11 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/restore_aic_usage_cache_fallback.cjs');
+            const { main } = require(path.join(actionsDir, 'restore_aic_usage_cache_fallback.cjs'));
             await main();
       - name: Check daily workflow token guardrail
         id: daily-effective-workflow-guardrail
@@ -218,9 +227,11 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/check_daily_aic_workflow_guardrail.cjs');
+            const { main } = require(path.join(actionsDir, 'check_daily_aic_workflow_guardrail.cjs'));
             await main();
       - name: Add eyes reaction for immediate feedback
         id: react
@@ -231,45 +242,39 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/add_reaction.cjs');
+            const { main } = require(path.join(actionsDir, 'add_reaction.cjs'));
             await main();
-      - name: Validate ANTHROPIC_API_KEY secret
-        id: validate-secret
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/validate_multi_secret.sh" ANTHROPIC_API_KEY 'Crush CLI' https://github.github.com/gh-aw/reference/engines/#crush
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - name: Check for OAuth tokens
         id: check-oauth-tokens
         run: bash "${RUNNER_TEMP}/gh-aw/actions/check_oauth_tokens.sh"
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GH_AW_GITHUB_TOKEN: ${{ secrets.GH_AW_GITHUB_TOKEN }}
           GH_AW_GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN }}
       - name: Checkout .github and .agents folders
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
             .github
             .agents
             actions/setup
-            .antigravity
             .claude
             .codex
             .crush
             .gemini
-            .opencode
             .pi
           sparse-checkout-cone-mode: true
           fetch-depth: 1
       - name: Save agent config folders for base branch restoration
         env:
-          GH_AW_AGENT_FOLDERS: ".agents .antigravity .claude .codex .crush .gemini .github .opencode .pi"
-          GH_AW_AGENT_FILES: ".crush.json AGENTS.md ANTIGRAVITY.md CLAUDE.md GEMINI.md PI.md opencode.jsonc"
-        # poutine:ignore untrusted_checkout_exec
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/save_base_github_folders.sh"
+          GH_AW_AGENT_FOLDERS: ".agents .crush .github"
+          GH_AW_AGENT_FILES: ".crush.json .crushrc AGENTS.md CRUSH.local.md CRUSH.md crush.json crushrc"
+        run: |
+          bash "${RUNNER_TEMP}/gh-aw/actions/save_base_github_folders.sh"
       - name: Check workflow lock file
         id: check-lock-file
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -278,20 +283,24 @@ jobs:
           GH_AW_CONTEXT_WORKFLOW_REF: "${{ github.workflow_ref }}"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/check_workflow_timestamp_api.cjs');
+            const { main } = require(path.join(actionsDir, 'check_workflow_timestamp_api.cjs'));
             await main();
       - name: Compute current body text
         id: sanitized
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,api.anthropic.com,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,charm.land,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,docs.github.com,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,host.docker.internal,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,registry.npmjs.org,s.symcb.com,s.symcd.com,security.ubuntu.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,127.0.0.1,::1,api.snapcraft.io,app.renovatebot.com,appveyor.com,archive.ubuntu.com,azure.archive.ubuntu.com,badgen.net,circleci.com,codacy.com,codeclimate.com,codecov.io,codeload.github.com,coveralls.io,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deepsource.io,docs.github.com,drone.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,img.shields.io,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,localhost,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,readthedocs.io,readthedocs.org,renovatebot.com,s.symcb.com,s.symcd.com,security.ubuntu.com,semaphoreci.com,shields.io,snyk.io,sonarcloud.io,sonarqube.com,travis-ci.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/compute_text.cjs');
+            const { main } = require(path.join(actionsDir, 'compute_text.cjs'));
             await main();
       - name: Add comment with workflow run link
         id: add-comment
@@ -299,20 +308,26 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_WORKFLOW_NAME: "Smoke Crush"
-          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
+          GH_AW_WORKFLOW_EMOJI: "🧪"
+          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*{ai_credits_suffix}{history_link}\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) Crush delivered.\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/add_workflow_run_comment.cjs');
+            const { main } = require(path.join(actionsDir, 'add_workflow_run_comment.cjs'));
             await main();
       - name: Log runtime features
         if: ${{ contains(toJSON(vars), '"GH_AW_RUNTIME_FEATURES":') }}
         run: bash "${RUNNER_TEMP}/gh-aw/actions/log_runtime_features_summary.sh"
       - name: Create prompt with built-in context
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+          GH_AW_ACTIONS_DIR: ${{ runner.temp }}/gh-aw/actions
+          GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
           GH_AW_SAFE_OUTPUTS: ${{ runner.temp }}/gh-aw/safeoutputs/outputs.jsonl
+          GH_AW_PROMPT_CONFIG: "{\"items\":[{\"content_env\":\"GH_AW_PROMPT_CONTENT_0000\"},{\"file\":\"xpia.md\"},{\"file\":\"temp_folder_prompt.md\"},{\"file\":\"markdown.md\"},{\"file\":\"safe_outputs_prompt.md\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0001\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0002\"},{\"file\":\"mcp_cli_tools_with_safeoutputs_prompt.md\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0003\"},{\"file\":\"github_mcp_tools_with_safeoutputs_prompt.md\"},{\"file\":\"pr_context_prompt.md\",\"condition_env\":\"GH_AW_INCLUDE_PR_CONTEXT\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0004\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0005\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0006\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0007\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0008\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0009\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0010\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0011\"},{\"content_env\":\"GH_AW_PROMPT_CONTENT_0012\"}]}"
           GH_AW_EXPR_1A3A194A: ${{ github.event.discussion.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'discussion' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
           GH_AW_EXPR_463A214A: ${{ github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
           GH_AW_EXPR_802A9F6A: ${{ github.event.issue.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'issue' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
@@ -320,85 +335,48 @@ jobs:
           GH_AW_GITHUB_ACTOR: ${{ github.actor }}
           GH_AW_GITHUB_REPOSITORY: ${{ github.repository }}
           GH_AW_GITHUB_RUN_ID: ${{ github.run_id }}
+          GH_AW_GITHUB_SERVER_URL: ${{ github.server_url }}
           GH_AW_GITHUB_WORKSPACE: ${{ github.workspace }}
-          GH_AW_IS_PR_COMMENT: ${{ github.event.issue.pull_request && 'true' || '' }}
-        # poutine:ignore untrusted_checkout_exec
-        run: |
-          bash "${RUNNER_TEMP}/gh-aw/actions/create_prompt_first.sh"
-          {
-          cat << 'GH_AW_PROMPT_a4eb627b4956a4f7_EOF'
-          <system>
-          GH_AW_PROMPT_a4eb627b4956a4f7_EOF
-          cat "${RUNNER_TEMP}/gh-aw/prompts/xpia.md"
-          cat "${RUNNER_TEMP}/gh-aw/prompts/temp_folder_prompt.md"
-          cat "${RUNNER_TEMP}/gh-aw/prompts/markdown.md"
-          cat "${RUNNER_TEMP}/gh-aw/prompts/safe_outputs_prompt.md"
-          cat << 'GH_AW_PROMPT_a4eb627b4956a4f7_EOF'
-          <safe-output-tools>
-          Tools: add_comment(max:2), create_issue, add_labels, missing_tool, missing_data, noop
-          </safe-output-tools>
-          GH_AW_PROMPT_a4eb627b4956a4f7_EOF
-          cat "${RUNNER_TEMP}/gh-aw/prompts/mcp_cli_tools_prompt.md"
-          cat << 'GH_AW_PROMPT_a4eb627b4956a4f7_EOF'
-          <github-context>
-          The following GitHub context information is available for this workflow:
-          {{#if github.actor}}
-          - **actor**: __GH_AW_GITHUB_ACTOR__
-          {{/if}}
-          {{#if github.repository}}
-          - **repository**: __GH_AW_GITHUB_REPOSITORY__
-          {{/if}}
-          {{#if github.workspace}}
-          - **workspace**: __GH_AW_GITHUB_WORKSPACE__
-          {{/if}}
-          {{#if github.event.issue.number || (github.aw.context.item_type == 'issue' && github.aw.context.item_number)}}
-          - **issue-number**: #__GH_AW_EXPR_802A9F6A__
-          {{/if}}
-          {{#if github.event.discussion.number || (github.aw.context.item_type == 'discussion' && github.aw.context.item_number)}}
-          - **discussion-number**: #__GH_AW_EXPR_1A3A194A__
-          {{/if}}
-          {{#if github.event.pull_request.number || (github.aw.context.item_type == 'pull_request' && github.aw.context.item_number)}}
-          - **pull-request-number**: #__GH_AW_EXPR_463A214A__
-          {{/if}}
-          {{#if github.event.comment.id || github.aw.context.comment_id}}
-          - **comment-id**: __GH_AW_EXPR_FF1D34CE__
-          {{/if}}
-          {{#if github.run_id}}
-          - **workflow-run-id**: __GH_AW_GITHUB_RUN_ID__
-          {{/if}}
-          </github-context>
-
-          GH_AW_PROMPT_a4eb627b4956a4f7_EOF
-          cat "${RUNNER_TEMP}/gh-aw/prompts/github_mcp_tools_with_safeoutputs_prompt.md"
-          if [ "$GITHUB_EVENT_NAME" = "issue_comment" ] && [ -n "$GH_AW_IS_PR_COMMENT" ] || [ "$GITHUB_EVENT_NAME" = "pull_request_review_comment" ] || [ "$GITHUB_EVENT_NAME" = "pull_request_review" ]; then
-            cat "${RUNNER_TEMP}/gh-aw/prompts/pr_context_prompt.md"
-          fi
-          cat << 'GH_AW_PROMPT_a4eb627b4956a4f7_EOF'
-          </system>
-          {{#runtime-import .github/workflows/shared/gh.md}}
-          {{#runtime-import .github/workflows/shared/reporting.md}}
-          {{#runtime-import .github/workflows/shared/otlp.md}}
-          {{#runtime-import .github/workflows/shared/token-telemetry-check.md}}
-          {{#runtime-import .github/workflows/smoke-crush.md}}
-          GH_AW_PROMPT_a4eb627b4956a4f7_EOF
-          } > "$GH_AW_PROMPT"
+          GH_AW_INCLUDE_PR_CONTEXT: ${{ (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) || github.event_name == 'pull_request_review_comment' || github.event_name == 'pull_request_review' }}
+          GH_AW_PROMPT_CONTENT_0000: "<system>\n"
+          GH_AW_PROMPT_CONTENT_0001: "<safe-output-tools>\nTools: add_comment(max:2), create_issue, add_labels, missing_tool, missing_data, noop\n"
+          GH_AW_PROMPT_CONTENT_0002: "</safe-output-tools>\n"
+          GH_AW_PROMPT_CONTENT_0003: "<github-context>\nThe following GitHub context information is available for this workflow:\n{{#if github.actor}}\n- **actor**: __GH_AW_GITHUB_ACTOR__\n{{/if}}\n{{#if github.repository}}\n- **repository**: __GH_AW_GITHUB_REPOSITORY__\n{{/if}}\n{{#if github.workspace}}\n- **workspace**: __GH_AW_GITHUB_WORKSPACE__\n{{/if}}\n{{#if github.event.issue.number || (github.aw.context.item_type == 'issue' && github.aw.context.item_number)}}\n- **issue-number**: #__GH_AW_EXPR_802A9F6A__\n{{/if}}\n{{#if github.event.discussion.number || (github.aw.context.item_type == 'discussion' && github.aw.context.item_number)}}\n- **discussion-number**: #__GH_AW_EXPR_1A3A194A__\n{{/if}}\n{{#if github.event.pull_request.number || (github.aw.context.item_type == 'pull_request' && github.aw.context.item_number)}}\n- **pull-request-number**: #__GH_AW_EXPR_463A214A__\n{{/if}}\n{{#if github.event.comment.id || github.aw.context.comment_id}}\n- **comment-id**: __GH_AW_EXPR_FF1D34CE__\n{{/if}}\n{{#if github.run_id}}\n- **workflow-run-id**: __GH_AW_GITHUB_RUN_ID__\n{{/if}}\n</github-context>\n\n"
+          GH_AW_PROMPT_CONTENT_0004: "</system>\n"
+          GH_AW_PROMPT_CONTENT_0005: "{{#runtime-import .github/workflows/shared/crush.md}}\n"
+          GH_AW_PROMPT_CONTENT_0006: "{{#runtime-import .github/workflows/shared/gh.md}}\n"
+          GH_AW_PROMPT_CONTENT_0007: "{{#runtime-import .github/workflows/shared/reporting-otlp.md}}\n"
+          GH_AW_PROMPT_CONTENT_0008: "{{#runtime-import .github/workflows/shared/otlp.md}}\n"
+          GH_AW_PROMPT_CONTENT_0009: "{{#runtime-import .github/workflows/shared/token-telemetry-check.md}}\n"
+          GH_AW_PROMPT_CONTENT_0010: "{{#runtime-import .github/workflows/shared/smoke-test-brevity.md}}\n"
+          GH_AW_PROMPT_CONTENT_0011: "{{#runtime-import .github/workflows/shared/reporting.md}}\n"
+          GH_AW_PROMPT_CONTENT_0012: "{{#runtime-import .github/workflows/smoke-crush.md}}\n"
+        with:
+          script: |
+            const { setupGlobals } = require(process.env.GH_AW_ACTIONS_DIR + '/setup_globals.cjs');
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(process.env.GH_AW_ACTIONS_DIR + '/create_prompt.cjs');
+            await main(core);
       - name: Interpolate variables and render templates
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+          GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
           GH_AW_ENGINE_ID: "crush"
           GH_AW_GITHUB_REPOSITORY: ${{ github.repository }}
           GH_AW_GITHUB_RUN_ID: ${{ github.run_id }}
+          GH_AW_GITHUB_SERVER_URL: ${{ github.server_url }}
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/interpolate_prompt.cjs');
+            const { main } = require(path.join(actionsDir, 'interpolate_prompt.cjs'));
             await main();
       - name: Substitute placeholders
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+          GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
           GH_AW_EXPR_1A3A194A: ${{ github.event.discussion.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'discussion' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
           GH_AW_EXPR_463A214A: ${{ github.event.pull_request.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'pull_request' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
           GH_AW_EXPR_802A9F6A: ${{ github.event.issue.number || (fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_type == 'issue' && fromJSON(github.event.inputs.aw_context || github.event.client_payload.aw_context || '{}').item_number) }}
@@ -406,17 +384,20 @@ jobs:
           GH_AW_GITHUB_ACTOR: ${{ github.actor }}
           GH_AW_GITHUB_REPOSITORY: ${{ github.repository }}
           GH_AW_GITHUB_RUN_ID: ${{ github.run_id }}
+          GH_AW_GITHUB_SERVER_URL: ${{ github.server_url }}
           GH_AW_GITHUB_WORKSPACE: ${{ github.workspace }}
-          GH_AW_IS_PR_COMMENT: ${{ github.event.issue.pull_request && 'true' || '' }}
+          GH_AW_INCLUDE_PR_CONTEXT: ${{ (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) || github.event_name == 'pull_request_review_comment' || github.event_name == 'pull_request_review' }}
           GH_AW_MCP_CLI_SERVERS_LIST: '- `safeoutputs` — run `safeoutputs --help` to see available tools'
           GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_ACTIVATED: ${{ needs.pre_activation.outputs.activated }}
           GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_MATCHED_COMMAND: ${{ needs.pre_activation.outputs.matched_command }}
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
 
-            const substitutePlaceholders = require('${{ runner.temp }}/gh-aw/actions/substitute_placeholders.cjs');
+            const substitutePlaceholders = require(path.join(actionsDir, 'substitute_placeholders.cjs'));
 
             // Call the substitution function
             return await substitutePlaceholders({
@@ -429,8 +410,9 @@ jobs:
                 GH_AW_GITHUB_ACTOR: process.env.GH_AW_GITHUB_ACTOR,
                 GH_AW_GITHUB_REPOSITORY: process.env.GH_AW_GITHUB_REPOSITORY,
                 GH_AW_GITHUB_RUN_ID: process.env.GH_AW_GITHUB_RUN_ID,
+                GH_AW_GITHUB_SERVER_URL: process.env.GH_AW_GITHUB_SERVER_URL,
                 GH_AW_GITHUB_WORKSPACE: process.env.GH_AW_GITHUB_WORKSPACE,
-                GH_AW_IS_PR_COMMENT: process.env.GH_AW_IS_PR_COMMENT,
+                GH_AW_INCLUDE_PR_CONTEXT: process.env.GH_AW_INCLUDE_PR_CONTEXT,
                 GH_AW_MCP_CLI_SERVERS_LIST: process.env.GH_AW_MCP_CLI_SERVERS_LIST,
                 GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_ACTIVATED: process.env.GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_ACTIVATED,
                 GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_MATCHED_COMMAND: process.env.GH_AW_NEEDS_PRE_ACTIVATION_OUTPUTS_MATCHED_COMMAND
@@ -438,14 +420,18 @@ jobs:
             });
       - name: Validate prompt placeholders
         env:
-          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
-        # poutine:ignore untrusted_checkout_exec
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/validate_prompt_placeholders.sh"
+          GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
+        run: |
+          bash "${RUNNER_TEMP}/gh-aw/actions/validate_prompt_placeholders.sh"
       - name: Print prompt
         env:
-          GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
-        # poutine:ignore untrusted_checkout_exec
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/print_prompt_summary.sh"
+          GH_AW_PROMPT: ${{ runner.temp }}/gh-aw/aw-prompts/prompt.txt
+        run: |
+          bash "${RUNNER_TEMP}/gh-aw/actions/print_prompt_summary.sh"
+      - name: Stage prompt files for artifact upload
+        run: |
+          mkdir -p /tmp/gh-aw/aw-prompts
+          cp -a "${RUNNER_TEMP}/gh-aw/aw-prompts/." /tmp/gh-aw/aw-prompts/
       - name: Upload activation artifact
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -471,6 +457,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      copilot-requests: write
       issues: read
       pull-requests: read
     env:
@@ -478,6 +465,7 @@ jobs:
       GH_AW_ASSETS_ALLOWED_EXTS: ""
       GH_AW_ASSETS_BRANCH: ""
       GH_AW_ASSETS_MAX_SIZE_KB: 0
+      GH_AW_ENGINE_VERSION: "0.88.0"
       GH_AW_MCP_LOG_DIR: /tmp/gh-aw/mcp-logs/safeoutputs
       GH_AW_PROJECT_UTC: "-08:00"
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
@@ -498,7 +486,7 @@ jobs:
       unknown_model_ai_credits: ${{ steps.parse-mcp-gateway.outputs.unknown_model_ai_credits || 'false' }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -516,7 +504,7 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
       - name: Set runtime paths
         id: set-runtime-paths
@@ -529,7 +517,7 @@ jobs:
       - name: Mask OTLP telemetry headers
         run: bash "${RUNNER_TEMP}/gh-aw/actions/mask_otlp_headers.sh"
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Create gh-aw temp directory
@@ -559,19 +547,21 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/checkout_pr_branch.cjs');
+            const { main } = require(path.join(actionsDir, 'checkout_pr_branch.cjs'));
             await main();
       - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           package-manager-cache: false
       - name: Install AWF binary
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" v0.27.29 --rootless
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" v0.28.3 --rootless
       - name: Install Crush CLI
-        run: npm install -g @charmland/crush@0.59.0
+        run: npm install -g @charmland/crush@0.88.0
         env:
           NPM_CONFIG_MIN_RELEASE_AGE: '3'
       - name: Verify Crush CLI installation
@@ -584,13 +574,15 @@ jobs:
           GH_AW_GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN }}
         with:
           script: |
-            const determineAutomaticLockdown = require('${{ runner.temp }}/gh-aw/actions/determine_automatic_lockdown.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const determineAutomaticLockdown = require(path.join(actionsDir, 'determine_automatic_lockdown.cjs'));
             await determineAutomaticLockdown(github, context, core);
       - name: Restore agent config folders from base branch
         if: steps.checkout-pr.outcome == 'success'
         env:
-          GH_AW_AGENT_FOLDERS: ".agents .antigravity .claude .codex .crush .gemini .github .opencode .pi"
-          GH_AW_AGENT_FILES: ".crush.json AGENTS.md ANTIGRAVITY.md CLAUDE.md GEMINI.md PI.md opencode.jsonc"
+          GH_AW_AGENT_FOLDERS: ".agents .crush .github"
+          GH_AW_AGENT_FILES: ".crush.json .crushrc AGENTS.md CRUSH.local.md CRUSH.md crush.json crushrc"
         run: bash "${RUNNER_TEMP}/gh-aw/actions/restore_base_github_folders.sh"
       - name: Restore inline sub-agents from activation artifact
         env:
@@ -602,15 +594,26 @@ jobs:
           GH_AW_SKILL_DIR: ".crush/skills"
         run: bash "${RUNNER_TEMP}/gh-aw/actions/restore_inline_skills.sh"
       - name: Download container images
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:0.27.29@sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe ghcr.io/github/gh-aw-firewall/api-proxy:0.27.29@sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde ghcr.io/github/gh-aw-firewall/squid:0.27.29@sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f ghcr.io/github/gh-aw-mcpg:v0.4.1@sha256:ad2a979c2cd8b50098e84938ca9c9c1580eb8e91526f101a90adfba7859b2c32 ghcr.io/github/gh-aw-node@sha256:529d02eb970b1161aa25c593a9c3df57fdfad5a8add328cb3b6eccef66f3183b ghcr.io/github/github-mcp-server:v1.5.0@sha256:e25564dccc9110a70a77b9df560cbde11aa392fcb5f08b9abe5c4ebc6d146ea4
-      - name: Generate Safe Outputs Config
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:0.28.3@sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505 ghcr.io/github/gh-aw-firewall/api-proxy:0.28.3@sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90 ghcr.io/github/gh-aw-firewall/squid:0.28.3@sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0 ghcr.io/github/gh-aw-mcpg:v0.4.10@sha256:08bb5fa417aed94b40a14e2b7b3ae457531a5f22b143a32fe58317139d9b8f42 ghcr.io/github/gh-aw-node@sha256:0d9f1fb5fd6610c0ac1f5194a38e45a8a1e81f8a390d5142d8e4e6f26a4b3196 ghcr.io/github/github-mcp-server:v1.10.0@sha256:097512ddf58af80a620c177ae9cad93448f9a2a55c70ee8fde5cec6714522a8c
+      - name: Prepare Safe Outputs Directories
         run: |
           mkdir -p "${RUNNER_TEMP}/gh-aw/safeoutputs"
           mkdir -p /tmp/gh-aw/safeoutputs
           mkdir -p /tmp/gh-aw/mcp-logs/safeoutputs
-          cat > "${RUNNER_TEMP}/gh-aw/safeoutputs/config.json" << 'GH_AW_SAFE_OUTPUTS_CONFIG_0d267a9995038d27_EOF'
-          {"add_comment":{"hide_older_comments":true,"max":2},"add_labels":{"allowed":["smoke-crush"]},"create_issue":{"close_older_issues":true,"expires":2,"labels":["automation","testing"],"max":1},"create_report_incomplete_issue":{},"missing_data":{},"missing_tool":{},"noop":{"max":1,"report-as-issue":"true"},"report_incomplete":{}}
-          GH_AW_SAFE_OUTPUTS_CONFIG_0d267a9995038d27_EOF
+      - name: Generate Safe Outputs Config
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_FILE_ROOT: "${{ runner.temp }}/gh-aw"
+          GH_AW_FILE_CONFIG: "{\"files\":[{\"path\":\"safeoutputs/config.json\",\"content_env\":\"GH_AW_SAFE_OUTPUTS_CONFIG\"}]}"
+          GH_AW_SAFE_OUTPUTS_CONFIG: "{\"add_comment\":{\"hide_older_comments\":true,\"max\":2},\"add_labels\":{\"allowed\":[\"smoke-crush\"]},\"create_issue\":{\"close_older_issues\":true,\"close_older_key\":\"smoke-crush\",\"expires\":2,\"labels\":[\"automation\",\"testing\"],\"max\":1},\"create_report_incomplete_issue\":{},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
+        with:
+          script: |
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(path.join(actionsDir, 'create_files.cjs'));
+            await main();
       - name: Generate Safe Outputs Tools
         env:
           GH_AW_TOOLS_META_JSON: |
@@ -634,7 +637,16 @@ jobs:
                     "sanitize": true,
                     "maxLength": 65000
                   },
+                  "comment_id": {
+                    "optionalPositiveInteger": true
+                  },
                   "item_number": {
+                    "issueOrPRNumber": true
+                  },
+                  "pr": {
+                    "issueOrPRNumber": true
+                  },
+                  "pr_number": {
                     "issueOrPRNumber": true
                   },
                   "reply_to_id": {
@@ -644,6 +656,16 @@ jobs:
                   "repo": {
                     "type": "string",
                     "maxLength": 256
+                  },
+                  "target": {
+                    "type": "string",
+                    "enum": [
+                      "status"
+                    ]
+                  },
+                  "temporary_id": {
+                    "type": "string",
+                    "pattern": "^#?aw_[A-Za-z0-9_]{3,12}$"
                   }
                 }
               },
@@ -666,6 +688,7 @@ jobs:
               "create_issue": {
                 "defaultMax": 1,
                 "fields": {
+                  "blocked_by": {},
                   "body": {
                     "required": true,
                     "type": "string",
@@ -777,10 +800,62 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/generate_safe_outputs_tools.cjs');
+            const { main } = require(path.join(actionsDir, 'generate_safe_outputs_tools.cjs'));
             await main();
+      - name: Write Crush MCP config adapter script
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gh-aw/actions"
+          cat <<'GHAW_MCP_CONFIG_ADAPTER_SCRIPT_7e1a4d2c_EOF' > "${RUNNER_TEMP}/gh-aw/actions/crush_mcp_config_adapter.cjs"
+          const fs = require("fs");
+          const path = require("path");
+
+          const requireEnvVar = name => {
+            const value = process.env[name];
+            if (!value) throw new Error(`${name} environment variable is required`);
+            return value;
+          };
+
+          const gatewayOutputPath = requireEnvVar("MCP_GATEWAY_OUTPUT");
+          const workspace = requireEnvVar("GITHUB_WORKSPACE");
+          const gatewayDomain = process.env.MCP_GATEWAY_DOMAIN || "host.docker.internal";
+          const gatewayPort = requireEnvVar("MCP_GATEWAY_PORT");
+          const gatewayURL = `http://${gatewayDomain}:${gatewayPort}`;
+
+          let cliServers;
+          try {
+            cliServers = new Set(JSON.parse(process.env.GH_AW_MCP_CLI_SERVERS || "[]"));
+          } catch (error) {
+            throw new Error(`Failed to parse GH_AW_MCP_CLI_SERVERS: ${error instanceof Error ? error.message : String(error)}`);
+          }
+
+          const gatewayOutput = JSON.parse(fs.readFileSync(gatewayOutputPath, "utf8"));
+          const rawServers = gatewayOutput.mcpServers;
+          const servers = rawServers && typeof rawServers === "object" && !Array.isArray(rawServers) ? rawServers : {};
+          const mcp = {};
+
+          for (const [name, entry] of Object.entries(servers)) {
+            if (cliServers.has(name) || !entry || typeof entry !== "object") continue;
+            const transformed = { ...entry };
+            if (typeof transformed.url === "string") {
+              transformed.url = transformed.url.replace(/^http:\/\/[^/]+\/mcp\//, `${gatewayURL}/mcp/`);
+              transformed.type = "http";
+            } else {
+              transformed.type = "stdio";
+            }
+            delete transformed.tools;
+            mcp[name] = transformed;
+          }
+
+          const configPath = path.join(workspace, ".crush.json");
+          fs.writeFileSync(configPath, JSON.stringify({ mcp }, null, 2), { mode: 0o600 });
+          fs.chmodSync(configPath, 0o600);
+
+          GHAW_MCP_CONFIG_ADAPTER_SCRIPT_7e1a4d2c_EOF
+          chmod 755 "${RUNNER_TEMP}/gh-aw/actions/crush_mcp_config_adapter.cjs"
       - name: Start MCP Gateway
         id: start-mcp-gateway
         env:
@@ -788,6 +863,7 @@ jobs:
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
           GH_AW_SAFE_OUTPUTS_CONFIG_PATH: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS_CONFIG_PATH }}
           GH_AW_SAFE_OUTPUTS_TOOLS_PATH: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS_TOOLS_PATH }}
+          GH_AW_SINK_VISIBILITY: ${{ steps.determine-automatic-lockdown.outputs.visibility }}
           GITHUB_MCP_GUARD_MIN_INTEGRITY: ${{ steps.determine-automatic-lockdown.outputs.min_integrity }}
           GITHUB_MCP_GUARD_REPOS: ${{ steps.determine-automatic-lockdown.outputs.repos }}
           GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN || secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
@@ -795,6 +871,11 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p "${RUNNER_TEMP}/gh-aw/mcp-config"
+          if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -r "${GITHUB_EVENT_PATH}" ]; then
+            GH_AW_SAFEOUTPUTS_EVENT_PATH="${RUNNER_TEMP}/gh-aw/safeoutputs/github_event.json"
+            cp "${GITHUB_EVENT_PATH}" "${GH_AW_SAFEOUTPUTS_EVENT_PATH}"
+            export GITHUB_EVENT_PATH="${GH_AW_SAFEOUTPUTS_EVENT_PATH}"
+          fi
 
           # Export gateway environment variables for MCP config and gateway script
           export MCP_GATEWAY_PORT="8080"
@@ -806,21 +887,24 @@ jobs:
           export MCP_GATEWAY_PAYLOAD_DIR="/tmp/gh-aw/mcp-payloads"
           mkdir -p "${MCP_GATEWAY_PAYLOAD_DIR}"
           export MCP_GATEWAY_PAYLOAD_SIZE_THRESHOLD="524288"
+          export MCP_GATEWAY_ALLOWED_MOUNT_ROOTS="${GITHUB_WORKSPACE}:rw,${RUNNER_TEMP}/gh-aw:ro,${RUNNER_TEMP}/gh-aw/safeoutputs:rw,/opt:ro,/tmp:rw,/usr/bin/gh:ro"
           export DEBUG="*"
 
           export GH_AW_ENGINE="crush"
+          export GH_AW_MCP_CONFIG_ADAPTER="crush_mcp_config_adapter.cjs"
           MCP_GATEWAY_UID=$(id -u 2>/dev/null || echo '0')
           MCP_GATEWAY_GID=$(id -g 2>/dev/null || echo '0')
           source "${RUNNER_TEMP}/gh-aw/actions/resolve_docker_socket_gid.sh"
-          export MCP_GATEWAY_DOCKER_COMMAND='docker run -i --rm --network bridge -p 127.0.0.1:'"${MCP_GATEWAY_PORT}"':'"${MCP_GATEWAY_PORT}"' --name awmg-mcpg --add-host host.docker.internal:host-gateway --user '"${MCP_GATEWAY_UID}"':'"${MCP_GATEWAY_GID}"' --group-add '"${DOCKER_SOCK_GID}"' -v '"${DOCKER_SOCK_PATH}"':/var/run/docker.sock -e MCP_GATEWAY_PORT -e MCP_GATEWAY_DOMAIN -e MCP_GATEWAY_API_KEY -e MCP_GATEWAY_PAYLOAD_DIR -e MCP_GATEWAY_PAYLOAD_SIZE_THRESHOLD -e DOCKER_HOST=unix:///var/run/docker.sock -e DEBUG -e MCP_GATEWAY_LOG_DIR -e GH_AW_MCP_LOG_DIR -e GH_AW_SAFE_OUTPUTS -e GH_AW_SAFE_OUTPUTS_CONFIG_PATH -e GH_AW_SAFE_OUTPUTS_TOOLS_PATH -e GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST -e GH_AW_ASSETS_BRANCH -e GH_AW_ASSETS_MAX_SIZE_KB -e GH_AW_ASSETS_ALLOWED_EXTS -e DEFAULT_BRANCH -e GITHUB_MCP_SERVER_TOKEN -e GITHUB_MCP_GUARD_MIN_INTEGRITY -e GITHUB_MCP_GUARD_REPOS -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_SHA -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e GITHUB_RUN_ID -e GITHUB_RUN_NUMBER -e GITHUB_RUN_ATTEMPT -e GITHUB_JOB -e GITHUB_ACTION -e GITHUB_EVENT_NAME -e GITHUB_EVENT_PATH -e GITHUB_ACTOR -e GITHUB_ACTOR_ID -e GITHUB_TRIGGERING_ACTOR -e GITHUB_WORKFLOW -e GITHUB_WORKFLOW_REF -e GITHUB_WORKFLOW_SHA -e GITHUB_REF -e GITHUB_REF_NAME -e GITHUB_REF_TYPE -e GITHUB_HEAD_REF -e GITHUB_BASE_REF -e RUNNER_TEMP -e GITHUB_AW_OTEL_TRACE_ID -e GITHUB_AW_OTEL_PARENT_SPAN_ID -e OTEL_EXPORTER_OTLP_HEADERS -v /tmp/gh-aw/mcp-payloads:/tmp/gh-aw/mcp-payloads:rw -v /opt:/opt:ro -v /tmp:/tmp:rw -v '"${GITHUB_WORKSPACE}"':'"${GITHUB_WORKSPACE}"':rw -v '"${RUNNER_TEMP}"'/gh-aw/safeoutputs:'"${RUNNER_TEMP}"'/gh-aw/safeoutputs:rw ghcr.io/github/gh-aw-mcpg:v0.4.1'
+          export MCP_GATEWAY_DOCKER_COMMAND='docker run -i --rm --network bridge -p 127.0.0.1:'"${MCP_GATEWAY_PORT}"':'"${MCP_GATEWAY_PORT}"' --name awmg-mcpg --add-host host.docker.internal:host-gateway --user '"${MCP_GATEWAY_UID}"':'"${MCP_GATEWAY_GID}"' --group-add '"${DOCKER_SOCK_GID}"' -v '"${DOCKER_SOCK_PATH}"':/var/run/docker.sock -e MCP_GATEWAY_PORT -e MCP_GATEWAY_DOMAIN -e MCP_GATEWAY_API_KEY -e MCP_GATEWAY_PAYLOAD_DIR -e MCP_GATEWAY_PAYLOAD_SIZE_THRESHOLD -e DOCKER_HOST=unix:///var/run/docker.sock -e DEBUG -e MCP_GATEWAY_LOG_DIR -e GH_AW_MCP_LOG_DIR -e GH_AW_SAFE_OUTPUTS -e GH_AW_SAFE_OUTPUTS_CONFIG_PATH -e GH_AW_SAFE_OUTPUTS_TOOLS_PATH -e GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST -e GH_AW_ASSETS_BRANCH -e GH_AW_ASSETS_MAX_SIZE_KB -e GH_AW_ASSETS_ALLOWED_EXTS -e DEFAULT_BRANCH -e GITHUB_MCP_SERVER_TOKEN -e GITHUB_MCP_GUARD_MIN_INTEGRITY -e GITHUB_MCP_GUARD_REPOS -e GH_AW_SINK_VISIBILITY -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_SHA -e GITHUB_WORKSPACE -e GITHUB_TOKEN -e GITHUB_RUN_ID -e GITHUB_RUN_NUMBER -e GITHUB_RUN_ATTEMPT -e GITHUB_JOB -e GITHUB_ACTION -e GITHUB_EVENT_NAME -e GITHUB_EVENT_PATH -e GITHUB_ACTOR -e GITHUB_ACTOR_ID -e GITHUB_TRIGGERING_ACTOR -e GITHUB_WORKFLOW -e GITHUB_WORKFLOW_REF -e GITHUB_WORKFLOW_SHA -e GITHUB_REF -e GITHUB_REF_NAME -e GITHUB_REF_TYPE -e GITHUB_HEAD_REF -e GITHUB_BASE_REF -e RUNNER_TEMP -e MCP_GATEWAY_ALLOWED_MOUNT_ROOTS -e GITHUB_AW_OTEL_TRACE_ID -e GITHUB_AW_OTEL_PARENT_SPAN_ID -e OTEL_EXPORTER_OTLP_HEADERS -v /tmp/gh-aw/mcp-payloads:/tmp/gh-aw/mcp-payloads:rw -v /opt:/opt:ro -v /tmp:/tmp:rw -v '"${GITHUB_WORKSPACE}"':'"${GITHUB_WORKSPACE}"':rw -v '"${RUNNER_TEMP}"'/gh-aw/safeoutputs:'"${RUNNER_TEMP}"'/gh-aw/safeoutputs:rw ghcr.io/github/gh-aw-mcpg:v0.4.10'
 
           GH_AW_NODE=$(which node 2>/dev/null || command -v node 2>/dev/null || echo node)
-          cat << GH_AW_MCP_CONFIG_143a01c98f6a2cdf_EOF | "$GH_AW_NODE" "${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs"
+          cat << GH_AW_MCP_CONFIG_ad46c2d4abf8d475_EOF | "$GH_AW_NODE" "${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs"
           {
             "mcpServers": {
               "github": {
-                "container": "ghcr.io/github/github-mcp-server:v1.5.0",
+                "container": "ghcr.io/github/github-mcp-server:v1.10.0",
                 "env": {
+                  "GITHUB_FEATURES": "fields_param",
                   "GITHUB_HOST": "$GITHUB_SERVER_URL",
                   "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_MCP_SERVER_TOKEN",
                   "GITHUB_READ_ONLY": "1",
@@ -850,6 +934,8 @@ jobs:
                   "GH_AW_SAFE_OUTPUTS_CONFIG_PATH": "\${GH_AW_SAFE_OUTPUTS_CONFIG_PATH}",
                   "GH_AW_SAFE_OUTPUTS_TOOLS_PATH": "\${GH_AW_SAFE_OUTPUTS_TOOLS_PATH}",
                   "GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST": "\${GH_AW_POLICY_ALLOW_CREATE_PULL_REQUEST}",
+                  "GITHUB_EVENT_NAME": "\${GITHUB_EVENT_NAME}",
+                  "GITHUB_EVENT_PATH": "\${GITHUB_EVENT_PATH}",
                   "GITHUB_REPOSITORY": "\${GITHUB_REPOSITORY}",
                   "GITHUB_SHA": "\${GITHUB_SHA}",
                   "GITHUB_TOKEN": "\${GITHUB_TOKEN}",
@@ -861,7 +947,7 @@ jobs:
                     "accept": [
                       "*"
                     ],
-                    "sink-visibility": ${{ toJSON(steps.determine-automatic-lockdown.outputs.visibility) }}
+                    "sink-visibility": "${GH_AW_SINK_VISIBILITY}"
                   }
                 }
               }
@@ -871,6 +957,7 @@ jobs:
               "domain": "${MCP_GATEWAY_DOMAIN}",
               "apiKey": "${MCP_GATEWAY_API_KEY}",
               "payloadDir": "${MCP_GATEWAY_PAYLOAD_DIR}",
+              "startupTimeout": 120,
               "opentelemetry": {
                 "endpoint": "${OTEL_EXPORTER_OTLP_ENDPOINT}",
                 "traceId": "${GITHUB_AW_OTEL_TRACE_ID}",
@@ -878,7 +965,7 @@ jobs:
               }
             }
           }
-          GH_AW_MCP_CONFIG_143a01c98f6a2cdf_EOF
+          GH_AW_MCP_CONFIG_ad46c2d4abf8d475_EOF
       - name: Mount MCP servers as CLIs
         id: mount-mcp-clis
         continue-on-error: true
@@ -889,9 +976,11 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/mount_mcp_as_cli.cjs');
+            const { main } = require(path.join(actionsDir, 'mount_mcp_as_cli.cjs'));
             await main();
       - name: Clean credentials
         continue-on-error: true
@@ -903,9 +992,31 @@ jobs:
       - name: Write Crush Config
         run: |
           umask 077
-          mkdir -p "$GITHUB_WORKSPACE"
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/.crush.json")"
           CONFIG="$GITHUB_WORKSPACE/.crush.json"
-          BASE_CONFIG='{"agent":{"build":{"permission":{"bash":"allow","edit":"allow","read":"allow","glob":"allow","grep":"allow","write":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow"}}}}'
+          # shellcheck disable=SC2016
+          BASE_CONFIG='{
+            "$schema": "https://charm.land/crush.json",
+            "options": {
+              "auto_lsp": false,
+              "disable_default_providers": true,
+              "disable_metrics": true,
+              "disable_provider_auto_update": true,
+              "progress": false
+            },
+            "permissions": {
+              "allowed_tools": [
+                "view",
+                "ls",
+                "grep",
+                "edit",
+                "write",
+                "bash",
+                "webfetch",
+                "websearch"
+              ]
+            }
+          }'
           if [ -f "$CONFIG" ]; then
             MERGED=$(jq -n --argjson base "$BASE_CONFIG" --argjson existing "$(cat "$CONFIG")" '$existing * $base')
             echo "$MERGED" > "$CONFIG"
@@ -913,14 +1024,244 @@ jobs:
             echo "$BASE_CONFIG" > "$CONFIG"
           fi
           chmod 600 "$CONFIG"
+      - name: Write Crush harness script
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gh-aw/actions"
+          cat <<'GHAW_HARNESS_SCRIPT_3c7b9f1a_EOF' > "${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs"
+          const { spawnSync } = require("child_process");
+          const { accessSync, constants, readFileSync, writeFileSync } = require("fs");
+          const { isAbsolute, join } = require("path");
+          const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
+
+          const [command, ...commandArgs] = process.argv.slice(2);
+          const log = message => process.stderr.write(`[crush-harness] ${message}\n`);
+          const fail = (result, action) => {
+            if (result.error) throw result.error;
+            if (result.status !== 0) throw new Error(`${action} failed with exit code ${result.status ?? "unknown"}`);
+          };
+
+          // Preflight the CLI lookup inside the sandbox: the binary is installed on the runner
+          // host, so a missing sandbox mount surfaces as a bare ENOENT from spawnSync.
+          const resolveCommand = name => {
+            const searchPath = process.env.PATH || "";
+            if (name.includes("/")) {
+              const candidate = isAbsolute(name) ? name : join(process.cwd(), name);
+              try {
+                accessSync(candidate, constants.X_OK);
+                return candidate;
+              } catch {
+                throw new Error(`${name} not executable in sandbox: ${candidate}`);
+              }
+            }
+            for (const dir of searchPath.split(":")) {
+              if (!dir) continue;
+              const candidate = join(dir, name);
+              try {
+                accessSync(candidate, constants.X_OK);
+                return candidate;
+              } catch {
+                continue;
+              }
+            }
+            throw new Error(`${name} not found in sandbox PATH: ${searchPath}`);
+          };
+
+          const main = async () => {
+            const selectedModel = process.env.CRUSH_MODEL;
+            if (!selectedModel || !selectedModel.includes("/")) {
+              throw new Error("CRUSH_MODEL must use provider/model format");
+            }
+            const model = selectedModel.slice(selectedModel.indexOf("/") + 1);
+            const provider = process.env.GH_AW_LLM_PROVIDER;
+            if (!provider) throw new Error("GH_AW_LLM_PROVIDER is required");
+
+            let baseUrl = process.env.OPENAI_BASE_URL;
+            if (process.env.AWF_REFLECT_ENABLED === "1") {
+              const result = await fetchAWFReflect({ logger: log });
+              if (!result.ok || !result.reflectData) {
+                throw new Error(`Unable to discover the Crush LLM endpoint from /reflect: ${result.reason || "empty response"}`);
+              }
+              const endpoint = resolveProviderEndpointFromReflect({
+                provider,
+                reflectData: result.reflectData,
+                logger: log,
+              });
+              if (!endpoint || !endpoint.baseUrl) {
+                throw new Error(`No configured /reflect endpoint found for provider ${provider}`);
+              }
+              baseUrl = endpoint.baseUrl;
+              const reflectedEndpoint = result.reflectData.endpoints?.find(
+                entry => entry?.configured === true && entry.provider === endpoint.endpointProvider
+              );
+              if (typeof reflectedEndpoint?.models_url === "string") {
+                // Re-derive the base URL from models_url (rather than reusing endpoint.baseUrl,
+                // which points at the models-listing endpoint) while still applying the same
+                // api-proxy -> host.docker.internal HOSTALIASES bridge rewrite, so the crush
+                // binary's own chat-completions request never targets the unresolvable
+                // "api-proxy" hostname.
+                baseUrl = deriveBaseUrlFromModelsURL(reflectedEndpoint.models_url);
+              }
+            }
+            if (!baseUrl) {
+              throw new Error("Crush requires AWF endpoint discovery or OPENAI_BASE_URL");
+            }
+
+            const workspace = process.env.GITHUB_WORKSPACE;
+            if (!workspace) throw new Error("GITHUB_WORKSPACE is required");
+            const configPath = process.env.GH_AW_MCP_CONFIG || join(workspace, ".crush.json");
+            const config = JSON.parse(readFileSync(configPath, "utf8"));
+            const providerType = provider === "anthropic" ? "anthropic" : "openai-compat";
+            const apiKey = providerType === "anthropic" ? "$ANTHROPIC_API_KEY" : "$OPENAI_API_KEY";
+            config.providers = {
+              ...(config.providers || {}),
+              "awf-proxy": {
+                id: "awf-proxy",
+                name: "GitHub Agentic Workflows",
+                base_url: baseUrl,
+                type: providerType,
+                api_key: apiKey,
+                discover_models: false,
+                models: [{
+                  id: model,
+                  name: model,
+                  cost_per_1m_in: 0,
+                  cost_per_1m_out: 0,
+                  cost_per_1m_in_cached: 0,
+                  cost_per_1m_out_cached: 0,
+                  context_window: 200000,
+                  default_max_tokens: 64000,
+                  can_reason: false,
+                  supports_attachments: false,
+                }],
+              },
+            };
+            config.models = {
+              ...(config.models || {}),
+              large: { provider: "awf-proxy", model },
+            };
+            writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+            const promptPath = process.env.GH_AW_PROMPT;
+            if (!promptPath) throw new Error("GH_AW_PROMPT is required");
+            const prompt = readFileSync(promptPath, "utf8");
+            const executable = resolveCommand(command);
+            log(`resolved ${command} to ${executable}`);
+            fail(
+              spawnSync(executable, [...commandArgs, "--model", `awf-proxy/${model}`, prompt], {
+                cwd: workspace,
+                env: process.env,
+                stdio: "inherit",
+              }),
+              "Crush execution"
+            );
+          };
+
+          main().catch(error => {
+            log(error instanceof Error ? error.message : String(error));
+            process.exitCode = 1;
+          });
+
+          GHAW_HARNESS_SCRIPT_3c7b9f1a_EOF
+          chmod 755 "${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs"
+      - name: Write Crush log parser script
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gh-aw/actions"
+          cat <<'GHAW_LOG_PARSER_SCRIPT_5d2e8b3f_EOF' > "${RUNNER_TEMP}/gh-aw/actions/crush_log_parser.cjs"
+          // @ts-check
+          // Auto-generated log parser for behavior-defined engine "Crush".
+          const { createEngineLogParser } = require("./log_parser_shared.cjs");
+
+          // --- begin engine-provided parse function ---
+          function parseLog(logContent) {
+            const lines = logContent.split("\n");
+            const logEntries = [];
+            const mcpFailures = [];
+            let maxTurnsHit = false;
+            const AWF_INFRA_RE = /^\[(INFO|WARN|SUCCESS|ERROR|entrypoint|health-check|crush-harness)\]|^ (?:Container|Network|Volume) |^Process exiting with code:/;
+            let toolCallIndex = 0;
+            let turnCount = 0;
+            let currentRole = null;
+            let currentText = [];
+
+            function flushEntry() {
+              if (!currentRole || currentText.length === 0) { currentText = []; return; }
+              const text = currentText.join("\n").trim();
+              if (!text) { currentText = []; return; }
+              if (currentRole === "tool_use") {
+                const toolId = `crush_tool_${toolCallIndex++}`;
+                const nameMatch = text.match(/^(?:Tool|Running|Executing|>\s*)(view|edit|bash|grep|ls|write|webfetch|websearch)\b/i);
+                const toolName = nameMatch ? nameMatch[1] : "unknown_tool";
+                logEntries.push({ type: "assistant", message: { content: [{ type: "tool_use", id: toolId, name: toolName, input: {} }] } });
+                logEntries.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: toolId, content: text }] } });
+              } else if (currentRole === "assistant") {
+                logEntries.push({ type: "assistant", message: { content: [{ type: "text", text }] } });
+                turnCount++;
+              }
+              currentText = [];
+            }
+
+            logEntries.push({ type: "system", subtype: "init", model: null, session_id: null });
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              if (AWF_INFRA_RE.test(line)) continue;
+              if (/max.?turns|maximum.*turns.*reached|turn limit/i.test(line)) maxTurnsHit = true;
+              if (/MCP server .* failed|MCP.*connection.*error|Failed to connect to MCP/i.test(line)) {
+                const serverMatch = line.match(/MCP server ['"]?([^\s'"]+)['"]?/i);
+                mcpFailures.push(serverMatch ? serverMatch[1] : line.trim());
+              }
+
+              if (/^(Tool|Running|Executing|>\s*(view|edit|bash|grep|ls|write|webfetch|websearch))\b/i.test(line.trim())) {
+                flushEntry();
+                currentRole = "tool_use";
+                currentText.push(line);
+                continue;
+              }
+              if (/^(Assistant|Response|Output)\s*[>:]/i.test(line.trim())) {
+                if (currentRole !== "assistant") { flushEntry(); currentRole = "assistant"; }
+                currentText.push(line);
+                continue;
+              }
+              if (currentRole) {
+                currentText.push(line);
+              } else {
+                currentText.push(line);
+                currentRole = "assistant";
+              }
+            }
+            flushEntry();
+
+            logEntries.push({ type: "result", num_turns: turnCount, usage: {} });
+            const parts = [`**Turns:** ${turnCount}`, `**Tool calls:** ${toolCallIndex}`];
+            if (mcpFailures.length) parts.push(`**MCP failures:** ${mcpFailures.length}`);
+            if (maxTurnsHit) parts.push("**Max turns reached**");
+            return { markdown: parts.join(" · "), logEntries, mcpFailures, maxTurnsHit };
+          }
+
+          // --- end engine-provided parse function ---
+
+          const main = createEngineLogParser({
+            parserName: "Crush",
+            parseFunction: parseLog,
+            supportsDirectories: false,
+          });
+
+          if (typeof module !== "undefined" && module.exports) {
+            module.exports = { main, parseLog };
+          }
+          GHAW_LOG_PARSER_SCRIPT_5d2e8b3f_EOF
+          chmod 755 "${RUNNER_TEMP}/gh-aw/actions/crush_log_parser.cjs"
       - name: Execute Crush CLI
         id: agentic_execution
+        timeout-minutes: 15
         run: |
           set -o pipefail
+          trap 'gh_aw_exit_code=$?; mkdir -p /tmp/gh-aw >/dev/null 2>&1 || true; printf "%s" "$gh_aw_exit_code" > /tmp/gh-aw/agent_execution_exit_code.txt || true; if [ "$gh_aw_exit_code" -ne 0 ]; then echo "::error::Agent execution exited with code $gh_aw_exit_code"; fi' EXIT
           printf '%s' "$(date +%s%3N)" > /tmp/gh-aw/agent_cli_start_ms.txt
           (umask 177 && touch /tmp/gh-aw/agent-stdio.log)
           GH_AW_MAX_AI_CREDITS="${{ vars.GH_AW_DEFAULT_MAX_AI_CREDITS || '1000' }}"
-          printf '%s\n' "{\"\$schema\":\"https://github.com/github/gh-aw-firewall/releases/download/v0.27.29/awf-config.schema.json\",\"network\":{\"allowDomains\":[\"*.githubusercontent.com\",\"*.grafana.net\",\"*.sentry.io\",\"api.anthropic.com\",\"api.snapcraft.io\",\"archive.ubuntu.com\",\"azure.archive.ubuntu.com\",\"charm.land\",\"codeload.github.com\",\"crl.geotrust.com\",\"crl.globalsign.com\",\"crl.identrust.com\",\"crl.sectigo.com\",\"crl.thawte.com\",\"crl.usertrust.com\",\"crl.verisign.com\",\"crl3.digicert.com\",\"crl4.digicert.com\",\"crls.ssl.com\",\"docs.github.com\",\"github-cloud.githubusercontent.com\",\"github-cloud.s3.amazonaws.com\",\"github.blog\",\"github.com\",\"github.githubassets.com\",\"host.docker.internal\",\"json-schema.org\",\"json.schemastore.org\",\"keyserver.ubuntu.com\",\"lfs.github.com\",\"objects.githubusercontent.com\",\"ocsp.digicert.com\",\"ocsp.geotrust.com\",\"ocsp.globalsign.com\",\"ocsp.identrust.com\",\"ocsp.sectigo.com\",\"ocsp.ssl.com\",\"ocsp.thawte.com\",\"ocsp.usertrust.com\",\"ocsp.verisign.com\",\"packagecloud.io\",\"packages.cloud.google.com\",\"packages.microsoft.com\",\"patch-diff.githubusercontent.com\",\"patchdiff.githubusercontent.com\",\"ppa.launchpad.net\",\"raw.githubusercontent.com\",\"registry.npmjs.org\",\"s.symcb.com\",\"s.symcd.com\",\"security.ubuntu.com\",\"ts-crl.ws.symantec.com\",\"ts-ocsp.ws.symantec.com\",\"www.googleapis.com\"],\"isolation\":true,\"topologyAttach\":[\"awmg-mcpg\"]},\"apiProxy\":{\"enabled\":true,\"enableTokenSteering\":true,\"maxRuns\":500,\"maxAiCredits\":${GH_AW_MAX_AI_CREDITS},\"maxCacheMisses\":5,\"models\":{\"agent\":[\"sonnet-6x\",\"gpt-5.4\",\"gpt-5.3\",\"gemini-pro\",\"any\"],\"antigravity\":[\"copilot/antigravity*\",\"google/antigravity*\",\"gemini/antigravity*\"],\"any\":[\"copilot/*\",\"anthropic/*\",\"openai/*\",\"google/*\",\"gemini/*\"],\"claude\":[\"agent\"],\"codex\":[\"agent\"],\"coding\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\",\"gpt-5-codex\",\"kimi\"],\"computer-use\":[\"copilot/*computer-use*\",\"google/*computer-use*\",\"gemini/*computer-use*\",\"openai/*computer-use*\"],\"copilot\":[\"agent\"],\"deep-research\":[\"copilot/deep-research*\",\"copilot/o3-deep-research*\",\"copilot/o4-mini-deep-research*\",\"google/deep-research*\",\"gemini/deep-research*\",\"openai/o3-deep-research*\",\"openai/o4-mini-deep-research*\"],\"fable\":[\"copilot/*fable*\",\"anthropic/*fable*\"],\"gemini\":[\"agent\"],\"gemini-3-flash\":[\"copilot/gemini-3*flash*\",\"google/gemini-3*flash*\",\"gemini/gemini-3*flash*\"],\"gemini-3-pro\":[\"copilot/gemini-3*pro*\",\"google/gemini-3*pro*\",\"google/nano-banana*\",\"gemini/gemini-3*pro*\"],\"gemini-3.1-flash\":[\"copilot/gemini-3.1*flash*\",\"google/gemini-3.1*flash*\",\"gemini/gemini-3.1*flash*\"],\"gemini-3.1-pro\":[\"copilot/gemini-3.1*pro*\",\"google/gemini-3.1*pro*\",\"gemini/gemini-3.1*pro*\"],\"gemini-3.5-flash\":[\"copilot/gemini-3.5*flash*\",\"google/gemini-3.5*flash*\",\"gemini/gemini-3.5*flash*\"],\"gemini-flash\":[\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"],\"gemini-flash-lite\":[\"copilot/gemini-*flash*lite*\",\"google/gemini-*flash*lite*\",\"gemini/gemini-*flash*lite*\"],\"gemini-omni\":[\"copilot/gemini-omni*\",\"google/gemini-omni*\",\"gemini/gemini-omni*\"],\"gemini-pro\":[\"copilot/gemini-*pro*\",\"google/gemini-*pro*\",\"gemini/gemini-*pro*\"],\"gemma\":[\"copilot/gemma*\",\"google/gemma*\",\"gemini/gemma*\"],\"gpt-5\":[\"copilot/gpt-5*\",\"openai/gpt-5*\"],\"gpt-5-codex\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\"],\"gpt-5-mini\":[\"copilot/gpt-5*mini*\",\"openai/gpt-5*mini*\"],\"gpt-5-nano\":[\"copilot/gpt-5*nano*\",\"openai/gpt-5*nano*\"],\"gpt-5-pro\":[\"copilot/gpt-5*pro*\",\"openai/gpt-5*pro*\"],\"gpt-5.1\":[\"copilot/gpt-5.1*\",\"openai/gpt-5.1*\"],\"gpt-5.2\":[\"copilot/gpt-5.2*\",\"openai/gpt-5.2*\"],\"gpt-5.3\":[\"copilot/gpt-5.3*\",\"openai/gpt-5.3*\"],\"gpt-5.4\":[\"copilot/gpt-5.4*\",\"openai/gpt-5.4*\"],\"gpt-5.5\":[\"copilot/gpt-5.5*\",\"openai/gpt-5.5*\"],\"gpt-5.6\":[\"copilot/gpt-5.6*\",\"openai/gpt-5.6*\"],\"haiku\":[\"copilot/*haiku*\",\"anthropic/*haiku*\"],\"image-generation\":[\"copilot/gpt-image*\",\"openai/gpt-image*\",\"openai/chatgpt-image*\",\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"google/imagen*\"],\"kimi\":[\"copilot/kimi*\",\"openai/kimi*\"],\"kiwi\":[\"copilot/kiwi*\",\"openai/kiwi*\"],\"large\":[\"fable\",\"sonnet\",\"gpt-5-pro\",\"gpt-5\",\"gemini-pro\"],\"lyria\":[\"google/lyria*\",\"gemini/lyria*\",\"copilot/lyria*\"],\"mai-code\":[\"copilot/MAI-Code*\",\"copilot/mai-code*\",\"openai/MAI-Code*\"],\"mini\":[\"haiku\",\"gpt-5-mini\",\"gpt-5-nano\",\"gemini-flash-lite\"],\"nano-banana\":[\"copilot/nano-banana*\",\"google/nano-banana*\",\"gemini/nano-banana*\"],\"opus\":[\"copilot/*opus*\",\"anthropic/*opus*\"],\"opusplan\":[\"opus?effort=high\"],\"reasoning\":[\"copilot/o1*\",\"copilot/o3*\",\"copilot/o4*\",\"openai/o1*\",\"openai/o3*\",\"openai/o4*\"],\"robotics\":[\"copilot/*robotics*\",\"google/*robotics*\",\"gemini/*robotics*\"],\"small\":[\"mini\"],\"small-agent\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash\"],\"sonnet\":[\"copilot/*sonnet*\",\"anthropic/*sonnet*\"],\"sonnet-6x\":[\"copilot/*sonnet-4.5*\",\"copilot/*sonnet-4.6*\",\"copilot/*sonnet-4-5-*\",\"anthropic/*sonnet-4-5-*\",\"copilot/*sonnet-4-6*\",\"anthropic/*sonnet-4-6*\"],\"summarization\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash-lite\",\"mini\"],\"veo\":[\"google/veo*\",\"gemini/veo*\"],\"vision\":[\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"]}},\"container\":{\"imageTag\":\"0.27.29,squid=sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f,agent=sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe,api-proxy=sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde,cli-proxy=sha256:bfc90b1f10d2ff61dbbbf0d57600001f85bf5f6444ed78bc05d9f6677327e4b8\"},\"logging\":{\"proxyLogsDir\":\"/tmp/gh-aw/sandbox/firewall/logs\",\"auditDir\":\"/tmp/gh-aw/sandbox/firewall/audit\"}}" > "${RUNNER_TEMP}/gh-aw/awf-config.json"
+          printf '%s\n' "{\"\$schema\":\"https://github.com/github/gh-aw-firewall/releases/download/v0.28.3/awf-config.schema.json\",\"network\":{\"allowDomains\":[\"*.grafana.net\",\"*.sentry.io\",\"api.github.com\",\"api.githubcopilot.com\",\"github.com\",\"host.docker.internal\",\"objects.githubusercontent.com\",\"raw.githubusercontent.com\",\"release-assets.githubusercontent.com\"],\"isolation\":true,\"topologyAttach\":[\"awmg-mcpg\"]},\"apiProxy\":{\"enabled\":true,\"enableTokenSteering\":true,\"maxRuns\":500,\"maxAiCredits\":${GH_AW_MAX_AI_CREDITS},\"maxCacheMisses\":15,\"models\":{\"agent\":[\"sonnet-6x\",\"gpt-5.4\",\"gpt-5.5\",\"gpt-5.6\",\"gpt-5.3\",\"gemini-pro\",\"any\"],\"antigravity\":[\"copilot/antigravity*\",\"google/antigravity*\",\"gemini/antigravity*\"],\"any\":[\"copilot/*\",\"anthropic/*\",\"openai/*\",\"google/*\",\"gemini/*\"],\"auto\":[\"copilot/auto\",\"large\"],\"claude\":[\"agent\"],\"codex\":[\"agent\"],\"coding\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\",\"gpt-5-codex\",\"kimi\"],\"computer-use\":[\"copilot/*computer-use*\",\"google/*computer-use*\",\"gemini/*computer-use*\",\"openai/*computer-use*\"],\"copilot\":[\"agent\"],\"deep-research\":[\"copilot/deep-research*\",\"copilot/o3-deep-research*\",\"copilot/o4-mini-deep-research*\",\"google/deep-research*\",\"gemini/deep-research*\",\"openai/o3-deep-research*\",\"openai/o4-mini-deep-research*\"],\"detection\":[\"small\"],\"evals\":[\"small\"],\"fable\":[\"copilot/*fable*\",\"anthropic/*fable*\"],\"gemini\":[\"agent\"],\"gemini-3-flash\":[\"copilot/gemini-3*flash*\",\"google/gemini-3*flash*\",\"gemini/gemini-3*flash*\"],\"gemini-3-pro\":[\"copilot/gemini-3*pro*\",\"google/gemini-3*pro*\",\"google/nano-banana*\",\"gemini/gemini-3*pro*\"],\"gemini-3.1-flash\":[\"copilot/gemini-3.1*flash*\",\"google/gemini-3.1*flash*\",\"gemini/gemini-3.1*flash*\"],\"gemini-3.1-pro\":[\"copilot/gemini-3.1*pro*\",\"google/gemini-3.1*pro*\",\"gemini/gemini-3.1*pro*\"],\"gemini-3.5-flash\":[\"copilot/gemini-3.5*flash*\",\"google/gemini-3.5*flash*\",\"gemini/gemini-3.5*flash*\"],\"gemini-3.6-flash\":[\"copilot/gemini-3.6*flash*\",\"google/gemini-3.6*flash*\",\"gemini/gemini-3.6*flash*\"],\"gemini-3.7-flash\":[\"copilot/gemini-3.7*flash*\",\"google/gemini-3.7*flash*\",\"gemini/gemini-3.7*flash*\"],\"gemini-flash\":[\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"],\"gemini-flash-lite\":[\"copilot/gemini-*flash*lite*\",\"google/gemini-*flash*lite*\",\"gemini/gemini-*flash*lite*\"],\"gemini-omni\":[\"copilot/gemini-omni*\",\"google/gemini-omni*\",\"gemini/gemini-omni*\"],\"gemini-pro\":[\"copilot/gemini-*pro*\",\"google/gemini-*pro*\",\"gemini/gemini-*pro*\"],\"gemma\":[\"copilot/gemma*\",\"google/gemma*\",\"gemini/gemma*\"],\"gpt-5\":[\"copilot/gpt-5*\",\"openai/gpt-5*\"],\"gpt-5-codex\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\"],\"gpt-5-mini\":[\"copilot/gpt-5*mini*\",\"openai/gpt-5*mini*\"],\"gpt-5-nano\":[\"copilot/gpt-5*nano*\",\"openai/gpt-5*nano*\"],\"gpt-5-pro\":[\"copilot/gpt-5*pro*\",\"openai/gpt-5*pro*\"],\"gpt-5.1\":[\"copilot/gpt-5.1*\",\"openai/gpt-5.1*\"],\"gpt-5.2\":[\"copilot/gpt-5.2*\",\"openai/gpt-5.2*\"],\"gpt-5.3\":[\"copilot/gpt-5.3*\",\"openai/gpt-5.3*\"],\"gpt-5.4\":[\"copilot/gpt-5.4*\",\"openai/gpt-5.4*\"],\"gpt-5.5\":[\"copilot/gpt-5.5*\",\"openai/gpt-5.5*\"],\"gpt-5.6\":[\"copilot/gpt-5.6*\",\"openai/gpt-5.6*\"],\"grok\":[\"copilot/*grok*\",\"openai/*grok*\"],\"haiku\":[\"copilot/*haiku*\",\"anthropic/*haiku*\"],\"image-generation\":[\"copilot/gpt-image*\",\"openai/gpt-image*\",\"openai/chatgpt-image*\",\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"google/imagen*\"],\"kimi\":[\"copilot/kimi*\",\"openai/kimi*\"],\"kiwi\":[\"copilot/kiwi*\",\"openai/kiwi*\"],\"large\":[\"sonnet\",\"gpt-5-pro\",\"gpt-5\",\"gemini-pro\"],\"lyria\":[\"google/lyria*\",\"gemini/lyria*\",\"copilot/lyria*\"],\"mai-code\":[\"copilot/MAI-Code*\",\"copilot/mai-code*\",\"openai/MAI-Code*\"],\"mai-code-1-flash-picker\":[\"copilot/MAI-Code-1-Flash-picker*\",\"copilot/mai-code-1-flash-picker*\",\"openai/MAI-Code-1-Flash-picker*\"],\"mini\":[\"haiku\",\"gpt-5-mini\",\"gpt-5-nano\",\"gemini-flash-lite\"],\"nano-banana\":[\"copilot/nano-banana*\",\"google/nano-banana*\",\"gemini/nano-banana*\"],\"opus\":[\"copilot/*opus*\",\"anthropic/*opus*\"],\"opusplan\":[\"opus?effort=high\"],\"raptor-mini\":[\"copilot/raptor*\",\"openai/raptor*\"],\"reasoning\":[\"copilot/o1*\",\"copilot/o3*\",\"copilot/o4*\",\"openai/o1*\",\"openai/o3*\",\"openai/o4*\"],\"robotics\":[\"copilot/*robotics*\",\"google/*robotics*\",\"gemini/*robotics*\"],\"small\":[\"mini\"],\"small-agent\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash\"],\"sonnet\":[\"copilot/*sonnet*\",\"anthropic/*sonnet*\"],\"sonnet-6x\":[\"copilot/*sonnet-4.5*\",\"copilot/*sonnet-4.6*\",\"copilot/*sonnet-5*\",\"copilot/*sonnet-4-5-*\",\"anthropic/*sonnet-4-5-*\",\"copilot/*sonnet-4-6*\",\"anthropic/*sonnet-4-6*\",\"anthropic/*sonnet-5*\"],\"summarization\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash-lite\",\"mini\"],\"veo\":[\"google/veo*\",\"gemini/veo*\"],\"vision\":[\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"]}},\"container\":{\"imageTag\":\"0.28.3,squid=sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0,agent=sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505,api-proxy=sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90,cli-proxy=sha256:930993b386043941fc68b2d135abcecb74fadbe1a63a62365fa43a194217584b\"},\"logging\":{\"proxyLogsDir\":\"/tmp/gh-aw/sandbox/firewall/logs\",\"auditDir\":\"/tmp/gh-aw/sandbox/firewall/audit\"}}" > "${RUNNER_TEMP}/gh-aw/awf-config.json"
           cp "${RUNNER_TEMP}/gh-aw/awf-config.json" /tmp/gh-aw/awf-config.json
           export GH_AW_MODELS_JSON_PATH="/tmp/gh-aw/models.json"
           GH_AW_DOCKER_HOST=""
@@ -938,18 +1279,25 @@ jobs:
             fi
           fi
           # shellcheck disable=SC1003,SC2016,SC2086
-          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --container-workdir "${GITHUB_WORKSPACE}" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} ${GH_AW_DOCKER_HOST:+--docker-host "$GH_AW_DOCKER_HOST"} --env-all --log-level info --skip-pull \
-            -- /bin/bash -c 'set +o histexpand; export PATH="${RUNNER_TEMP}/gh-aw/mcp-cli/bin:$PATH" && : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"; GH_AW_TOOL_CACHE="$RUNNER_TOOL_CACHE"; export PATH="$(find "$GH_AW_TOOL_CACHE" -maxdepth 5 -type d -name bin 2>/dev/null | tr '\''\n'\'' '\'':'\'')$PATH"; [ -n "$GOROOT" ] && export PATH="$GOROOT/bin:$PATH" || true; [ -n "$ERLANG_HOME" ] && export PATH="$ERLANG_HOME/bin:$PATH" || true && cd "${GITHUB_WORKSPACE}" && crush run --verbose "$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"' 2>&1 | tee -a /tmp/gh-aw/agent-stdio.log
+          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --container-workdir "${GITHUB_WORKSPACE}" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} ${GH_AW_DOCKER_HOST:+--docker-host "$GH_AW_DOCKER_HOST"} --env-all --exclude-env ACTIONS_ID_TOKEN_REQUEST_TOKEN --exclude-env ACTIONS_ID_TOKEN_REQUEST_URL --exclude-env GITHUB_MCP_SERVER_TOKEN --exclude-env MCP_GATEWAY_API_KEY --mount /tmp/gh-aw:/tmp/gh-aw:rw --log-level info --skip-pull \
+            -- /bin/bash -c 'set +o histexpand; export PATH="${RUNNER_TEMP}/gh-aw/mcp-cli/bin:$PATH" && export no_proxy="${NO_PROXY:-}" && : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"; GH_AW_TOOL_CACHE="$RUNNER_TOOL_CACHE"; export PATH="$(find "$GH_AW_TOOL_CACHE" -maxdepth 5 -type d -name bin 2>/dev/null | tr '\''\n'\'' '\'':'\'')$PATH"; [ -n "$GOROOT" ] && export PATH="$GOROOT/bin:$PATH" || true; [ -n "$ERLANG_HOME" ] && export PATH="$ERLANG_HOME/bin:$PATH" || true && GH_AW_NODE_EXEC="${GH_AW_NODE_BIN:-}"; if [ -z "$GH_AW_NODE_EXEC" ] || [ ! -x "$GH_AW_NODE_EXEC" ]; then GH_AW_NODE_EXEC="$(command -v node 2>/dev/null || true)"; fi; if [ -z "$GH_AW_NODE_EXEC" ]; then echo "node runtime missing on this runner — check runtimes.node in workflow YAML" >&2; exit 127; fi; GH_AW_NPM_GLOBAL_ROOT="$(npm root -g 2>/dev/null || true)"; if [ -n "$GH_AW_NPM_GLOBAL_ROOT" ]; then export NODE_PATH="${GH_AW_NPM_GLOBAL_ROOT}${NODE_PATH:+:${NODE_PATH}}"; fi; "$GH_AW_NODE_EXEC" ${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs crush run --quiet' 2>&1 | tee -a /tmp/gh-aw/agent-stdio.log
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_BASE_URL: http://host.docker.internal:10000
-          CRUSH_MODEL: anthropic/claude-sonnet-4-20250514
+          AWF_REFLECT_ENABLED: 1
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          CRUSH_DISABLE_DEFAULT_PROVIDERS: 1
+          CRUSH_DISABLE_PROVIDER_AUTO_UPDATE: 1
+          CRUSH_MODEL: copilot/claude-sonnet-4.5
+          GH_AW_ENGINE_VERSION: 0.88.0
+          GH_AW_LLM_PROVIDER: github
           GH_AW_MAX_TURNS: ${{ vars.GH_AW_DEFAULT_MAX_TURNS || '' }}
           GH_AW_MCP_CONFIG: ${{ github.workspace }}/.crush.json
           GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
+          GITHUB_COPILOT_BASE_URL: http://host.docker.internal:10002
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          NO_PROXY: localhost,127.0.0.1
+          NO_PROXY: localhost,127.0.0.1,host.docker.internal,host.docker.internal:10000,host.docker.internal:10001,host.docker.internal:10002,host.docker.internal:10003,172.30.0.30,172.30.0.30:10000,172.30.0.30:10001,172.30.0.30:10002,172.30.0.30:10003
+          OPENAI_API_KEY: ${{ github.token }}
+          OPENAI_BASE_URL: http://host.docker.internal:10002
           RUNNER_TEMP: ${{ runner.temp }}
           TRACEPARENT: ${{ env.GITHUB_AW_OTEL_TRACE_ID != '' && env.GITHUB_AW_OTEL_PARENT_SPAN_ID != '' && format('00-{0}-{1}-01', env.GITHUB_AW_OTEL_TRACE_ID, env.GITHUB_AW_OTEL_PARENT_SPAN_ID) || '' }}
       - name: Configure Git credentials
@@ -972,13 +1320,14 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/redact_secrets.cjs');
+            const { main } = require(path.join(actionsDir, 'redact_secrets.cjs'));
             await main();
         env:
-          GH_AW_SECRET_NAMES: 'ANTHROPIC_API_KEY,GH_AW_GITHUB_MCP_SERVER_TOKEN,GH_AW_GITHUB_TOKEN,GITHUB_TOKEN'
-          SECRET_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_AW_SECRET_NAMES: 'GH_AW_GITHUB_MCP_SERVER_TOKEN,GH_AW_GITHUB_TOKEN,GITHUB_TOKEN'
           SECRET_GH_AW_GITHUB_MCP_SERVER_TOKEN: ${{ secrets.GH_AW_GITHUB_MCP_SERVER_TOKEN }}
           SECRET_GH_AW_GITHUB_TOKEN: ${{ secrets.GH_AW_GITHUB_TOKEN }}
           SECRET_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -998,15 +1347,31 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,api.anthropic.com,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,charm.land,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,docs.github.com,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,host.docker.internal,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,registry.npmjs.org,s.symcb.com,s.symcd.com,security.ubuntu.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,127.0.0.1,::1,api.snapcraft.io,app.renovatebot.com,appveyor.com,archive.ubuntu.com,azure.archive.ubuntu.com,badgen.net,circleci.com,codacy.com,codeclimate.com,codecov.io,codeload.github.com,coveralls.io,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deepsource.io,docs.github.com,drone.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,img.shields.io,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,localhost,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,readthedocs.io,readthedocs.org,renovatebot.com,s.symcb.com,s.symcd.com,security.ubuntu.com,semaphoreci.com,shields.io,snyk.io,sonarcloud.io,sonarqube.com,travis-ci.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
           GH_AW_COMMANDS: "[\"smoke-crush\"]"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/collect_ndjson_output.cjs');
+            const { main } = require(path.join(actionsDir, 'collect_ndjson_output.cjs'));
+            await main();
+      - name: Parse agent logs for step summary
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_AGENT_OUTPUT: /tmp/gh-aw/agent-stdio.log
+          GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
+        with:
+          script: |
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(path.join(actionsDir, 'crush_log_parser.cjs'));
             await main();
       - name: Parse MCP Gateway logs for step summary
         if: always()
@@ -1014,9 +1379,11 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/parse_mcp_gateway_log.cjs');
+            const { main } = require(path.join(actionsDir, 'parse_mcp_gateway_log.cjs'));
             await main();
       - name: Print firewall logs
         if: always()
@@ -1030,9 +1397,11 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/parse_token_usage.cjs');
+            const { main } = require(path.join(actionsDir, 'parse_token_usage.cjs'));
             await main();
       - name: Print AWF reflect summary
         if: always()
@@ -1040,18 +1409,22 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/awf_reflect_summary.cjs');
+            const { main } = require(path.join(actionsDir, 'awf_reflect_summary.cjs'));
             await main();
       - name: Generate observability summary
         if: always()
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/generate_observability_summary.cjs');
+            const { main } = require(path.join(actionsDir, 'generate_observability_summary.cjs'));
             await main(core);
       - name: Write agent output placeholder if missing
         if: always()
@@ -1059,6 +1432,18 @@ jobs:
           if [ ! -f /tmp/gh-aw/agent_output.json ]; then
             echo '{"items":[]}' > /tmp/gh-aw/agent_output.json
           fi
+      # Small dedicated copy of the agent output so safe-output processing
+      # survives a failed or timed-out upload of the larger agent artifact
+      - name: Upload agent output fallback artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-output-fallback
+          path: |
+            /tmp/gh-aw/agent_output.json
+            /tmp/gh-aw/safeoutputs.jsonl
+          if-no-files-found: ignore
       - name: Upload agent artifacts
         if: always()
         continue-on-error: true
@@ -1091,7 +1476,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     steps:
       - name: Configure GH_HOST for enterprise compatibility
         id: ghes-host-config
@@ -1134,7 +1518,6 @@ jobs:
           if [ "${FOUND_NONEMPTY}" != "true" ]; then
             echo "::error::All token_usage.jsonl files are empty or missing after a successful agent run."
             echo "::error::The AWF firewall proxy token telemetry emitter may be broken."
-            echo "::error::See tracking issue: https://github.com/github/gh-aw/issues/42791"
             exit 1
           fi
       - name: Assert agent_usage.json has non-zero token counts
@@ -1163,10 +1546,10 @@ jobs:
     if: >
       always() && (needs.agent.result != 'skipped' || needs.activation.outputs.lockdown_check_failed == 'true' ||
       needs.activation.outputs.oauth_token_check_failed == 'true' || needs.activation.outputs.stale_lock_file_failed == 'true' ||
-      needs.activation.outputs.secret_verification_result == 'failed' || needs.activation.outputs.daily_ai_credits_exceeded == 'true')
+      needs.activation.outputs.daily_ai_credits_exceeded == 'true')
     runs-on: ubuntu-slim
     permissions:
-      contents: read
+      actions: read
       issues: write
       pull-requests: write
     concurrency:
@@ -1182,7 +1565,7 @@ jobs:
       total_count: ${{ steps.missing_tool.outputs.total_count }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -1200,14 +1583,15 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
       - name: Download agent output artifact
         id: download-agent-output
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: agent
+          pattern: "{agent,agent-output-fallback}"
+          merge-multiple: true
           path: /tmp/gh-aw/
       - name: Setup agent output environment variable
         id: setup-agent-output-env
@@ -1215,8 +1599,10 @@ jobs:
         run: |
           mkdir -p /tmp/gh-aw/
           find "/tmp/gh-aw/" -type f -print
-          echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
-      - name: Download safe outputs items manifest
+          if [ -f "/tmp/gh-aw/agent_output.json" ]; then
+            echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download Safe Outputs Items Manifest
         id: download-safe-outputs-manifest
         if: always()
         continue-on-error: true
@@ -1227,29 +1613,7 @@ jobs:
       - name: Collect usage artifact files
         if: always()
         continue-on-error: true
-        run: |
-          mkdir -p /tmp/gh-aw/usage/agent /tmp/gh-aw/usage/detection
-          echo "Usage artifact source file status:"
-          for file in /tmp/gh-aw/aw_info.json /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/agent_usage.json /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl; do
-            [ -f "$file" ] && echo "FOUND: $file" || echo "MISSING: $file"
-          done
-          [ -f /tmp/gh-aw/aw_info.json ] && cp /tmp/gh-aw/aw_info.json /tmp/gh-aw/usage/aw_info.json || true
-          [ -f /tmp/gh-aw/aw-info.jsonl ] && cp /tmp/gh-aw/aw-info.jsonl /tmp/gh-aw/usage/aw-info.jsonl || true
-          [ -f /tmp/gh-aw/agent_usage.json ] && cp /tmp/gh-aw/agent_usage.json /tmp/gh-aw/usage/agent_usage.json || true
-          [ -f /tmp/gh-aw/agent_usage.jsonl ] && cp /tmp/gh-aw/agent_usage.jsonl /tmp/gh-aw/usage/agent_usage.jsonl || true
-          [ -f /tmp/gh-aw/detection_usage.jsonl ] && cp /tmp/gh-aw/detection_usage.jsonl /tmp/gh-aw/usage/detection_usage.jsonl || true
-          [ -f /tmp/gh-aw/github_rate_limits.jsonl ] && cp /tmp/gh-aw/github_rate_limits.jsonl /tmp/gh-aw/usage/github_rate_limits.jsonl || true
-          [ -s /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true
-          [ -s /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true
-          [ -s /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/agent/token_usage.jsonl || true
-          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall-audit-logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true
-          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall/audit/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true
-          [ -s /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl ] && cp /tmp/gh-aw/threat-detection/sandbox/firewall/logs/api-proxy-logs/token-usage.jsonl /tmp/gh-aw/usage/detection/token_usage.jsonl || true
-          [ -f /tmp/gh-aw/usage/agent/token_usage.jsonl ] || : > /tmp/gh-aw/usage/agent/token_usage.jsonl
-          [ -f /tmp/gh-aw/usage/detection/token_usage.jsonl ] || : > /tmp/gh-aw/usage/detection/token_usage.jsonl
-          mkdir -p /tmp/gh-aw/usage/activity
-          node "${RUNNER_TEMP}/gh-aw/actions/generate_usage_activity_summary.cjs"
-          find /tmp/gh-aw/usage -type f -print | sort
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/collect_usage_artifact_files.sh"
       - name: Upload usage artifact
         if: always()
         continue-on-error: true
@@ -1262,6 +1626,7 @@ jobs:
             /tmp/gh-aw/usage/agent_usage.json
             /tmp/gh-aw/usage/agent_usage.jsonl
             /tmp/gh-aw/usage/detection_usage.jsonl
+            /tmp/gh-aw/usage/evals.jsonl
             /tmp/gh-aw/usage/github_rate_limits.jsonl
             /tmp/gh-aw/usage/agent/token_usage.jsonl
             /tmp/gh-aw/usage/detection/token_usage.jsonl
@@ -1284,9 +1649,11 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/write_daily_aic_usage_cache.cjs');
+            const { main } = require(path.join(actionsDir, 'write_daily_aic_usage_cache.cjs'));
             await main();
       - name: Save daily AIC usage cache
         id: save-daily-aic-cache
@@ -1316,7 +1683,7 @@ jobs:
           GH_AW_WORKFLOW_SOURCE_URL: "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/smoke-crush.md"
           GH_AW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_AW_AGENT_CONCLUSION: ${{ needs.agent.result }}
-          GH_AW_NOOP_REPORT_AS_ISSUE: "true"
+          GH_AW_NOOP_REPORT_AS_ISSUE: "false"
           GH_AW_AIC: ${{ needs.agent.outputs.aic }}
           GH_AW_THREAT_DETECTION_AIC: ${{ needs.detection.outputs.aic }}
           GH_AW_AMBIENT_CONTEXT: ${{ needs.agent.outputs.ambient_context }}
@@ -1324,9 +1691,11 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/handle_noop_message.cjs');
+            const { main } = require(path.join(actionsDir, 'handle_noop_message.cjs'));
             await main();
       - name: Log detection run
         id: detection_runs
@@ -1341,9 +1710,11 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/handle_detection_runs.cjs');
+            const { main } = require(path.join(actionsDir, 'handle_detection_runs.cjs'));
             await main();
       - name: Record missing tool
         id: missing_tool
@@ -1356,9 +1727,11 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/missing_tool.cjs');
+            const { main } = require(path.join(actionsDir, 'missing_tool.cjs'));
             await main();
       - name: Record incomplete
         id: report_incomplete
@@ -1371,9 +1744,11 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/report_incomplete_handler.cjs');
+            const { main } = require(path.join(actionsDir, 'report_incomplete_handler.cjs'));
             await main();
       - name: Handle agent failure
         id: handle_agent_failure
@@ -1388,7 +1763,6 @@ jobs:
           GH_AW_WORKFLOW_ID: "smoke-crush"
           GH_AW_ACTION_FAILURE_ISSUE_EXPIRES_HOURS: "12"
           GH_AW_ENGINE_ID: "crush"
-          GH_AW_SECRET_VERIFICATION_RESULT: ${{ needs.activation.outputs.secret_verification_result }}
           GH_AW_CHECKOUT_PR_SUCCESS: ${{ needs.agent.outputs.checkout_pr_success }}
           GH_AW_EFFECTIVE_TOKENS: ${{ needs.agent.outputs.effective_tokens || '' }}
           GH_AW_AI_CREDITS_RATE_LIMIT_ERROR: ${{ needs.agent.outputs.ai_credits_rate_limit_error || 'false' }}
@@ -1402,7 +1776,7 @@ jobs:
           GH_AW_DAILY_AI_CREDITS_EXCEEDED: ${{ needs.activation.outputs.daily_ai_credits_exceeded }}
           GH_AW_DAILY_AI_CREDITS_TOTAL_EFFECTIVE_TOKENS: ${{ needs.activation.outputs.daily_ai_credits_total_effective_tokens }}
           GH_AW_DAILY_AI_CREDITS_THRESHOLD: ${{ needs.activation.outputs.daily_ai_credits_threshold }}
-          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
+          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*{ai_credits_suffix}{history_link}\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) Crush delivered.\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
           GH_AW_GROUP_REPORTS: "false"
           GH_AW_FAILURE_REPORT_AS_ISSUE: "true"
           GH_AW_MISSING_TOOL_REPORT_AS_FAILURE: "true"
@@ -1411,9 +1785,30 @@ jobs:
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/handle_agent_failure.cjs');
+            const { main } = require(path.join(actionsDir, 'handle_agent_failure.cjs'));
+            await main();
+      - name: Report failed jobs
+        id: report_failed_jobs
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}
+          GH_AW_WORKFLOW_NAME: "Smoke Crush"
+          GH_AW_WORKFLOW_SOURCE_URL: "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/smoke-crush.md"
+          GH_AW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_AW_REPORT_FAILED_JOBS: "true"
+        with:
+          github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(path.join(actionsDir, 'report_failed_jobs.cjs'));
             await main();
       - name: Update reaction comment with completion status
         id: conclusion
@@ -1428,13 +1823,15 @@ jobs:
           GH_AW_SAFE_OUTPUTS_RESULT: ${{ needs.safe_outputs.result }}
           GH_AW_DETECTION_CONCLUSION: ${{ needs.detection.outputs.detection_conclusion }}
           GH_AW_DETECTION_REASON: ${{ needs.detection.outputs.detection_reason }}
-          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
+          GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*{ai_credits_suffix}{history_link}\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) Crush delivered.\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/notify_comment_error.cjs');
+            const { main } = require(path.join(actionsDir, 'notify_comment_error.cjs'));
             await main();
 
   detection:
@@ -1445,6 +1842,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      copilot-requests: write
     env:
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
     outputs:
@@ -1454,7 +1852,7 @@ jobs:
       detection_success: ${{ steps.detection_conclusion.outputs.success }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -1472,14 +1870,21 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
+      - name: Download activation artifact
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: activation
+          path: /tmp/gh-aw
       - name: Download agent output artifact
         id: download-agent-output
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: agent
+          pattern: "{agent,agent-output-fallback}"
+          merge-multiple: true
           path: /tmp/gh-aw/
       - name: Setup agent output environment variable
         id: setup-agent-output-env
@@ -1487,10 +1892,12 @@ jobs:
         run: |
           mkdir -p /tmp/gh-aw/
           find "/tmp/gh-aw/" -type f -print
-          echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
+          if [ -f "/tmp/gh-aw/agent_output.json" ]; then
+            echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
+          fi
       - name: Checkout repository for patch context
         if: needs.agent.outputs.has_patch == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # --- Threat Detection ---
@@ -1499,7 +1906,7 @@ jobs:
           rm -rf /tmp/gh-aw/sandbox/firewall/logs
           rm -rf /tmp/gh-aw/sandbox/firewall/audit
       - name: Download container images
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:0.27.29@sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe ghcr.io/github/gh-aw-firewall/api-proxy:0.27.29@sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde ghcr.io/github/gh-aw-firewall/squid:0.27.29@sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/download_docker_images.sh" ghcr.io/github/gh-aw-firewall/agent:0.28.3@sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505 ghcr.io/github/gh-aw-firewall/api-proxy:0.28.3@sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90 ghcr.io/github/gh-aw-firewall/squid:0.28.3@sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0
       - name: Check if detection needed
         id: detection_guard
         if: always()
@@ -1523,21 +1930,7 @@ jobs:
       - name: Prepare threat detection files
         if: always() && steps.detection_guard.outputs.run_detection == 'true'
         run: |
-          mkdir -p /tmp/gh-aw/threat-detection/aw-prompts
-          rm -f /tmp/gh-aw/agent_usage.json
-          cp /tmp/gh-aw/aw-prompts/prompt.txt /tmp/gh-aw/threat-detection/aw-prompts/prompt.txt 2>/dev/null || true
-          if [ ! -s /tmp/gh-aw/threat-detection/aw-prompts/prompt.txt ]; then
-            echo "::warning::ERR_VALIDATION: Missing or empty detection context prompt at /tmp/gh-aw/threat-detection/aw-prompts/prompt.txt. Ensure the agent artifact includes /tmp/gh-aw/aw-prompts/prompt.txt. Detection will continue with fallback workflow context."
-          fi
-          cp /tmp/gh-aw/agent_output.json /tmp/gh-aw/threat-detection/agent_output.json 2>/dev/null || true
-          for f in /tmp/gh-aw/aw-*.patch; do
-            [ -f "$f" ] && cp "$f" /tmp/gh-aw/threat-detection/ 2>/dev/null || true
-          done
-          for f in /tmp/gh-aw/aw-*.bundle; do
-            [ -f "$f" ] && cp "$f" /tmp/gh-aw/threat-detection/ 2>/dev/null || true
-          done
-          echo "Prepared threat detection files:"
-          ls -la /tmp/gh-aw/threat-detection/ 2>/dev/null || true
+          bash "${RUNNER_TEMP}/gh-aw/actions/prepare_threat_detection_files.sh"
       - name: Setup threat detection
         if: always() && steps.detection_guard.outputs.run_detection == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -1545,26 +1938,31 @@ jobs:
           WORKFLOW_NAME: "Smoke Crush"
           WORKFLOW_DESCRIPTION: "Smoke test workflow that validates Crush engine functionality"
           HAS_PATCH: ${{ needs.agent.outputs.has_patch }}
+          GH_AW_DETECTION_CONTINUE_ON_ERROR: "true"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/setup_threat_detection.cjs');
+            const { main } = require(path.join(actionsDir, 'setup_threat_detection.cjs'));
             await main();
       - name: Ensure threat-detection directory and log
         if: always() && steps.detection_guard.outputs.run_detection == 'true'
         run: |
           mkdir -p /tmp/gh-aw/threat-detection
           touch /tmp/gh-aw/threat-detection/detection.log
+          rm -f /tmp/gh-aw/step-summary.md
+          touch /tmp/gh-aw/step-summary.md
       - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           package-manager-cache: false
       - name: Install AWF binary
-        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" v0.27.29
+        run: bash "${RUNNER_TEMP}/gh-aw/actions/install_awf_binary.sh" v0.28.3 --rootless
       - name: Install Crush CLI
-        run: npm install -g @charmland/crush@0.59.0
+        run: npm install -g @charmland/crush@0.88.0
         env:
           NPM_CONFIG_MIN_RELEASE_AGE: '3'
       - name: Verify Crush CLI installation
@@ -1574,9 +1972,31 @@ jobs:
         continue-on-error: true
         run: |
           umask 077
-          mkdir -p "$GITHUB_WORKSPACE"
+          mkdir -p "$(dirname "$GITHUB_WORKSPACE/.crush.json")"
           CONFIG="$GITHUB_WORKSPACE/.crush.json"
-          BASE_CONFIG='{"agent":{"build":{"permission":{"bash":"allow","edit":"allow","read":"allow","glob":"allow","grep":"allow","write":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow"}}}}'
+          # shellcheck disable=SC2016
+          BASE_CONFIG='{
+            "$schema": "https://charm.land/crush.json",
+            "options": {
+              "auto_lsp": false,
+              "disable_default_providers": true,
+              "disable_metrics": true,
+              "disable_provider_auto_update": true,
+              "progress": false
+            },
+            "permissions": {
+              "allowed_tools": [
+                "view",
+                "ls",
+                "grep",
+                "edit",
+                "write",
+                "bash",
+                "webfetch",
+                "websearch"
+              ]
+            }
+          }'
           if [ -f "$CONFIG" ]; then
             MERGED=$(jq -n --argjson base "$BASE_CONFIG" --argjson existing "$(cat "$CONFIG")" '$existing * $base')
             echo "$MERGED" > "$CONFIG"
@@ -1584,16 +2004,249 @@ jobs:
             echo "$BASE_CONFIG" > "$CONFIG"
           fi
           chmod 600 "$CONFIG"
+      - name: Write Crush harness script
+        if: always() && steps.detection_guard.outputs.run_detection == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gh-aw/actions"
+          cat <<'GHAW_HARNESS_SCRIPT_3c7b9f1a_EOF' > "${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs"
+          const { spawnSync } = require("child_process");
+          const { accessSync, constants, readFileSync, writeFileSync } = require("fs");
+          const { isAbsolute, join } = require("path");
+          const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
+
+          const [command, ...commandArgs] = process.argv.slice(2);
+          const log = message => process.stderr.write(`[crush-harness] ${message}\n`);
+          const fail = (result, action) => {
+            if (result.error) throw result.error;
+            if (result.status !== 0) throw new Error(`${action} failed with exit code ${result.status ?? "unknown"}`);
+          };
+
+          // Preflight the CLI lookup inside the sandbox: the binary is installed on the runner
+          // host, so a missing sandbox mount surfaces as a bare ENOENT from spawnSync.
+          const resolveCommand = name => {
+            const searchPath = process.env.PATH || "";
+            if (name.includes("/")) {
+              const candidate = isAbsolute(name) ? name : join(process.cwd(), name);
+              try {
+                accessSync(candidate, constants.X_OK);
+                return candidate;
+              } catch {
+                throw new Error(`${name} not executable in sandbox: ${candidate}`);
+              }
+            }
+            for (const dir of searchPath.split(":")) {
+              if (!dir) continue;
+              const candidate = join(dir, name);
+              try {
+                accessSync(candidate, constants.X_OK);
+                return candidate;
+              } catch {
+                continue;
+              }
+            }
+            throw new Error(`${name} not found in sandbox PATH: ${searchPath}`);
+          };
+
+          const main = async () => {
+            const selectedModel = process.env.CRUSH_MODEL;
+            if (!selectedModel || !selectedModel.includes("/")) {
+              throw new Error("CRUSH_MODEL must use provider/model format");
+            }
+            const model = selectedModel.slice(selectedModel.indexOf("/") + 1);
+            const provider = process.env.GH_AW_LLM_PROVIDER;
+            if (!provider) throw new Error("GH_AW_LLM_PROVIDER is required");
+
+            let baseUrl = process.env.OPENAI_BASE_URL;
+            if (process.env.AWF_REFLECT_ENABLED === "1") {
+              const result = await fetchAWFReflect({ logger: log });
+              if (!result.ok || !result.reflectData) {
+                throw new Error(`Unable to discover the Crush LLM endpoint from /reflect: ${result.reason || "empty response"}`);
+              }
+              const endpoint = resolveProviderEndpointFromReflect({
+                provider,
+                reflectData: result.reflectData,
+                logger: log,
+              });
+              if (!endpoint || !endpoint.baseUrl) {
+                throw new Error(`No configured /reflect endpoint found for provider ${provider}`);
+              }
+              baseUrl = endpoint.baseUrl;
+              const reflectedEndpoint = result.reflectData.endpoints?.find(
+                entry => entry?.configured === true && entry.provider === endpoint.endpointProvider
+              );
+              if (typeof reflectedEndpoint?.models_url === "string") {
+                // Re-derive the base URL from models_url (rather than reusing endpoint.baseUrl,
+                // which points at the models-listing endpoint) while still applying the same
+                // api-proxy -> host.docker.internal HOSTALIASES bridge rewrite, so the crush
+                // binary's own chat-completions request never targets the unresolvable
+                // "api-proxy" hostname.
+                baseUrl = deriveBaseUrlFromModelsURL(reflectedEndpoint.models_url);
+              }
+            }
+            if (!baseUrl) {
+              throw new Error("Crush requires AWF endpoint discovery or OPENAI_BASE_URL");
+            }
+
+            const workspace = process.env.GITHUB_WORKSPACE;
+            if (!workspace) throw new Error("GITHUB_WORKSPACE is required");
+            const configPath = process.env.GH_AW_MCP_CONFIG || join(workspace, ".crush.json");
+            const config = JSON.parse(readFileSync(configPath, "utf8"));
+            const providerType = provider === "anthropic" ? "anthropic" : "openai-compat";
+            const apiKey = providerType === "anthropic" ? "$ANTHROPIC_API_KEY" : "$OPENAI_API_KEY";
+            config.providers = {
+              ...(config.providers || {}),
+              "awf-proxy": {
+                id: "awf-proxy",
+                name: "GitHub Agentic Workflows",
+                base_url: baseUrl,
+                type: providerType,
+                api_key: apiKey,
+                discover_models: false,
+                models: [{
+                  id: model,
+                  name: model,
+                  cost_per_1m_in: 0,
+                  cost_per_1m_out: 0,
+                  cost_per_1m_in_cached: 0,
+                  cost_per_1m_out_cached: 0,
+                  context_window: 200000,
+                  default_max_tokens: 64000,
+                  can_reason: false,
+                  supports_attachments: false,
+                }],
+              },
+            };
+            config.models = {
+              ...(config.models || {}),
+              large: { provider: "awf-proxy", model },
+            };
+            writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+            const promptPath = process.env.GH_AW_PROMPT;
+            if (!promptPath) throw new Error("GH_AW_PROMPT is required");
+            const prompt = readFileSync(promptPath, "utf8");
+            const executable = resolveCommand(command);
+            log(`resolved ${command} to ${executable}`);
+            fail(
+              spawnSync(executable, [...commandArgs, "--model", `awf-proxy/${model}`, prompt], {
+                cwd: workspace,
+                env: process.env,
+                stdio: "inherit",
+              }),
+              "Crush execution"
+            );
+          };
+
+          main().catch(error => {
+            log(error instanceof Error ? error.message : String(error));
+            process.exitCode = 1;
+          });
+
+          GHAW_HARNESS_SCRIPT_3c7b9f1a_EOF
+          chmod 755 "${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs"
+      - name: Write Crush log parser script
+        if: always() && steps.detection_guard.outputs.run_detection == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/gh-aw/actions"
+          cat <<'GHAW_LOG_PARSER_SCRIPT_5d2e8b3f_EOF' > "${RUNNER_TEMP}/gh-aw/actions/crush_log_parser.cjs"
+          // @ts-check
+          // Auto-generated log parser for behavior-defined engine "Crush".
+          const { createEngineLogParser } = require("./log_parser_shared.cjs");
+
+          // --- begin engine-provided parse function ---
+          function parseLog(logContent) {
+            const lines = logContent.split("\n");
+            const logEntries = [];
+            const mcpFailures = [];
+            let maxTurnsHit = false;
+            const AWF_INFRA_RE = /^\[(INFO|WARN|SUCCESS|ERROR|entrypoint|health-check|crush-harness)\]|^ (?:Container|Network|Volume) |^Process exiting with code:/;
+            let toolCallIndex = 0;
+            let turnCount = 0;
+            let currentRole = null;
+            let currentText = [];
+
+            function flushEntry() {
+              if (!currentRole || currentText.length === 0) { currentText = []; return; }
+              const text = currentText.join("\n").trim();
+              if (!text) { currentText = []; return; }
+              if (currentRole === "tool_use") {
+                const toolId = `crush_tool_${toolCallIndex++}`;
+                const nameMatch = text.match(/^(?:Tool|Running|Executing|>\s*)(view|edit|bash|grep|ls|write|webfetch|websearch)\b/i);
+                const toolName = nameMatch ? nameMatch[1] : "unknown_tool";
+                logEntries.push({ type: "assistant", message: { content: [{ type: "tool_use", id: toolId, name: toolName, input: {} }] } });
+                logEntries.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: toolId, content: text }] } });
+              } else if (currentRole === "assistant") {
+                logEntries.push({ type: "assistant", message: { content: [{ type: "text", text }] } });
+                turnCount++;
+              }
+              currentText = [];
+            }
+
+            logEntries.push({ type: "system", subtype: "init", model: null, session_id: null });
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              if (AWF_INFRA_RE.test(line)) continue;
+              if (/max.?turns|maximum.*turns.*reached|turn limit/i.test(line)) maxTurnsHit = true;
+              if (/MCP server .* failed|MCP.*connection.*error|Failed to connect to MCP/i.test(line)) {
+                const serverMatch = line.match(/MCP server ['"]?([^\s'"]+)['"]?/i);
+                mcpFailures.push(serverMatch ? serverMatch[1] : line.trim());
+              }
+
+              if (/^(Tool|Running|Executing|>\s*(view|edit|bash|grep|ls|write|webfetch|websearch))\b/i.test(line.trim())) {
+                flushEntry();
+                currentRole = "tool_use";
+                currentText.push(line);
+                continue;
+              }
+              if (/^(Assistant|Response|Output)\s*[>:]/i.test(line.trim())) {
+                if (currentRole !== "assistant") { flushEntry(); currentRole = "assistant"; }
+                currentText.push(line);
+                continue;
+              }
+              if (currentRole) {
+                currentText.push(line);
+              } else {
+                currentText.push(line);
+                currentRole = "assistant";
+              }
+            }
+            flushEntry();
+
+            logEntries.push({ type: "result", num_turns: turnCount, usage: {} });
+            const parts = [`**Turns:** ${turnCount}`, `**Tool calls:** ${toolCallIndex}`];
+            if (mcpFailures.length) parts.push(`**MCP failures:** ${mcpFailures.length}`);
+            if (maxTurnsHit) parts.push("**Max turns reached**");
+            return { markdown: parts.join(" · "), logEntries, mcpFailures, maxTurnsHit };
+          }
+
+          // --- end engine-provided parse function ---
+
+          const main = createEngineLogParser({
+            parserName: "Crush",
+            parseFunction: parseLog,
+            supportsDirectories: false,
+          });
+
+          if (typeof module !== "undefined" && module.exports) {
+            module.exports = { main, parseLog };
+          }
+          GHAW_LOG_PARSER_SCRIPT_5d2e8b3f_EOF
+          chmod 755 "${RUNNER_TEMP}/gh-aw/actions/crush_log_parser.cjs"
       - name: Execute Crush CLI
         if: always() && steps.detection_guard.outputs.run_detection == 'true'
         continue-on-error: true
         id: detection_agentic_execution
+        timeout-minutes: 20
         run: |
           set -o pipefail
+          trap 'gh_aw_exit_code=$?; mkdir -p /tmp/gh-aw >/dev/null 2>&1 || true; printf "%s" "$gh_aw_exit_code" > /tmp/gh-aw/agent_execution_exit_code.txt || true; if [ "$gh_aw_exit_code" -ne 0 ]; then echo "::error::Agent execution exited with code $gh_aw_exit_code"; fi' EXIT
           printf '%s' "$(date +%s%3N)" > /tmp/gh-aw/agent_cli_start_ms.txt
           (umask 177 && touch /tmp/gh-aw/threat-detection/detection.log)
           GH_AW_MAX_AI_CREDITS="${{ vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS || '400' }}"
-          printf '%s\n' "{\"\$schema\":\"https://github.com/github/gh-aw-firewall/releases/download/v0.27.29/awf-config.schema.json\",\"network\":{\"allowDomains\":[\"api.anthropic.com\",\"charm.land\",\"github.com\",\"host.docker.internal\",\"raw.githubusercontent.com\",\"registry.npmjs.org\"]},\"apiProxy\":{\"enabled\":true,\"enableTokenSteering\":true,\"maxRuns\":500,\"maxAiCredits\":${GH_AW_MAX_AI_CREDITS},\"maxCacheMisses\":5},\"container\":{\"imageTag\":\"0.27.29,squid=sha256:7bfa0742f9a5bd6309507caaa80a8b6cf3e05bd95a1429affbf64cc94cfbd34f,agent=sha256:debc0b18ef8ea3a64585c4d1eea1099f0d9fa76b53d34a1f3c53b3225fe158fe,api-proxy=sha256:c7754df3f06f346c817db0525ba523cbdaf5349239fd7f37897c4250a8fc7bde,cli-proxy=sha256:bfc90b1f10d2ff61dbbbf0d57600001f85bf5f6444ed78bc05d9f6677327e4b8\"},\"logging\":{\"proxyLogsDir\":\"/tmp/gh-aw/sandbox/firewall/logs\",\"auditDir\":\"/tmp/gh-aw/sandbox/firewall/audit\"}}" > "${RUNNER_TEMP}/gh-aw/awf-config.json"
+          printf '%s\n' "{\"\$schema\":\"https://github.com/github/gh-aw-firewall/releases/download/v0.28.3/awf-config.schema.json\",\"network\":{\"allowDomains\":[\"api.github.com\",\"api.githubcopilot.com\",\"github.com\",\"host.docker.internal\",\"objects.githubusercontent.com\",\"raw.githubusercontent.com\",\"release-assets.githubusercontent.com\"]},\"apiProxy\":{\"enabled\":true,\"enableTokenSteering\":true,\"maxRuns\":500,\"maxAiCredits\":${GH_AW_MAX_AI_CREDITS},\"maxCacheMisses\":5,\"models\":{\"agent\":[\"sonnet-6x\",\"gpt-5.4\",\"gpt-5.5\",\"gpt-5.6\",\"gpt-5.3\",\"gemini-pro\",\"any\"],\"antigravity\":[\"copilot/antigravity*\",\"google/antigravity*\",\"gemini/antigravity*\"],\"any\":[\"copilot/*\",\"anthropic/*\",\"openai/*\",\"google/*\",\"gemini/*\"],\"auto\":[\"copilot/auto\",\"large\"],\"claude\":[\"agent\"],\"codex\":[\"agent\"],\"coding\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\",\"gpt-5-codex\",\"kimi\"],\"computer-use\":[\"copilot/*computer-use*\",\"google/*computer-use*\",\"gemini/*computer-use*\",\"openai/*computer-use*\"],\"copilot\":[\"agent\"],\"deep-research\":[\"copilot/deep-research*\",\"copilot/o3-deep-research*\",\"copilot/o4-mini-deep-research*\",\"google/deep-research*\",\"gemini/deep-research*\",\"openai/o3-deep-research*\",\"openai/o4-mini-deep-research*\"],\"detection\":[\"small\"],\"evals\":[\"small\"],\"fable\":[\"copilot/*fable*\",\"anthropic/*fable*\"],\"gemini\":[\"agent\"],\"gemini-3-flash\":[\"copilot/gemini-3*flash*\",\"google/gemini-3*flash*\",\"gemini/gemini-3*flash*\"],\"gemini-3-pro\":[\"copilot/gemini-3*pro*\",\"google/gemini-3*pro*\",\"google/nano-banana*\",\"gemini/gemini-3*pro*\"],\"gemini-3.1-flash\":[\"copilot/gemini-3.1*flash*\",\"google/gemini-3.1*flash*\",\"gemini/gemini-3.1*flash*\"],\"gemini-3.1-pro\":[\"copilot/gemini-3.1*pro*\",\"google/gemini-3.1*pro*\",\"gemini/gemini-3.1*pro*\"],\"gemini-3.5-flash\":[\"copilot/gemini-3.5*flash*\",\"google/gemini-3.5*flash*\",\"gemini/gemini-3.5*flash*\"],\"gemini-3.6-flash\":[\"copilot/gemini-3.6*flash*\",\"google/gemini-3.6*flash*\",\"gemini/gemini-3.6*flash*\"],\"gemini-3.7-flash\":[\"copilot/gemini-3.7*flash*\",\"google/gemini-3.7*flash*\",\"gemini/gemini-3.7*flash*\"],\"gemini-flash\":[\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"],\"gemini-flash-lite\":[\"copilot/gemini-*flash*lite*\",\"google/gemini-*flash*lite*\",\"gemini/gemini-*flash*lite*\"],\"gemini-omni\":[\"copilot/gemini-omni*\",\"google/gemini-omni*\",\"gemini/gemini-omni*\"],\"gemini-pro\":[\"copilot/gemini-*pro*\",\"google/gemini-*pro*\",\"gemini/gemini-*pro*\"],\"gemma\":[\"copilot/gemma*\",\"google/gemma*\",\"gemini/gemma*\"],\"gpt-5\":[\"copilot/gpt-5*\",\"openai/gpt-5*\"],\"gpt-5-codex\":[\"copilot/gpt-5*codex*\",\"openai/gpt-5*codex*\"],\"gpt-5-mini\":[\"copilot/gpt-5*mini*\",\"openai/gpt-5*mini*\"],\"gpt-5-nano\":[\"copilot/gpt-5*nano*\",\"openai/gpt-5*nano*\"],\"gpt-5-pro\":[\"copilot/gpt-5*pro*\",\"openai/gpt-5*pro*\"],\"gpt-5.1\":[\"copilot/gpt-5.1*\",\"openai/gpt-5.1*\"],\"gpt-5.2\":[\"copilot/gpt-5.2*\",\"openai/gpt-5.2*\"],\"gpt-5.3\":[\"copilot/gpt-5.3*\",\"openai/gpt-5.3*\"],\"gpt-5.4\":[\"copilot/gpt-5.4*\",\"openai/gpt-5.4*\"],\"gpt-5.5\":[\"copilot/gpt-5.5*\",\"openai/gpt-5.5*\"],\"gpt-5.6\":[\"copilot/gpt-5.6*\",\"openai/gpt-5.6*\"],\"grok\":[\"copilot/*grok*\",\"openai/*grok*\"],\"haiku\":[\"copilot/*haiku*\",\"anthropic/*haiku*\"],\"image-generation\":[\"copilot/gpt-image*\",\"openai/gpt-image*\",\"openai/chatgpt-image*\",\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"google/imagen*\"],\"kimi\":[\"copilot/kimi*\",\"openai/kimi*\"],\"kiwi\":[\"copilot/kiwi*\",\"openai/kiwi*\"],\"large\":[\"sonnet\",\"gpt-5-pro\",\"gpt-5\",\"gemini-pro\"],\"lyria\":[\"google/lyria*\",\"gemini/lyria*\",\"copilot/lyria*\"],\"mai-code\":[\"copilot/MAI-Code*\",\"copilot/mai-code*\",\"openai/MAI-Code*\"],\"mai-code-1-flash-picker\":[\"copilot/MAI-Code-1-Flash-picker*\",\"copilot/mai-code-1-flash-picker*\",\"openai/MAI-Code-1-Flash-picker*\"],\"mini\":[\"haiku\",\"gpt-5-mini\",\"gpt-5-nano\",\"gemini-flash-lite\"],\"nano-banana\":[\"copilot/nano-banana*\",\"google/nano-banana*\",\"gemini/nano-banana*\"],\"opus\":[\"copilot/*opus*\",\"anthropic/*opus*\"],\"opusplan\":[\"opus?effort=high\"],\"raptor-mini\":[\"copilot/raptor*\",\"openai/raptor*\"],\"reasoning\":[\"copilot/o1*\",\"copilot/o3*\",\"copilot/o4*\",\"openai/o1*\",\"openai/o3*\",\"openai/o4*\"],\"robotics\":[\"copilot/*robotics*\",\"google/*robotics*\",\"gemini/*robotics*\"],\"small\":[\"mini\"],\"small-agent\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash\"],\"sonnet\":[\"copilot/*sonnet*\",\"anthropic/*sonnet*\"],\"sonnet-6x\":[\"copilot/*sonnet-4.5*\",\"copilot/*sonnet-4.6*\",\"copilot/*sonnet-5*\",\"copilot/*sonnet-4-5-*\",\"anthropic/*sonnet-4-5-*\",\"copilot/*sonnet-4-6*\",\"anthropic/*sonnet-4-6*\",\"anthropic/*sonnet-5*\"],\"summarization\":[\"haiku\",\"gpt-5-mini\",\"gemini-flash-lite\",\"mini\"],\"veo\":[\"google/veo*\",\"gemini/veo*\"],\"vision\":[\"copilot/gemini-*image*\",\"google/gemini-*image*\",\"gemini/gemini-*image*\",\"copilot/gemini-*flash*\",\"google/gemini-*flash*\",\"gemini/gemini-*flash*\"]}},\"container\":{\"imageTag\":\"0.28.3,squid=sha256:7cecff2dc2815aefac37d3030c3cb795bb0f0a434032fab522987fae398effe0,agent=sha256:63245de80cc82210c36b469a0ff6ef89fe0b621a8609c7ae6960ac544cf75505,api-proxy=sha256:9c068361b93bd9349b83758b1073c17fef25ac0bad00c24fedcb96f6cb4b6a90,cli-proxy=sha256:930993b386043941fc68b2d135abcecb74fadbe1a63a62365fa43a194217584b\"},\"logging\":{\"proxyLogsDir\":\"/tmp/gh-aw/sandbox/firewall/logs\",\"auditDir\":\"/tmp/gh-aw/sandbox/firewall/audit\"}}" > "${RUNNER_TEMP}/gh-aw/awf-config.json"
           cp "${RUNNER_TEMP}/gh-aw/awf-config.json" /tmp/gh-aw/awf-config.json
           export GH_AW_MODELS_JSON_PATH="/tmp/gh-aw/models.json"
           GH_AW_DOCKER_HOST=""
@@ -1613,18 +2266,45 @@ jobs:
             fi
           fi
           # shellcheck disable=SC1003,SC2016,SC2086
-          sudo -E awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --container-workdir "${GITHUB_WORKSPACE}" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} ${GH_AW_DOCKER_HOST:+--docker-host "$GH_AW_DOCKER_HOST"} --env-all --log-level info --enable-host-access --allow-host-ports 80,443,8080 --skip-pull \
-            -- /bin/bash -c 'set +o histexpand; : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"; GH_AW_TOOL_CACHE="$RUNNER_TOOL_CACHE"; export PATH="$(find "$GH_AW_TOOL_CACHE" -maxdepth 5 -type d -name bin 2>/dev/null | tr '\''\n'\'' '\'':'\'')$PATH"; [ -n "$GOROOT" ] && export PATH="$GOROOT/bin:$PATH" || true; [ -n "$ERLANG_HOME" ] && export PATH="$ERLANG_HOME/bin:$PATH" || true && cd "${GITHUB_WORKSPACE}" && crush run --verbose "$(cat /tmp/gh-aw/aw-prompts/prompt.txt)"' 2>&1 | tee -a /tmp/gh-aw/threat-detection/detection.log
+          awf --config "${RUNNER_TEMP}/gh-aw/awf-config.json" --container-workdir "${GITHUB_WORKSPACE}" --mount "${RUNNER_TEMP}/gh-aw:${RUNNER_TEMP}/gh-aw:ro" --mount "${RUNNER_TEMP}/gh-aw:/host${RUNNER_TEMP}/gh-aw:ro" ${GH_AW_TOOL_CACHE_MOUNT:+--mount "$GH_AW_TOOL_CACHE_MOUNT"} ${GH_AW_DOCKER_HOST:+--docker-host "$GH_AW_DOCKER_HOST"} --env-all --exclude-env ACTIONS_ID_TOKEN_REQUEST_TOKEN --exclude-env ACTIONS_ID_TOKEN_REQUEST_URL --mount /tmp/gh-aw:/tmp/gh-aw:rw --log-level info --skip-pull \
+            -- /bin/bash -c 'set +o histexpand; export no_proxy="${NO_PROXY:-}" && : "${RUNNER_TOOL_CACHE:?RUNNER_TOOL_CACHE must be set}"; GH_AW_TOOL_CACHE="$RUNNER_TOOL_CACHE"; export PATH="$(find "$GH_AW_TOOL_CACHE" -maxdepth 5 -type d -name bin 2>/dev/null | tr '\''\n'\'' '\'':'\'')$PATH"; [ -n "$GOROOT" ] && export PATH="$GOROOT/bin:$PATH" || true; [ -n "$ERLANG_HOME" ] && export PATH="$ERLANG_HOME/bin:$PATH" || true && GH_AW_NODE_EXEC="${GH_AW_NODE_BIN:-}"; if [ -z "$GH_AW_NODE_EXEC" ] || [ ! -x "$GH_AW_NODE_EXEC" ]; then GH_AW_NODE_EXEC="$(command -v node 2>/dev/null || true)"; fi; if [ -z "$GH_AW_NODE_EXEC" ]; then echo "node runtime missing on this runner — check runtimes.node in workflow YAML" >&2; exit 127; fi; GH_AW_NPM_GLOBAL_ROOT="$(npm root -g 2>/dev/null || true)"; if [ -n "$GH_AW_NPM_GLOBAL_ROOT" ]; then export NODE_PATH="${GH_AW_NPM_GLOBAL_ROOT}${NODE_PATH:+:${NODE_PATH}}"; fi; "$GH_AW_NODE_EXEC" ${RUNNER_TEMP}/gh-aw/actions/crush_harness.cjs crush run --quiet' 2>&1 | tee -a /tmp/gh-aw/threat-detection/detection.log
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_BASE_URL: http://host.docker.internal:10000
-          CRUSH_MODEL: anthropic/claude-sonnet-4-20250514
+          GITHUB_STEP_SUMMARY: /tmp/gh-aw/step-summary.md
+          AWF_REFLECT_ENABLED: 1
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          CRUSH_DISABLE_DEFAULT_PROVIDERS: 1
+          CRUSH_DISABLE_PROVIDER_AUTO_UPDATE: 1
+          CRUSH_MODEL: copilot/claude-sonnet-4.5
+          GH_AW_ENGINE_VERSION: 0.88.0
+          GH_AW_LLM_PROVIDER: github
           GH_AW_MAX_TURNS: ${{ vars.GH_AW_DEFAULT_MAX_TURNS || '' }}
           GH_AW_PROMPT: /tmp/gh-aw/aw-prompts/prompt.txt
+          GITHUB_COPILOT_BASE_URL: http://host.docker.internal:10002
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          NO_PROXY: localhost,127.0.0.1
+          NO_PROXY: localhost,127.0.0.1,host.docker.internal,host.docker.internal:10000,host.docker.internal:10001,host.docker.internal:10002,host.docker.internal:10003,172.30.0.30,172.30.0.30:10000,172.30.0.30:10001,172.30.0.30:10002,172.30.0.30:10003
+          OPENAI_API_KEY: ${{ github.token }}
+          OPENAI_BASE_URL: http://host.docker.internal:10002
           RUNNER_TEMP: ${{ runner.temp }}
           TRACEPARENT: ${{ env.GITHUB_AW_OTEL_TRACE_ID != '' && env.GITHUB_AW_OTEL_PARENT_SPAN_ID != '' && format('00-{0}-{1}-01', env.GITHUB_AW_OTEL_TRACE_ID, env.GITHUB_AW_OTEL_PARENT_SPAN_ID) || '' }}
+      - name: Echo detection step summary
+        if: always() && steps.detection_guard.outputs.run_detection == 'true'
+        continue-on-error: true
+        run: |
+          if [ -s /tmp/gh-aw/step-summary.md ]; then
+            cat /tmp/gh-aw/step-summary.md
+          fi
+      - name: Render detection log
+        if: always() && steps.detection_guard.outputs.run_detection == 'true'
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(path.join(actionsDir, 'render_detection_log.cjs'));
+            await main();
       - name: Parse threat detection token usage for step summary
         id: parse_detection_token_usage
         if: always()
@@ -1634,9 +2314,11 @@ jobs:
           GH_AW_TOKEN_USAGE_SUMMARY_TITLE: Threat Detection Token Usage
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/parse_token_usage.cjs');
+            const { main } = require(path.join(actionsDir, 'parse_token_usage.cjs'));
             await main();
       - name: Upload threat detection log
         if: always() && steps.detection_guard.outputs.run_detection == 'true'
@@ -1657,9 +2339,11 @@ jobs:
         with:
           script: |
             try {
-              const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+              const path = require('path');
+              const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+              const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
               setupGlobals(core, github, context, exec, io, getOctokit);
-              const { main } = require('${{ runner.temp }}/gh-aw/actions/parse_threat_detection_results.cjs');
+              const { main } = require(path.join(actionsDir, 'parse_threat_detection_results.cjs'));
               await main();
             } catch (loadErr) {
               const continueOnError = process.env.GH_AW_DETECTION_CONTINUE_ON_ERROR !== 'false';
@@ -1680,8 +2364,10 @@ jobs:
 
   pre_activation:
     if: >
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
-      (github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'water')
+      ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id) &&
+      ((github.event_name != 'pull_request' && github.event_name != 'pull_request_review') || github.event.pull_request.stack == null ||
+      github.event.pull_request.stack.position == github.event.pull_request.stack.size)) && (github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' || github.event.label.name == 'water')
     runs-on: ubuntu-slim
     permissions:
       contents: read
@@ -1695,7 +2381,7 @@ jobs:
       setup-trace-id: ${{ steps.setup.outputs.trace-id }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -1711,20 +2397,8 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
-      - name: Check team membership for command workflow
-        id: check_membership
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          GH_AW_REQUIRED_ROLES: "admin,maintainer,write"
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
-            setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/check_membership.cjs');
-            await main();
       - name: Check command position
         id: check_command_position
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -1732,9 +2406,26 @@ jobs:
           GH_AW_COMMANDS: "[\"smoke-crush\"]"
         with:
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/check_command_position.cjs');
+            const { main } = require(path.join(actionsDir, 'check_command_position.cjs'));
+            await main();
+      - name: Check team membership for command workflow
+        id: check_membership
+        if: steps.check_command_position.outputs.command_position_ok == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GH_AW_REQUIRED_ROLES: "admin,maintainer,write"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
+            setupGlobals(core, github, context, exec, io, getOctokit);
+            const { main } = require(path.join(actionsDir, 'check_membership.cjs'));
             await main();
 
   safe_outputs:
@@ -1745,7 +2436,6 @@ jobs:
     if: (!cancelled()) && needs.agent.result != 'skipped' && needs.detection.result == 'success'
     runs-on: ubuntu-slim
     permissions:
-      contents: read
       issues: write
       pull-requests: write
     timeout-minutes: 45
@@ -1759,10 +2449,12 @@ jobs:
       GH_AW_DETECTION_REASON: ${{ needs.detection.outputs.detection_reason }}
       GH_AW_EFFECTIVE_TOKENS: ${{ needs.agent.outputs.effective_tokens }}
       GH_AW_ENGINE_ID: "crush"
-      GH_AW_ENGINE_MODEL: "anthropic/claude-sonnet-4-20250514"
+      GH_AW_ENGINE_MODEL: "copilot/claude-sonnet-4.5"
+      GH_AW_ENGINE_VERSION: "0.88.0"
+      GH_AW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       GH_AW_PROJECT_UTC: "-08:00"
       GH_AW_RUNTIME_FEATURES: ${{ vars.GH_AW_RUNTIME_FEATURES }}
-      GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) **MISSION COMPLETE!** Crush has delivered. ⚡\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
+      GH_AW_SAFE_OUTPUT_MESSAGES: "{\"footer\":\"\\u003e ⚡ *[{workflow_name}]({run_url}) — Powered by Crush*{ai_credits_suffix}{history_link}\",\"runStarted\":\"⚡ Crush initializing... [{workflow_name}]({run_url}) begins on this {event_type}...\",\"runSuccess\":\"🎯 [{workflow_name}]({run_url}) Crush delivered.\",\"runFailure\":\"⚠️ [{workflow_name}]({run_url}) {status}. Crush encountered unexpected challenges...\"}"
       GH_AW_THREAT_DETECTION_AIC: ${{ needs.detection.outputs.aic }}
       GH_AW_WORKFLOW_EMOJI: "🧪"
       GH_AW_WORKFLOW_ID: "smoke-crush"
@@ -1777,11 +2469,19 @@ jobs:
       create_discussion_errors: ${{ steps.process_safe_outputs.outputs.create_discussion_errors }}
       created_issue_number: ${{ steps.process_safe_outputs.outputs.created_issue_number }}
       created_issue_url: ${{ steps.process_safe_outputs.outputs.created_issue_url }}
+      process_safe_outputs_items_applied: ${{ steps.process_safe_outputs.outputs.items_applied }}
+      process_safe_outputs_items_cancelled: ${{ steps.process_safe_outputs.outputs.items_cancelled }}
+      process_safe_outputs_items_deferred: ${{ steps.process_safe_outputs.outputs.items_deferred }}
+      process_safe_outputs_items_failed: ${{ steps.process_safe_outputs.outputs.items_failed }}
+      process_safe_outputs_items_skipped: ${{ steps.process_safe_outputs.outputs.items_skipped }}
+      process_safe_outputs_items_succeeded: ${{ steps.process_safe_outputs.outputs.items_succeeded }}
+      process_safe_outputs_items_warnings: ${{ steps.process_safe_outputs.outputs.items_warnings }}
       process_safe_outputs_processed_count: ${{ steps.process_safe_outputs.outputs.processed_count }}
+      process_safe_outputs_status: ${{ steps.process_safe_outputs.outputs.status }}
       process_safe_outputs_temporary_id_map: ${{ steps.process_safe_outputs.outputs.temporary_id_map }}
     steps:
       - name: Checkout actions folder
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: github/gh-aw
           sparse-checkout: |
@@ -1799,7 +2499,7 @@ jobs:
         env:
           GH_AW_SETUP_WORKFLOW_NAME: "Smoke Crush"
           GH_AW_CURRENT_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/smoke-crush.lock.yml@${{ github.ref }}
-          GH_AW_INFO_VERSION: "0.59.0"
+          GH_AW_INFO_VERSION: "0.88.0"
           GH_AW_INFO_ENGINE_ID: "crush"
       - name: Mask OTLP telemetry headers
         run: bash "${RUNNER_TEMP}/gh-aw/actions/mask_otlp_headers.sh"
@@ -1808,7 +2508,8 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: agent
+          pattern: "{agent,agent-output-fallback}"
+          merge-multiple: true
           path: /tmp/gh-aw/
       - name: Setup agent output environment variable
         id: setup-agent-output-env
@@ -1816,7 +2517,9 @@ jobs:
         run: |
           mkdir -p /tmp/gh-aw/
           find "/tmp/gh-aw/" -type f -print
-          echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
+          if [ -f "/tmp/gh-aw/agent_output.json" ]; then
+            echo "GH_AW_AGENT_OUTPUT=/tmp/gh-aw/agent_output.json" >> "$GITHUB_OUTPUT"
+          fi
       - name: Configure GH_HOST for enterprise compatibility
         id: ghes-host-config
         shell: bash
@@ -1832,16 +2535,18 @@ jobs:
         env:
           GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}
           GH_AW_COMMENT_ID: ${{ needs.activation.outputs.comment_id }}
-          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,api.anthropic.com,api.snapcraft.io,archive.ubuntu.com,azure.archive.ubuntu.com,charm.land,codeload.github.com,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,docs.github.com,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,host.docker.internal,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,registry.npmjs.org,s.symcb.com,s.symcd.com,security.ubuntu.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
+          GH_AW_ALLOWED_DOMAINS: "*.githubusercontent.com,*.grafana.net,*.sentry.io,127.0.0.1,::1,api.snapcraft.io,app.renovatebot.com,appveyor.com,archive.ubuntu.com,azure.archive.ubuntu.com,badgen.net,circleci.com,codacy.com,codeclimate.com,codecov.io,codeload.github.com,coveralls.io,crl.geotrust.com,crl.globalsign.com,crl.identrust.com,crl.sectigo.com,crl.thawte.com,crl.usertrust.com,crl.verisign.com,crl3.digicert.com,crl4.digicert.com,crls.ssl.com,deepsource.io,docs.github.com,drone.io,github-cloud.githubusercontent.com,github-cloud.s3.amazonaws.com,github.blog,github.com,github.githubassets.com,img.shields.io,json-schema.org,json.schemastore.org,keyserver.ubuntu.com,lfs.github.com,localhost,objects.githubusercontent.com,ocsp.digicert.com,ocsp.geotrust.com,ocsp.globalsign.com,ocsp.identrust.com,ocsp.sectigo.com,ocsp.ssl.com,ocsp.thawte.com,ocsp.usertrust.com,ocsp.verisign.com,packagecloud.io,packages.cloud.google.com,packages.microsoft.com,patch-diff.githubusercontent.com,patchdiff.githubusercontent.com,ppa.launchpad.net,raw.githubusercontent.com,readthedocs.io,readthedocs.org,renovatebot.com,s.symcb.com,s.symcd.com,security.ubuntu.com,semaphoreci.com,shields.io,snyk.io,sonarcloud.io,sonarqube.com,travis-ci.com,ts-crl.ws.symantec.com,ts-ocsp.ws.symantec.com,www.googleapis.com"
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_API_URL: ${{ github.api_url }}
-          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"add_comment\":{\"hide_older_comments\":true,\"max\":2},\"add_labels\":{\"allowed\":[\"smoke-crush\"]},\"create_issue\":{\"close_older_issues\":true,\"expires\":2,\"labels\":[\"automation\",\"testing\"],\"max\":1},\"create_report_incomplete_issue\":{},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"true\"},\"report_incomplete\":{}}"
+          GH_AW_SAFE_OUTPUTS_HANDLER_CONFIG: "{\"add_comment\":{\"hide_older_comments\":true,\"max\":2},\"add_labels\":{\"allowed\":[\"smoke-crush\"]},\"create_issue\":{\"close_older_issues\":true,\"close_older_key\":\"smoke-crush\",\"expires\":2,\"labels\":[\"automation\",\"testing\"],\"max\":1},\"create_report_incomplete_issue\":{},\"missing_data\":{},\"missing_tool\":{},\"noop\":{\"max\":1,\"report-as-issue\":\"false\"},\"report_incomplete\":{}}"
         with:
           github-token: ${{ secrets.GH_AW_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { setupGlobals } = require('${{ runner.temp }}/gh-aw/actions/setup_globals.cjs');
+            const path = require('path');
+            const actionsDir = path.join(process.env.RUNNER_TEMP, 'gh-aw', 'actions');
+            const { setupGlobals } = require(path.join(actionsDir, 'setup_globals.cjs'));
             setupGlobals(core, github, context, exec, io, getOctokit);
-            const { main } = require('${{ runner.temp }}/gh-aw/actions/safe_output_handler_manager.cjs');
+            const { main } = require(path.join(actionsDir, 'process_safe_outputs.cjs'));
             await main();
       - name: Upload Safe Outputs Items
         if: always()

@@ -12,9 +12,6 @@ permissions:
   issues: read
   pull-requests: read
   actions: read
-sandbox:
-  agent:
-    sudo: false
 tools:
   cli-proxy: true
   agentic-workflows:
@@ -34,18 +31,22 @@ imports:
     with:
       title-prefix: "[cli-tools-test] "
       expires: 3d
+  - shared/reporting.md
 
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: cli_tools_tested
+    question: Did the agent run exploratory tests on the audit, logs, and compile CLI tools?
+  - id: test_results_reported
+    question: Were the test results reported with any issues or anomalies identified?
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 ### Daily CLI Tools Exploratory Tester
-
-**Report Formatting**: Use h3 (###) or lower for all headers in your report
-to maintain proper document hierarchy. Wrap long sections in
-`<details><summary>View Full Details</summary>` tags to improve readability.
-
 
 You are the Daily CLI Tools Exploratory Tester - an expert system that performs deep exploratory testing of the `audit`, `logs`, and `compile` tools in the agentic-workflows mcp server.
 
@@ -651,14 +652,19 @@ For each significant problem found, create a GitHub issue with:
 
 ### Logs/Diagnostics
 
+<details>
+<summary><b>View Logs/Diagnostics</b></summary>
+
 [Relevant log excerpts, error messages, screenshots]
+
+</details>
 
 ### Additional Context
 
 [Any other relevant information]
 ```
 
-**IMPORTANT**: Create one issue per distinct problem (max 5 issues as per safe-outputs config).
+**IMPORTANT**: Create one issue per distinct problem (max 5 issues as per safe-outputs config). Keep long log excerpts, raw output, and diffs inside `<details>` blocks so the issue stays scannable.
 
 ### 8.3 Use Noop for Successful Testing
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { createRequire } from "module";
 const _require = createRequire(import.meta.url);
@@ -60,6 +61,12 @@ describe("collect_ndjson_output.cjs", () => {
             },
           },
           add_comment: { defaultMax: 1, fields: { body: { required: !0, type: "string", sanitize: !0, maxLength: 65e3 }, item_number: { issueOrPRNumber: !0 } } },
+          add_labels: { defaultMax: 5, fields: { labels: { required: !0, type: "array" }, item_number: { issueNumberOrTemporaryId: !0 } } },
+          assign_milestone: {
+            defaultMax: 1,
+            customValidation: "requiresOneOf:milestone_number,milestone_title",
+            fields: { issue_number: { issueNumberOrTemporaryId: !0 }, milestone_number: { optionalPositiveInteger: !0 }, milestone_title: { type: "string", sanitize: !0, maxLength: 128 } },
+          },
           create_pull_request: {
             defaultMax: 1,
             fields: {
@@ -119,6 +126,13 @@ describe("collect_ndjson_output.cjs", () => {
             defaultMax: 1,
             fields: { tag: { type: "string", sanitize: !0, maxLength: 256 }, operation: { required: !0, type: "string", enum: ["replace", "append", "prepend"] }, body: { required: !0, type: "string", sanitize: !0, maxLength: 65e3 } },
           },
+          dispatch_workflow: {
+            defaultMax: 1,
+            fields: {
+              workflow_name: { required: !0, type: "string", sanitize: !0, minLength: 1, maxLength: 256, pattern: ".*\\S.*", patternError: "must not be empty" },
+              inputs: { type: "object" },
+            },
+          },
         })
       ));
   }),
@@ -158,6 +172,32 @@ describe("collect_ndjson_output.cjs", () => {
         expect(mockCore.info).toHaveBeenCalledWith(`Output file does not exist: ${missingFile} — no safe-output items were emitted; treating as empty collection (graceful no-op)`),
         expect(mockCore.exportVariable).toHaveBeenCalledWith("GH_AW_AGENT_OUTPUT", path.join(TMP_GH_AW_PATH, AGENT_OUTPUT_FILENAME)));
     }),
+    it("should fail with infra error when safeoutputs gateway-empty flag exists and outputs file is missing", async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "collect-gateway-empty-"));
+      const missingFile = path.join(tempDir, "nonexistent-outputs.jsonl");
+      const flagDir = path.join(tempDir, "gh-aw", "safeoutputs");
+      fs.mkdirSync(flagDir, { recursive: true });
+      fs.writeFileSync(path.join(flagDir, "gateway_empty.flag"), "");
+      const originalRunnerTemp = process.env.RUNNER_TEMP;
+      process.env.RUNNER_TEMP = tempDir;
+      process.env.GH_AW_SAFE_OUTPUTS = missingFile;
+      try {
+        await eval(`(async () => { ${collectScript}; await main(); })()`);
+        const failedCalls = mockCore.setFailed.mock.calls;
+        expect(failedCalls.length).toBeGreaterThan(0);
+        const failedMessage = failedCalls[0][0];
+        expect(failedMessage).toContain("safeoutputs MCP gateway registered 0 tools");
+        expect(failedMessage).toContain("gateway infrastructure failure");
+        expect(mockCore.setOutput).not.toHaveBeenCalledWith("output", expect.anything());
+      } finally {
+        if (originalRunnerTemp === undefined) {
+          delete process.env.RUNNER_TEMP;
+        } else {
+          process.env.RUNNER_TEMP = originalRunnerTemp;
+        }
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
     it("should error and still set output when artifact write fails", async () => {
       const writeError = new Error("disk full");
       const spy = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
@@ -194,6 +234,47 @@ describe("collect_ndjson_output.cjs", () => {
       expect(outputCall).toBeDefined();
       const parsedOutput = JSON.parse(outputCall[1]);
       (expect(parsedOutput.items).toHaveLength(2), expect(parsedOutput.items[0].type).toBe("create_issue"), expect(parsedOutput.items[1].type).toBe("add_comment"), expect(parsedOutput.errors).toHaveLength(0));
+    }),
+    it("should infer dispatch_workflow workflow_name when one workflow is configured", async () => {
+      const testFile = "/tmp/gh-aw/test-ndjson-output.txt",
+        ndjsonContent = '{"type": "dispatch_workflow", "inputs": {"message": "hello"}}';
+      (fs.writeFileSync(testFile, ndjsonContent), (process.env.GH_AW_SAFE_OUTPUTS = testFile));
+      const __config = '{"dispatch_workflow":{"workflows":["workflow-handler"]}}',
+        configPath = "/tmp/gh-aw/safeoutputs/config.json";
+      (fs.mkdirSync("/tmp/gh-aw/safeoutputs", { recursive: !0 }), fs.writeFileSync(configPath, __config), await eval(`(async () => { ${collectScript}; await main(); })()`));
+      const setOutputCalls = mockCore.setOutput.mock.calls,
+        outputCall = setOutputCalls.find(call => "output" === call[0]);
+      expect(outputCall).toBeDefined();
+      const parsedOutput = JSON.parse(outputCall[1]);
+      (expect(parsedOutput.items).toHaveLength(1), expect(parsedOutput.items[0].type).toBe("dispatch_workflow"), expect(parsedOutput.items[0].workflow_name).toBe("workflow-handler"), expect(parsedOutput.errors).toHaveLength(0));
+    }),
+    it("should not infer dispatch_workflow workflow_name when multiple workflows are configured", async () => {
+      const testFile = "/tmp/gh-aw/test-ndjson-output.txt",
+        ndjsonContent = '{"type": "dispatch_workflow", "inputs": {"message": "hello"}}';
+      (fs.writeFileSync(testFile, ndjsonContent), (process.env.GH_AW_SAFE_OUTPUTS = testFile));
+      const __config = '{"dispatch_workflow":{"workflows":["worker", " "]}}',
+        configPath = "/tmp/gh-aw/safeoutputs/config.json";
+      (fs.mkdirSync("/tmp/gh-aw/safeoutputs", { recursive: !0 }), fs.writeFileSync(configPath, __config), await eval(`(async () => { ${collectScript}; await main(); })()`));
+      const setOutputCalls = mockCore.setOutput.mock.calls,
+        outputCall = setOutputCalls.find(call => "output" === call[0]);
+      expect(outputCall).toBeDefined();
+      const parsedOutput = JSON.parse(outputCall[1]);
+      expect(parsedOutput.errors).toHaveLength(1);
+    }),
+    it("should preserve Slack mrkdwn links in custom safe-job string inputs", async () => {
+      const testFile = "/tmp/gh-aw/test-ndjson-output.txt";
+      const slackText = "Tracking issue: <https://github.com/octo-org/octo-repo/issues/123|Build failure — Build github/gh-aw#456>";
+      const ndjsonContent = JSON.stringify({ type: "post_to_slack", text: slackText, channel: "security-alerts" });
+      fs.writeFileSync(testFile, ndjsonContent);
+      process.env.GH_AW_SAFE_OUTPUTS = testFile;
+      fs.writeFileSync("/tmp/gh-aw/safeoutputs/config.json", JSON.stringify({ post_to_slack: { inputs: { text: { type: "string", required: true } } } }));
+      await eval(`(async () => { ${collectScript}; await main(); })()`);
+      const setOutputCalls = mockCore.setOutput.mock.calls,
+        outputCall = setOutputCalls.find(call => "output" === call[0]);
+      expect(outputCall).toBeDefined();
+      const parsedOutput = JSON.parse(outputCall[1]);
+      (expect(parsedOutput.errors).toHaveLength(0), expect(parsedOutput.items).toEqual([{ type: "post_to_slack", text: slackText }]));
+      expect(parsedOutput.items[0]).not.toHaveProperty("channel");
     }),
     it("should reject items with unexpected output types", async () => {
       const testFile = "/tmp/gh-aw/test-ndjson-output.txt",
@@ -807,9 +888,9 @@ describe("collect_ndjson_output.cjs", () => {
           const parsedOutput = JSON.parse(outputCall[1]);
           (expect(parsedOutput.items).toHaveLength(1),
             expect(parsedOutput.items[0].type).toBe("create_issue"),
-            expect(parsedOutput.items[0].priority).toBe(5),
-            expect(parsedOutput.items[0].urgent).toBe(!0),
-            expect(parsedOutput.items[0].assignee).toBe(null),
+            expect(parsedOutput.items[0]).not.toHaveProperty("priority"),
+            expect(parsedOutput.items[0]).not.toHaveProperty("urgent"),
+            expect(parsedOutput.items[0]).not.toHaveProperty("assignee"),
             expect(parsedOutput.errors).toHaveLength(0));
         }),
         it("should attempt repair but fail gracefully with excessive malformed JSON", async () => {
@@ -854,12 +935,7 @@ describe("collect_ndjson_output.cjs", () => {
             outputCall = setOutputCalls.find(call => "output" === call[0]);
           expect(outputCall).toBeDefined();
           const parsedOutput = JSON.parse(outputCall[1]);
-          (expect(parsedOutput.items).toHaveLength(1),
-            expect(parsedOutput.items[0].type).toBe("create_issue"),
-            expect(parsedOutput.items[0].metadata).toBeDefined(),
-            expect(parsedOutput.items[0].metadata.project).toBe("test"),
-            expect(parsedOutput.items[0].metadata.tags).toEqual(["important", "urgent"]),
-            expect(parsedOutput.errors).toHaveLength(0));
+          (expect(parsedOutput.items).toHaveLength(1), expect(parsedOutput.items[0].type).toBe("create_issue"), expect(parsedOutput.items[0]).not.toHaveProperty("metadata"), expect(parsedOutput.errors).toHaveLength(0));
         }),
         it("should handle complex backslash scenarios with graceful failure", async () => {
           const testFile = "/tmp/gh-aw/test-ndjson-output.txt",
@@ -978,7 +1054,7 @@ describe("collect_ndjson_output.cjs", () => {
           (expect(parsedOutput.items).toHaveLength(1),
             expect(parsedOutput.items[0].type).toBe("create_issue"),
             expect(parsedOutput.items[0].title).toBe("Combined issues"),
-            expect(parsedOutput.items[0].priority).toBe(1),
+            expect(parsedOutput.items[0]).not.toHaveProperty("priority"),
             expect(parsedOutput.errors).toHaveLength(0));
         }));
     }),

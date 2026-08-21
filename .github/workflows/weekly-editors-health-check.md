@@ -44,6 +44,10 @@ safe-outputs:
     reviewers: [copilot]
     expires: 7d
 
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Weekly Editors Health Check

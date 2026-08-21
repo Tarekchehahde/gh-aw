@@ -102,6 +102,12 @@ func validateSharedWorkflowOnField(onValue any) error {
 	return nil
 }
 
+// IsImportSafeSharedWorkflowOn reports whether an on: block contains only fields
+// that are safe for shared workflow imports and no trigger events.
+func IsImportSafeSharedWorkflowOn(onValue any) bool {
+	return validateSharedWorkflowOnField(onValue) == nil
+}
+
 // ValidateMainWorkflowFrontmatterWithSchemaAndLocation validates main workflow frontmatter with file location info.
 //
 // This function validates all frontmatter fields including pass-through fields that are
@@ -119,6 +125,9 @@ func ValidateMainWorkflowFrontmatterWithSchemaAndLocation(frontmatter map[string
 
 	// First run custom validation for command trigger conflicts (provides better error messages)
 	if err := validateCommandTriggerConflicts(filtered); err != nil {
+		return err
+	}
+	if err := validateUnsupportedJobInputs(filtered); err != nil {
 		return err
 	}
 

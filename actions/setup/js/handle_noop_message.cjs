@@ -3,7 +3,7 @@
 
 const fs = require("fs");
 const { getErrorMessage } = require("./error_helpers.cjs");
-const { ERR_API } = require("./error_codes.cjs");
+const { ERR_API, ERR_SYSTEM } = require("./error_codes.cjs");
 const { sanitizeContent } = require("./sanitize_content.cjs");
 const { generateFooterWithExpiration } = require("./ephemerals.cjs");
 const { renderTemplateFromFile, getPromptPath } = require("./messages_core.cjs");
@@ -11,6 +11,8 @@ const { loadAgentOutput } = require("./load_agent_output.cjs");
 const { isStagedMode } = require("./safe_output_helpers.cjs");
 const { generateHistoryUrl } = require("./generate_history_link.cjs");
 const { formatAIC } = require("./model_costs.cjs");
+const { reduceModelNameToIdentifier } = require("./model_aliases.cjs");
+const { buildNoopConclusionSummary } = require("./conclusion_summary.cjs");
 /**
  * Search for or create the parent issue for all agentic workflow no-op runs
  * @returns {Promise<{number: number, node_id: string}>} Parent issue number and node ID
@@ -41,7 +43,7 @@ async function ensureAgentRunsIssue() {
       };
     }
   } catch (error) {
-    throw new Error(`${ERR_API}: Failed to search for existing no-op runs issue: ${getErrorMessage(error)}`);
+    throw new Error(`${ERR_API}: Failed to search for existing no-op runs issue: ${getErrorMessage(error)}`, { cause: error });
   }
 
   // Create no-op runs issue if it doesn't exist
@@ -49,7 +51,12 @@ async function ensureAgentRunsIssue() {
 
   // Load template from file
   const templatePath = getPromptPath("noop_runs_issue.md");
-  const parentBodyContent = fs.readFileSync(templatePath, "utf8");
+  let parentBodyContent;
+  try {
+    parentBodyContent = fs.readFileSync(templatePath, "utf8");
+  } catch (err) {
+    throw new Error(`${ERR_SYSTEM}: Failed to read file ${templatePath}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   const parentBody = generateFooterWithExpiration({
     footerText: parentBodyContent,
@@ -72,21 +79,40 @@ async function ensureAgentRunsIssue() {
 }
 
 /**
- * Build the AIC suffix string for use in comment footers.
- * Includes both agent and threat-detection AIC when available.
- * Returns a string like " · 0.001 AIC" or "" when not available.
+ * Parse a raw AIC environment variable value and return it as a positive number.
+ * Returns undefined when the value is absent, non-numeric, or non-positive.
+ * @param {string|undefined} raw
+ * @returns {number|undefined}
+ */
+function parsePositiveAIC(raw) {
+  const parsed = raw ? Number.parseFloat(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * @param {string} label
+ * @param {number|undefined} value
+ * @param {string|undefined} [modelAlias]
  * @returns {string}
  */
-function buildAICSuffix() {
-  const agentRaw = process.env.GH_AW_AIC;
-  const detectionRaw = process.env.GH_AW_THREAT_DETECTION_AIC;
-  const agentAIC = agentRaw ? Number.parseFloat(agentRaw) : NaN;
-  const detectionAIC = detectionRaw ? Number.parseFloat(detectionRaw) : NaN;
-  const totalAIC = (Number.isFinite(agentAIC) && agentAIC > 0 ? agentAIC : 0) + (Number.isFinite(detectionAIC) && detectionAIC > 0 ? detectionAIC : 0);
-  if (totalAIC <= 0) {
+function buildAICEntry(label, value, modelAlias) {
+  const formatted = typeof value === "number" ? formatAIC(value) : "";
+  if (!formatted) {
     return "";
   }
-  return ` · ${formatAIC(totalAIC)} AIC`;
+  const prefix = [label, modelAlias].filter(Boolean).join(" ");
+  return ` · ${prefix ? `${prefix}${modelAlias ? " · " : " "}` : ""}${formatted} AIC`;
+}
+
+function buildAICSuffix() {
+  const agentAIC = parsePositiveAIC(process.env.GH_AW_AIC);
+  const detectionAIC = parsePositiveAIC(process.env.GH_AW_THREAT_DETECTION_AIC);
+  const evalsAIC = parsePositiveAIC(process.env.GH_AW_EVALS_AIC);
+  const compressedModelName = reduceModelNameToIdentifier(process.env.GH_AW_PRIMARY_MODEL || process.env.GH_AW_ENGINE_MODEL);
+  const agentSuffix = buildAICEntry("", agentAIC, compressedModelName);
+  const detectionSuffix = buildAICEntry("⌖", detectionAIC);
+  const evalsSuffix = buildAICEntry("◇", evalsAIC);
+  return `${agentSuffix}${detectionSuffix}${evalsSuffix}`;
 }
 
 /**
@@ -160,27 +186,23 @@ async function main() {
 
     // --- Staged mode: preview only, do not post ---
     if (isStagedMode()) {
-      let summaryContent = "## 🎭 Staged Mode: No-Op Messages Preview\n\n";
-      summaryContent += "The following messages would be logged if staged mode was disabled:\n\n";
-      for (let i = 0; i < noopItems.length; i++) {
-        const item = noopItems[i];
-        summaryContent += `### Message ${i + 1}\n`;
-        summaryContent += `${item.message}\n\n`;
-        summaryContent += "---\n\n";
-      }
+      const summaryContent = buildNoopConclusionSummary(
+        noopItems.map(item => item.message),
+        { runUrl: process.env.GH_AW_RUN_URL, staged: true }
+      );
       await core.summary.addRaw(summaryContent).write();
       core.info("📝 No-op message preview written to step summary");
       return;
     }
 
     // --- Write step summary ---
-    let summaryContent = "\n\n## No-Op Messages\n\n";
-    summaryContent += "The following messages were logged for transparency:\n\n";
-    for (let i = 0; i < noopItems.length; i++) {
-      const item = noopItems[i];
-      core.info(`No-op message ${i + 1}: ${item.message}`);
-      summaryContent += `- ${item.message}\n`;
+    for (let index = 0; index < noopItems.length; index++) {
+      core.info(`No-op message ${index + 1}: ${noopItems[index].message}`);
     }
+    const summaryContent = buildNoopConclusionSummary(
+      noopItems.map(item => item.message),
+      { runUrl: process.env.GH_AW_RUN_URL }
+    );
     await core.summary.addRaw(summaryContent).write();
 
     // Export for downstream steps/jobs

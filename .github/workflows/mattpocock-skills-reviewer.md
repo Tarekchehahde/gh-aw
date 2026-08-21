@@ -1,84 +1,72 @@
 ---
-private: true
-emoji: "🔍"
+cache:
+  key: pr-prefetch-${{ github.event.pull_request.head.sha || github.event.issue.number }}
+  path: /tmp/gh-aw/agent
+  restore-keys:
+  - pr-prefetch-${{ github.event.pull_request.number || github.event.issue.number }}-
 description: Reviews pull requests using Matt Pocock's engineering skills to provide targeted, high-quality improvement suggestions based on the type of changes
-on:
-  pull_request:
-    types: [ready_for_review]
-  slash_command:
-    strategy: centralized
-    name: matt
-    events: [pull_request_comment, pull_request_review_comment]
-permissions:
-  contents: read
-  pull-requests: read
-  copilot-requests: write
-skills:
-  - mattpocock/skills/diagnosing-bugs@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/tdd@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/improve-codebase-architecture@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/grill-with-docs@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/to-prd@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/codebase-design@801dca688564c529fa84f247f64472520d9ebe28
-  - mattpocock/skills/domain-modeling@801dca688564c529fa84f247f64472520d9ebe28
-
-sandbox:
-  agent:
-    sudo: false
-
+emoji: 🔍
 engine:
   id: copilot
-  model: claude-sonnet-4.6
   max-continuations: 6
+features:
+  gh-aw-detection: true
 imports:
-  - uses: shared/pr-review-base.md
-    with:
-      min-integrity: approved
-  - shared/otlp.md
-pre-agent-steps:
-  - name: Pre-fetch PR diff
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      EXPR_GITHUB_REPOSITORY: ${{ github.repository }}
-    run: |
-      set -euo pipefail
-      mkdir -p /tmp/gh-aw/agent
-      { gh pr diff "$PR_NUMBER" --repo $EXPR_GITHUB_REPOSITORY \
-          --exclude '**/*.lock.yml' \
-          --exclude '**/generated/**' \
-          --exclude '**/dist/**' \
-          --exclude '**/build/**' \
-          || true; } | head -n 3000 > /tmp/gh-aw/agent/pr-diff.patch
-      LINES=$(wc -l < /tmp/gh-aw/agent/pr-diff.patch)
-      gh pr view "$PR_NUMBER" \
-        --repo $EXPR_GITHUB_REPOSITORY \
-        --json number,title,body,headRefName,additions,deletions,changedFiles,files \
-        > /tmp/gh-aw/agent/pr-meta.json
-      echo "Pre-fetched PR diff (${LINES} lines) and metadata"
-tools:
-  cli-proxy: true
-  github:
-    mode: gh-proxy
+- uses: shared/pr-review-base.md
+  with:
+    min-integrity: approved
+- shared/otlp.md
+- shared/pr-diff-data-fetch.md
+max-daily-ai-credits: 10000
+model: claude-sonnet-4.6
+"on":
+  pull_request:
+    paths-ignore:
+    - "*.md"
+    - docs/**
+    - .changeset/**
+    - socials/**
+    - scratchpad/**
+    types:
+    - ready_for_review
+  slash_command:
+    events:
+    - pull_request_comment
+    - pull_request_review_comment
+    name: matt
+    strategy: centralized
+permissions:
+  contents: read
+  copilot-requests: write
+  pull-requests: read
+private: true
 safe-outputs:
   add-comment:
     hide-older-comments: true
     max: 1
   create-pull-request-review-comment:
     max: 10
-  submit-pull-request-review:
-    max: 1
   mentions:
-    allowed: ["@copilot"]
+    allowed:
+    - "@copilot"
   messages:
     footer: "> 🧠 *Reviewed using Matt Pocock's skills by [{workflow_name}]({run_url})*{ai_credits_suffix}{history_link}"
-    run-started: "🧠 [{workflow_name}]({run_url}) is reviewing this {event_type} using Matt Pocock's engineering skills..."
-    run-success: "🧠 [{workflow_name}]({run_url}) has completed the skills-based review. ✅"
-    run-failure: "🧠 [{workflow_name}]({run_url}) {status} during the skills-based review."
-max-daily-ai-credits: 10000
+    run-failure: 🧠 [{workflow_name}]({run_url}) {status} during the skills-based review.
+    run-started: 🧠 [{workflow_name}]({run_url}) is reviewing this {event_type} using Matt Pocock's engineering skills...
+    run-success: 🧠 [{workflow_name}]({run_url}) has completed the skills-based review. ✅
+  submit-pull-request-review:
+    max: 1
+skills:
+- mattpocock/skills/diagnosing-bugs@801dca688564c529fa84f247f64472520d9ebe28
+- mattpocock/skills/tdd@801dca688564c529fa84f247f64472520d9ebe28
+- mattpocock/skills/improve-codebase-architecture@801dca688564c529fa84f247f64472520d9ebe28
+- mattpocock/skills/grill-with-docs@801dca688564c529fa84f247f64472520d9ebe28
+- mattpocock/skills/codebase-design@801dca688564c529fa84f247f64472520d9ebe28
 timeout-minutes: 15
-
-
+tools:
+  cli-proxy: true
+  github:
+    mode: gh-proxy
 ---
 
 # Matt Pocock Skills Reviewer
@@ -100,9 +88,7 @@ The following skills have been installed via `gh skill` and are available under 
 - **`/tdd`** — Test-driven development: red-green-refactor loop. Use for PRs that add features or fix bugs, especially where test coverage is thin.
 - **`/codebase-design`** — Shared vocabulary for deep modules, interface seams, and codebase navigability. Use for large refactors or when reviewing unfamiliar modules.
 - **`/improve-codebase-architecture`** — Find deepening opportunities informed by the domain language. Use for PRs that restructure or extend the architecture.
-- **`/domain-modeling`** — Sharpen project terminology and architectural context. Use when changes introduce or rename concepts.
 - **`/grill-with-docs`** — Challenges the plan against the existing domain model and terminology. Use when changes introduce new concepts or abstractions.
-- **`/to-prd`** — Turn context into a PRD. Use when the PR description is unclear or the scope is hard to understand.
 
 ## Your Mission
 
@@ -120,16 +106,17 @@ A successful review:
 
 ### Step 1: Load Pre-fetched PR Data
 
-> **⚠️ Do NOT call any GitHub MCP tools for PR data.** All PR information is pre-fetched: use `/tmp/gh-aw/agent/pr-meta.json` and `/tmp/gh-aw/agent/pr-diff.patch` exclusively.
+> **⚠️ Do NOT call any GitHub MCP tools for PR data.** All PR information is pre-fetched: use `/tmp/gh-aw/agent/pr-meta.json`, `/tmp/gh-aw/agent/pr-diff.patch`, and `/tmp/gh-aw/agent/pr-review-comments.json` exclusively.
 
 PR data and the diff (excluding lock files and common generated/build artifacts) have already been fetched before the agent started. Read the pre-fetched files:
 
 ```bash
-cat /tmp/gh-aw/agent/pr-meta.json   # fields: number, title, body, headRefName, additions, deletions, changedFiles, files
-cat /tmp/gh-aw/agent/pr-diff.patch  # full unified diff of all changed files
+cat /tmp/gh-aw/agent/pr-meta.json             # fields: number, title, body, headRefName, additions, deletions, changedFiles, files
+cat /tmp/gh-aw/agent/pr-diff.patch            # full unified diff of all changed files
+cat /tmp/gh-aw/agent/pr-review-comments.json  # existing review comments (each: id, path, line, body, user) — use to avoid duplication
 ```
 
-Do **not** call `gh pr diff` or `gh pr view` inside the agent — the data is already available on disk.
+Do **not** call `gh pr diff`, `gh pr view`, or `get_review_comments` inside the agent — the data is already available on disk.
 
 If the pre-fetched patch has 3000 lines, treat it as potentially truncated and focus your review on the highest-impact changed files. The 3000-line cap is intentional to keep token usage bounded on very large PRs; if important context appears missing, explicitly call that out in your review.
 
@@ -149,9 +136,22 @@ Invoke the `pr-triage` agent and capture its JSON response.
 Use the returned `change_type`, `recommended_skills`, `high_impact_files`, and `key_signals`.
 Apply the recommended skills in Step 4, prioritising the listed `high_impact_files`.
 
+**Fallback — never fail the review because of triage.** If the `pr-triage` call errors, times out, returns empty output, or returns text you cannot parse as the documented JSON shape, do **not** retry more than once and do **not** abort. Log one line noting that triage was unavailable, then derive the selection yourself from `/tmp/gh-aw/agent/pr-meta.json` and `/tmp/gh-aw/agent/pr-diff.patch` using this heuristic:
+
+| Signal in the changed file paths | `change_type` | `recommended_skills` |
+| --- | --- | --- |
+| Only `*.md`, `docs/**`, `.changeset/**` | `documentation` | `/grill-with-docs` |
+| Only test files (`*_test.go`, `*.test.*`, `*.spec.*`, `test/**`, `tests/**`) | `tests_only` | `/tdd` |
+| PR title or body mentions fix/bug/regression/panic/crash | `bug_fix` | `/diagnosing-bugs`, `/tdd` |
+| PR title or body mentions add/feat/support/introduce | `new_feature` | `/tdd`, `/grill-with-docs` |
+| PR title or body mentions refactor/cleanup/rename/move | `refactor_cleanup` | `/codebase-design`, `/improve-codebase-architecture` |
+| Anything else | `mixed_unclear` | `/codebase-design`, `/tdd` |
+
+Match rows top-down and use the first row that applies. For `high_impact_files`, fall back to the non-generated changed files with the largest `additions + deletions` in `pr-meta.json`, most-changed first, and treat `key_signals` as empty. Continue with Step 4 as normal, and mention in the Step 6 review body that skill selection used the fallback heuristic.
+
 ### Step 4: Review Using Selected Skills
 
-Focus your skill application on files listed in `pr-triage`'s `high_impact_files`.
+Focus your skill application on the `high_impact_files` from Step 3 (from `pr-triage`, or from the fallback heuristic when triage was unavailable).
 
 Apply the skill(s) to review the changed lines. For each issue you find:
 

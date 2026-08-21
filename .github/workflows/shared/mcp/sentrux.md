@@ -22,7 +22,9 @@ steps:
   - name: Install sentrux
     run: |
       SENTRUX_VERSION="0.5.7"
+      SENTRUX_SHA256="3237f80fe20d54aad4deefa8a143f0d60543bb5d2d6ad891eb42432f155725a6"
       curl -fsSL -o /tmp/gh-aw/agent/sentrux "https://github.com/sentrux/sentrux/releases/download/v${SENTRUX_VERSION}/sentrux-linux-x86_64"
+      echo "${SENTRUX_SHA256}  /tmp/gh-aw/agent/sentrux" | sha256sum -c -
       chmod +x /tmp/gh-aw/agent/sentrux
       sudo mv /tmp/gh-aw/agent/sentrux /usr/local/bin/sentrux
       sentrux --version
@@ -65,7 +67,7 @@ cd ${{ github.workspace }} && sentrux gate --save .
 cd ${{ github.workspace }} && sentrux gate .
 ```
 
-Capture the JSON output for reporting:
+Capture the rule-check output for reporting:
 ```bash
-cd ${{ github.workspace }} && sentrux check . --json 2>/dev/null || true
+cd ${{ github.workspace }} && sentrux check . 2>&1 || true
 ```

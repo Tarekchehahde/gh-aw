@@ -40,7 +40,7 @@ jobs:
   pre-activation:
     pre-steps:
       - name: Checkout skills directory
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           sparse-checkout: |
             .github/skills
@@ -50,7 +50,7 @@ jobs:
     steps:
       - name: Match requested skill
         id: match_skill
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             const fs = require('fs');
@@ -162,9 +162,6 @@ jobs:
       available_skills: ${{ steps.match_skill.outputs.available_skills }}
       request_text: ${{ steps.match_skill.outputs.request_text }}
       skip_reason: ${{ steps.match_skill.outputs.skip_reason }}
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # Skillet 🍳

@@ -25,6 +25,7 @@ engine:
   id: copilot
   copilot-sdk: true
 
+max-tool-denials: 3
 timeout-minutes: 60
 
 tracker-id: firewall-escape
@@ -37,7 +38,6 @@ network:
 sandbox:
   agent:
     id: awf
-    sudo: false
 
 safe-outputs:
   create-discussion:
@@ -48,6 +48,7 @@ safe-outputs:
 
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:

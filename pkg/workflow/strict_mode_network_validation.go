@@ -111,6 +111,79 @@ func (c *Compiler) validateStrictTools(frontmatter map[string]any) error {
 		return nil
 	}
 
+	// Reject private-to-public-flows: allow in strict mode.
+	// Per MCP Gateway Specification Section 10.9.4, the blanket "allow" value is incompatible
+	// with strict mode because it disables both forcePublicRepos and sink-visibility enforcement.
+	// The list form (specific server IDs) is allowed in strict mode.
+	if githubValue, hasGitHub := toolsMap["github"]; hasGitHub {
+		if githubMap, ok := githubValue.(map[string]any); ok {
+			if ptpFlows, exists := githubMap["private-to-public-flows"]; exists {
+				if ptpStr, ok := ptpFlows.(string); ok && ptpStr == "allow" {
+					strictModeValidationLog.Printf("private-to-public-flows: allow rejected in strict mode")
+					return NewValidationError(
+						"tools.github.private-to-public-flows",
+						ptpStr,
+						"strict mode: 'private-to-public-flows: allow' is not allowed; it disables forcePublicRepos and sink-visibility enforcement, which is incompatible with strict mode",
+						"To exempt specific MCP servers from sink-visibility enforcement in strict mode, use the list form:\n\ntools:\n  github:\n    private-to-public-flows:\n      - my-server-id\n      - other-server-id",
+					)
+				}
+			}
+		}
+	}
+
+	// Require bash to be explicitly specified when min-integrity is none.
+	// When min-integrity is none, any external user can trigger the workflow.
+	// Requiring an explicit bash setting ensures the author has considered shell access.
+	if githubValue, hasGitHub := toolsMap["github"]; hasGitHub {
+		if githubMap, ok := githubValue.(map[string]any); ok {
+			if minIntegrity, exists := githubMap["min-integrity"]; exists {
+				if minIntegrityStr, ok := minIntegrity.(string); ok && minIntegrityStr == "none" {
+					_, hasBash := toolsMap["bash"]
+					if !hasBash {
+						strictModeValidationLog.Printf("min-integrity: none without explicit bash setting rejected in strict mode")
+						return NewValidationError(
+							"tools.bash",
+							"not specified",
+							"strict mode: when 'tools.github.min-integrity' is set to 'none', 'tools.bash' must be explicitly specified so that shell access is intentional",
+							"Add an explicit bash setting to the tools section:\n\ntools:\n  bash: [\"cat\", \"ls\", \"find\", \"grep\", \"head\", \"tail\", \"wc\"]\n  github:\n    min-integrity: none",
+						)
+					}
+				}
+			}
+		}
+	}
+
+	// Require cli-proxy to be explicitly disabled when bash is refused.
+	// cli-proxy mounts MCP servers as CLI executables that can only be invoked from a shell,
+	// so it is incompatible with 'tools.bash: false'. Requiring an explicit
+	// 'tools.cli-proxy: false' makes that incompatibility visible in the workflow source.
+	if isBashExplicitlyRefused(toolsMap) {
+		cliProxyValue, hasCLIProxy := toolsMap["cli-proxy"]
+		enabled, isBool := cliProxyValue.(bool)
+		if !hasCLIProxy || !isBool || enabled {
+			strictModeValidationLog.Print("bash disabled without explicit cli-proxy: false rejected in strict mode")
+			value := "not specified"
+			if hasCLIProxy {
+				value = fmt.Sprintf("%v", cliProxyValue)
+			}
+			return NewValidationError(
+				"tools.cli-proxy",
+				value,
+				"strict mode: when 'tools.bash' is disabled, 'tools.cli-proxy: false' must be set explicitly because CLI-mounted MCP servers can only be invoked from a shell",
+				"Add an explicit cli-proxy setting to the tools section:\n\ntools:\n  bash: false\n  cli-proxy: false\n\nRun 'gh aw fix' to apply this change automatically.",
+			)
+		}
+		if mode, enabled := IsGitHubCLIProxyMode(toolsMap); enabled {
+			strictModeValidationLog.Print("bash disabled with tools.github.mode: gh-proxy rejected in strict mode")
+			return NewValidationError(
+				"tools.github.mode",
+				mode,
+				"strict mode: when 'tools.bash' is disabled, 'tools.github.mode: gh-proxy' is not allowed because GitHub gh-proxy reads can only be invoked from a shell",
+				"Use an MCP-backed GitHub mode instead:\n\ntools:\n  bash: false\n  cli-proxy: false\n  github:\n    mode: local\n\nRun 'gh aw fix' to apply this change automatically.",
+			)
+		}
+	}
+
 	// Check if cache-memory is configured with scope: repo
 	cacheMemoryValue, hasCacheMemory := toolsMap["cache-memory"]
 	if hasCacheMemory {
@@ -151,4 +224,58 @@ func (c *Compiler) validateStrictTools(frontmatter map[string]any) error {
 	}
 
 	return nil
+}
+
+// validatePrivateToPublicFlowsStringValue validates that the string form of
+// private-to-public-flows uses the only supported value: "allow".
+func validatePrivateToPublicFlowsStringValue(workflowData *WorkflowData) error {
+	if workflowData == nil || workflowData.ParsedTools == nil || workflowData.ParsedTools.GitHub == nil {
+		return nil
+	}
+	value, ok := workflowData.ParsedTools.GitHub.PrivateToPublicFlows.(string)
+	if !ok || value == "" || value == "allow" {
+		return nil
+	}
+
+	return NewValidationError(
+		"tools.github.private-to-public-flows",
+		value,
+		fmt.Sprintf("invalid value %q; expected \"allow\" or a list of MCP server IDs", value),
+		"Set tools.github.private-to-public-flows to \"allow\" for blanket opt-in, or use a list of MCP server IDs for targeted exemptions.",
+	)
+}
+
+// validatePrivateToPublicFlowsServerIDs validates that every server ID in the list form of
+// private-to-public-flows matches a declared MCP server in the workflow's tools list.
+// Per MCP Gateway Specification Section 10.9.2, unknown IDs must be rejected at compile time.
+func validatePrivateToPublicFlowsServerIDs(workflowData *WorkflowData) error {
+	if workflowData == nil || workflowData.ParsedTools == nil || workflowData.ParsedTools.GitHub == nil {
+		return nil
+	}
+
+	servers, ok := workflowData.ParsedTools.GitHub.PrivateToPublicFlows.([]string)
+	if !ok || len(servers) == 0 {
+		return nil
+	}
+	// Collect valid server IDs from the merged tools map.
+	validIDs := make(map[string]struct{}, len(workflowData.Tools))
+	for id := range workflowData.Tools {
+		validIDs[id] = struct{}{}
+	}
+	var unknown []string
+	for _, id := range servers {
+		if _, ok := validIDs[id]; !ok {
+			unknown = append(unknown, id)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	return NewValidationError(
+		"tools.github.private-to-public-flows",
+		fmt.Sprintf("%v", unknown),
+		fmt.Sprintf("unknown MCP server ID(s) %v; every ID in private-to-public-flows must match a server declared in tools or mcp-servers", unknown),
+		"Check that each server ID in private-to-public-flows matches an entry in tools or mcp-servers. "+
+			"The built-in GitHub MCP server ID is \"github\". Custom servers use the key from mcp-servers.",
+	)
 }

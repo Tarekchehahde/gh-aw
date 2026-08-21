@@ -14,9 +14,9 @@ permissions:
   pull-requests: read
   issues: read
 
+model: claude-haiku-4.5
 engine:
   id: copilot
-  model: claude-haiku-4.5
 timeout-minutes: 20
 
 network:
@@ -25,7 +25,8 @@ network:
 
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   github:
@@ -90,6 +91,7 @@ steps:
       OWNER="${REPO%%/*}"
       NAME="${REPO#*/}"
 
+      # shellcheck disable=SC2016  # GraphQL variables $owner/$name/$endCursor are GraphQL syntax, not shell variables
       if ! gh api graphql --paginate \
         -f owner="$OWNER" \
         -f name="$NAME" \
@@ -356,6 +358,11 @@ steps:
       echo "  readme_community_section_tier012.md — pre-formatted README section (Tier 0-2 only)"
 features:
   gh-aw-detection: true
+evals:
+  - id: community_contributions_scanned
+    question: Did the agent scan community-labeled issues and attribute contributions using the five-tier strategy?
+  - id: readme_or_wiki_updated
+    question: Was the README community section or the Community Contributors wiki page updated, or was noop used when no changes were needed?
 ---
 
 # Daily Community Attribution Updater
@@ -605,4 +612,6 @@ If you encounter a genuine error that prevents completion (e.g., data fetch fail
 
 ### Output Format
 
-Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
+- Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body.
+- Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks to reduce scrolling.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.

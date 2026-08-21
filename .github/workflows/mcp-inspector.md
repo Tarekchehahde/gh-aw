@@ -12,6 +12,7 @@ permissions:
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 network:
   allowed:
     - defaults
@@ -21,28 +22,31 @@ network:
     - fonts
 sandbox:
   agent:
+    runtime: cloud-hypervisor
     id: awf
-    sudo: false
 timeout-minutes: 20
 strict: false
+features:
+  gh-aw-detection: true
 imports:
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[mcp-inspector] "
       expires: 1d
-  - shared/mcp/arxiv.md
+  # Note: arxiv.md excluded — docker.io/mcp/arxiv-mcp-server has Critical/High CVEs (see #51713)
   - shared/mcp/ast-grep.md
   # Note: azure.md excluded due to schema validation issue with entrypointArgs
-  - shared/mcp/brave.md
-  - shared/mcp/context7.md
+  # Note: brave.md excluded — docker.io/mcp/brave-search has Critical/High CVEs (see #48546)
+  # Note: markitdown.md excluded — docker.io/mcp/markitdown has Critical/High CVEs (see #49515)
+  # Note: context7.md removed — docker.io/mcp/context7 has Critical/High CVEs (see #51715)
   - shared/mcp/datadog.md
   - shared/mcp/deepwiki.md
-  - shared/mcp/fabric-rti.md
-  - shared/mcp/markitdown.md
+  # Note: fabric-rti.md excluded — its uvx auto-container docker.io/python:alpine has High CVEs in CPython 3.14.7 with no fixed release (see #51711)
+  # Note: markitdown.md excluded — docker.io/mcp/markitdown has Critical/High CVEs (see #49515)
   - shared/mcp/microsoft-docs.md
-  - shared/mcp/notion.md
+  # Note: notion.md excluded — docker.io/mcp/notion has Critical/High CVEs (see #49517)
+  # Note: server-memory.md removed — mcp/memory has Critical/High CVEs and license violations (see #51716)
   - shared/mcp/sentry.md
-  - shared/mcp/server-memory.md
   - shared/mcp/slack.md
   - shared/mcp/tavily.md
   - shared/mcp/serena-go.md
@@ -56,6 +60,7 @@ tools:
 
 
 ---
+
 # MCP Inspector Agent
 
 Systematically investigate and document all MCP server configurations in `.github/workflows/shared/mcp/*.md`.

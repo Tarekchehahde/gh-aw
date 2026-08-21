@@ -4,6 +4,9 @@ package cli
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"strconv"
 	"testing"
 
 	"github.com/github/gh-aw/pkg/testutil"
@@ -271,6 +274,7 @@ func TestInitActionlintStats(t *testing.T) {
 }
 
 func TestGetActionlintDocsURL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		kind     string
@@ -327,6 +331,7 @@ func TestGetActionlintDocsURL(t *testing.T) {
 }
 
 func TestBuildActionlintIntegrationStatus(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		includeShellcheck bool
@@ -364,5 +369,252 @@ func TestBuildActionlintIntegrationStatus(t *testing.T) {
 			result := buildActionlintIntegrationStatus(tt.includeShellcheck, tt.includePyflakes)
 			assert.Equal(t, tt.expected, result, "integration status should match")
 		})
+	}
+}
+
+func TestBuildActionlintDockerArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		opts     actionlintRunOptions
+		expected []string
+	}{
+		{
+			name: "shellcheck disabled",
+			opts: actionlintRunOptions{
+				IncludeShellcheck: false,
+				IncludePyflakes:   true,
+				IgnorePatterns:    []string{"foo", "bar"},
+			},
+			expected: []string{
+				"run",
+				"--rm",
+				"-v", "/repo:/workdir",
+				"-w", "/workdir",
+				ActionlintImage,
+				"-format", "{{json .}}",
+				"-shellcheck=",
+				"-ignore", "foo",
+				"-ignore", "bar",
+				"a.lock.yml",
+				"b.lock.yml",
+			},
+		},
+		{
+			name: "pyflakes disabled",
+			opts: actionlintRunOptions{
+				IncludeShellcheck: true,
+				IncludePyflakes:   false,
+			},
+			expected: []string{
+				"run",
+				"--rm",
+				"-v", "/repo:/workdir",
+				"-w", "/workdir",
+				ActionlintImage,
+				"-format", "{{json .}}",
+				"-pyflakes=",
+				"a.lock.yml",
+				"b.lock.yml",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildActionlintDockerArgs("/repo", []string{"a.lock.yml", "b.lock.yml"}, tt.opts)
+			assert.Equal(t, tt.expected, args)
+		})
+	}
+}
+
+func TestBuildActionlintCompilerError(t *testing.T) {
+	t.Parallel()
+	compilerErr := buildActionlintCompilerError(actionlintError{
+		Message:  "something went wrong",
+		Filepath: ".github/workflows/test.lock.yml",
+		Line:     12,
+		Column:   4,
+		Kind:     "warning-test",
+		Snippet:  "    run: echo test\n    ^~~~",
+	})
+
+	assert.Equal(t, ".github/workflows/test.lock.yml", compilerErr.Position.File)
+	assert.Equal(t, 12, compilerErr.Position.Line)
+	assert.Equal(t, 4, compilerErr.Position.Column)
+	assert.Equal(t, "warning", compilerErr.Type)
+	assert.Equal(t, []string{"    run: echo test"}, compilerErr.Context)
+	assert.Contains(t, compilerErr.Message, "[warning-test] something went wrong")
+	assert.Contains(t, compilerErr.Message, getActionlintDocsURL("warning-test"))
+}
+
+func TestBuildActionlintDockerCommand(t *testing.T) {
+	t.Parallel()
+	command := buildActionlintDockerCommand("/tmp/repo root", []string{"a.lock.yml"}, actionlintRunOptions{
+		IncludeShellcheck: false,
+		IgnorePatterns:    []string{"foo bar"},
+	})
+
+	assert.Contains(t, command, `"/tmp/repo root:/workdir"`)
+	assert.Contains(t, command, `-shellcheck=`)
+	assert.Contains(t, command, `-ignore "foo bar"`)
+	assert.Contains(t, command, `-format "{{json .}}"`)
+}
+
+func TestActionlintShouldParseOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: true,
+		},
+		{
+			name: "lint findings exit code",
+			err:  exitErrorFromCommand(t, 1),
+			want: true,
+		},
+		{
+			name: "tooling failure exit code",
+			err:  exitErrorFromCommand(t, 2),
+			want: false,
+		},
+		{
+			name: "invocation failure",
+			err:  assert.AnError,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, actionlintShouldParseOutput(tt.err))
+		})
+	}
+}
+
+func exitErrorFromCommand(t *testing.T, exitCode int) error {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestActionlintExitHelperSubprocess")
+	cmd.Env = append(os.Environ(),
+		"GH_AW_ACTIONLINT_EXIT_HELPER_PROCESS=1",
+		"GH_AW_ACTIONLINT_EXIT_CODE="+strconv.Itoa(exitCode),
+	)
+	err := cmd.Run()
+	require.Error(t, err)
+	return err
+}
+
+func TestActionlintExitHelperSubprocess(t *testing.T) {
+	if os.Getenv("GH_AW_ACTIONLINT_EXIT_HELPER_PROCESS") != "1" {
+		return
+	}
+
+	switch os.Getenv("GH_AW_ACTIONLINT_EXIT_CODE") {
+	case "1":
+		os.Exit(1)
+	case "2":
+		os.Exit(2)
+	default:
+		os.Exit(0)
+	}
+}
+
+func TestIsHighSeverityActionlintError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		err      actionlintError
+		expected bool
+	}{
+		{
+			name:     "non-shellcheck error is always high severity",
+			err:      actionlintError{Kind: "syntax", Message: "unexpected token"},
+			expected: true,
+		},
+		{
+			name:     "shellcheck error severity",
+			err:      actionlintError{Kind: "shellcheck", Message: "shellcheck reported issue in this script: SC2086:error:4:13: Double quote to prevent globbing"},
+			expected: true,
+		},
+		{
+			name:     "shellcheck warning severity",
+			err:      actionlintError{Kind: "shellcheck", Message: "shellcheck reported issue in this script: SC2086:warning:4:13: Double quote to prevent globbing"},
+			expected: true,
+		},
+		{
+			name:     "shellcheck info severity",
+			err:      actionlintError{Kind: "shellcheck", Message: "shellcheck reported issue in this script: SC2016:info:4:13: Expressions don't expand in single quotes"},
+			expected: false,
+		},
+		{
+			name:     "shellcheck style severity",
+			err:      actionlintError{Kind: "shellcheck", Message: "shellcheck reported issue in this script: SC2034:style:1:1: Variable appears unused"},
+			expected: false,
+		},
+		{
+			name:     "shellcheck with unparseable message",
+			err:      actionlintError{Kind: "shellcheck", Message: "some unexpected format"},
+			expected: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isHighSeverityActionlintError(tt.err)
+			if got != tt.expected {
+				t.Errorf("isHighSeverityActionlintError() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractShellcheckSeverity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		message  string
+		expected string
+	}{
+		{"shellcheck reported issue in this script: SC2016:info:4:13: msg", "info"},
+		{"shellcheck reported issue in this script: SC2086:error:1:5: msg", "error"},
+		{"shellcheck reported issue in this script: SC2034:style:1:1: msg", "style"},
+		{"shellcheck reported issue in this script: SC2155:warning:3:1: msg", "warning"},
+		{"no SC code here", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.message, func(t *testing.T) {
+			got := extractShellcheckSeverity(tt.message)
+			if got != tt.expected {
+				t.Errorf("extractShellcheckSeverity() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCountHighSeverityErrors(t *testing.T) {
+	t.Parallel()
+	// Mix of high and low severity
+	input := `[
+		{"message":"shellcheck reported issue in this script: SC2016:info:4:13: msg","filepath":"a.yml","line":1,"column":1,"kind":"shellcheck"},
+		{"message":"shellcheck reported issue in this script: SC2086:error:1:5: msg","filepath":"b.yml","line":2,"column":1,"kind":"shellcheck"},
+		{"message":"unexpected token","filepath":"c.yml","line":3,"column":1,"kind":"syntax"}
+	]`
+	got := countHighSeverityErrors(input)
+	if got != 2 {
+		t.Errorf("countHighSeverityErrors() = %d, want 2", got)
+	}
+
+	// All low severity
+	input2 := `[
+		{"message":"shellcheck reported issue in this script: SC2016:info:4:13: msg","filepath":"a.yml","line":1,"column":1,"kind":"shellcheck"},
+		{"message":"shellcheck reported issue in this script: SC2034:style:1:1: msg","filepath":"b.yml","line":2,"column":1,"kind":"shellcheck"}
+	]`
+	got2 := countHighSeverityErrors(input2)
+	if got2 != 0 {
+		t.Errorf("countHighSeverityErrors() = %d, want 0", got2)
 	}
 }

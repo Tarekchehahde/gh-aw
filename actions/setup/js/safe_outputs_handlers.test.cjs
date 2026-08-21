@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
@@ -105,6 +106,8 @@ describe("safe_outputs_handlers", () => {
     it("resolves issue title using the create_issue fallback order", () => {
       expect(resolveIssueTitleForValidation({ title: "Real title", body: "Ignored body" })).toBe("Real title");
       expect(resolveIssueTitleForValidation({ body: "Body title" })).toBe("Body title");
+      expect(resolveIssueTitleForValidation({ body: "\n\n## Incident Summary\n\nBody details" })).toBe("Incident Summary");
+      expect(resolveIssueTitleForValidation({ body: "   \n\n  " })).toBe("Agent Output");
       expect(resolveIssueTitleForValidation({})).toBe("Agent Output");
     });
 
@@ -208,6 +211,60 @@ describe("safe_outputs_handlers", () => {
       expect(mockAppendSafeOutput).toHaveBeenCalledWith({ type: "test-type" });
       expect(result.content[0].text).toBe(JSON.stringify({ result: "success" }));
     });
+
+    it("should enforce data_schema for default handler payloads", () => {
+      const handlersWithSchema = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          data_enabled: true,
+          data_schema: {
+            type: "object",
+            properties: {
+              verdict: { type: "string" },
+            },
+            required: ["verdict"],
+            additionalProperties: false,
+          },
+        },
+      });
+      const handler = handlersWithSchema.defaultHandler("add_comment");
+
+      const result = handler({ body: "ok", data: { verdict: "APPROVE", extra: "nope" } });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("data.extra");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should reject data when not enabled in handler config", () => {
+      const handler = handlers.defaultHandler("add_comment");
+      const result = handler({ body: "ok", data: { verdict: "APPROVE" } });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("data is not enabled");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should enforce JSON-string data_schema in handler config", () => {
+      const handlersWithSchema = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          data_enabled: true,
+          data_schema: JSON.stringify({
+            type: "object",
+            properties: {
+              verdict: { type: "string" },
+            },
+            required: ["verdict"],
+            additionalProperties: false,
+          }),
+        },
+      });
+      const handler = handlersWithSchema.defaultHandler("add_comment");
+
+      const result = handler({ body: "ok", data: { verdict: "APPROVE", extra: "nope" } });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("data.extra");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
   });
 
   describe("uploadAssetHandler", () => {
@@ -295,7 +352,19 @@ describe("safe_outputs_handlers", () => {
 
       // File must be staged under RUNNER_TEMP, not hardcoded /tmp
       const expectedDir = path.join(testRunnerTemp, "gh-aw", "safeoutputs", "assets");
-      expect(fs.existsSync(path.join(expectedDir, "chart.png"))).toBe(true);
+      const stagedFileName = `${crypto.createHash("sha256").update(testFile).digest("hex")}.png`;
+      expect(fs.existsSync(path.join(expectedDir, stagedFileName))).toBe(true);
+    });
+
+    it("should reject duplicate upload_asset source paths", () => {
+      process.env.GH_AW_ASSETS_BRANCH = "assets/test";
+      const testFile = path.join(testWorkspaceDir, "duplicate.png");
+      fs.writeFileSync(testFile, "first content");
+      const args = { path: testFile };
+
+      handlers.uploadAssetHandler(args);
+
+      expect(() => handlers.uploadAssetHandler(args)).toThrow("Duplicate upload_asset source path is not allowed");
     });
 
     it("should throw error if GH_AW_ASSETS_BRANCH not set", () => {
@@ -499,6 +568,24 @@ describe("safe_outputs_handlers", () => {
       expect(fs.readFileSync(stagedPath, "utf8")).toBe("original");
     });
 
+    it("should wrap staging copy failures for absolute-path files", () => {
+      const srcFile = path.join(testWorkspaceDir, "copy-fail.png");
+      fs.writeFileSync(srcFile, "png data");
+      const originalCopyFileSync = fs.copyFileSync;
+      const copySpy = vi.spyOn(fs, "copyFileSync").mockImplementation((source, destination, mode) => {
+        if (source === srcFile) {
+          throw new Error("disk full");
+        }
+        return originalCopyFileSync.call(fs, source, destination, mode);
+      });
+
+      try {
+        expect(() => handlers.uploadArtifactHandler({ path: srcFile })).toThrow(`Failed to copy file ${srcFile} to ${path.join(testStagingDir, "gh-aw", "safeoutputs", "upload-artifacts", "copy-fail.png")}: disk full`);
+      } finally {
+        copySpy.mockRestore();
+      }
+    });
+
     it("should pass through relative path without copying to staging", () => {
       // Relative paths reference files already in staging - no copy needed
       const result = handlers.uploadArtifactHandler({ path: "already-staged.png" });
@@ -541,6 +628,63 @@ describe("safe_outputs_handlers", () => {
 
       // Entry path should be the directory basename
       expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "upload_artifact", path: "charts" }));
+    });
+
+    it("should reject absolute path outside GITHUB_WORKSPACE and staging directory", () => {
+      const outsideDir = "/tmp/gh-aw-outside-handler-" + Math.random().toString(36).substring(7);
+      try {
+        fs.mkdirSync(outsideDir, { recursive: true });
+        const outsideFile = path.join(outsideDir, "secret.json");
+        fs.writeFileSync(outsideFile, "{}");
+
+        // Temporarily unset GITHUB_WORKSPACE so outsideDir is not allowed.
+        const savedWorkspace = process.env.GITHUB_WORKSPACE;
+        delete process.env.GITHUB_WORKSPACE;
+        try {
+          expect(() => handlers.uploadArtifactHandler({ path: outsideFile })).toThrow(expect.objectContaining({ message: expect.stringContaining("outside allowed source roots") }));
+        } finally {
+          if (savedWorkspace !== undefined) process.env.GITHUB_WORKSPACE = savedWorkspace;
+        }
+      } finally {
+        try {
+          fs.rmSync(outsideDir, { recursive: true, force: true });
+        } catch {}
+      }
+    });
+
+    it("should reject path containing .git directory component", () => {
+      const gitDir = path.join(testWorkspaceDir, ".git");
+      const gitConfig = path.join(gitDir, "config");
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(gitConfig, "[core]\n  repositoryformatversion = 0\n");
+
+      expect(() => handlers.uploadArtifactHandler({ path: gitConfig })).toThrow(expect.objectContaining({ message: expect.stringContaining("sensitive repository metadata") }));
+    });
+
+    it("should reject absolute path under system directories like /etc", () => {
+      if (!fs.existsSync("/etc/hosts")) return;
+      const stat = (() => {
+        try {
+          return fs.lstatSync("/etc/hosts");
+        } catch {
+          return null;
+        }
+      })();
+      if (!stat || stat.isSymbolicLink()) return;
+
+      expect(() => handlers.uploadArtifactHandler({ path: "/etc/hosts" })).toThrow(expect.objectContaining({ message: expect.stringContaining("system directory") }));
+    });
+
+    it("should set restrictive permissions (0o600) on staged files", () => {
+      const srcFile = path.join(testWorkspaceDir, "perms-test.txt");
+      fs.writeFileSync(srcFile, "data");
+
+      handlers.uploadArtifactHandler({ path: srcFile });
+
+      const stagedPath = path.join(testStagingDir, "gh-aw", "safeoutputs", "upload-artifacts", "perms-test.txt");
+      expect(fs.existsSync(stagedPath)).toBe(true);
+      const stat = fs.statSync(stagedPath);
+      expect(stat.mode & 0o777).toBe(0o600);
     });
   });
 
@@ -1366,20 +1510,61 @@ describe("safe_outputs_handlers", () => {
       }
     });
 
-    it("should require explicit pull_request_number when push_to_pull_request_branch target is '*'", async () => {
+    it("should require explicit repo when push_to_pull_request_branch target is '*'", async () => {
       const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
         push_to_pull_request_branch: {
           target: "*",
         },
       });
 
-      const result = await wildcardHandlers.pushToPullRequestBranchHandler({ message: "Apply requested changes." });
+      const result = await wildcardHandlers.pushToPullRequestBranchHandler({
+        message: "Apply requested changes.",
+        pull_request_number: 123,
+      });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("requires repo");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should require explicit pull_request_number when push_to_pull_request_branch target is '*' and only repo is supplied", async () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        push_to_pull_request_branch: {
+          target: "*",
+        },
+      });
+
+      const result = await wildcardHandlers.pushToPullRequestBranchHandler({
+        message: "Apply requested changes.",
+        repo: "owner/repo",
+      });
 
       expect(result.isError).toBe(true);
       const responseData = JSON.parse(result.content[0].text);
       expect(responseData.result).toBe("error");
       expect(responseData.error).toContain("requires pull_request_number");
       expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should pass wildcard validation when push_to_pull_request_branch target is '*' and both repo and pull_request_number are supplied", async () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        push_to_pull_request_branch: {
+          target: "*",
+        },
+      });
+
+      const result = await wildcardHandlers.pushToPullRequestBranchHandler({
+        message: "Apply requested changes.",
+        repo: "owner/repo",
+        pull_request_number: 123,
+      });
+
+      // Wildcard validation passes; downstream failure (e.g. repo not found in workspace) is expected
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.error).not.toContain("requires repo");
+      expect(responseData.error).not.toContain("requires pull_request_number");
     });
 
     it("should reject obvious exploratory test payloads before recording a PR branch update intent", async () => {
@@ -1471,6 +1656,37 @@ describe("safe_outputs_handlers", () => {
 
         expect(result.isError).toBeFalsy();
         expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining("Using configured patch_workspace_path for push_to_pull_request_branch"));
+      } finally {
+        delete process.env.GH_AW_TARGET_REPO_SLUG;
+        delete process.env.GITHUB_BASE_REF;
+      }
+    });
+
+    it("should detect branch from GH_AW_TARGET_REPO_SLUG checkout when target-repo is not configured", async () => {
+      const { targetRepoDir } = createSideRepoWithTrackedAndLocalCommits();
+      process.env.GH_AW_TARGET_REPO_SLUG = "test-owner/test-repo";
+      process.env.GITHUB_BASE_REF = "main";
+      execSync("git init -b main", { cwd: testWorkspaceDir, stdio: "pipe" });
+      execSync("git config user.email 'test@example.com'", { cwd: testWorkspaceDir, stdio: "pipe" });
+      execSync("git config user.name 'Test User'", { cwd: testWorkspaceDir, stdio: "pipe" });
+      fs.writeFileSync(path.join(testWorkspaceDir, "HOST.md"), "host\n");
+      execSync("git add HOST.md", { cwd: testWorkspaceDir, stdio: "pipe" });
+      execSync("git commit -m 'host base commit'", { cwd: testWorkspaceDir, stdio: "pipe" });
+      execSync("git remote add origin https://github.com/owner/repo.git", { cwd: testWorkspaceDir, stdio: "pipe" });
+
+      try {
+        const result = await handlers.pushToPullRequestBranchHandler({});
+
+        expect(result.isError).toBeFalsy();
+        expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining(`Selected checkout folder for test-owner/test-repo: ${targetRepoDir}`));
+        expect(mockServer.debug).toHaveBeenCalledWith(expect.stringContaining("Using current branch for push_to_pull_request_branch: feature/test-change"));
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "push_to_pull_request_branch",
+            branch: "feature/test-change",
+            repo_cwd: targetRepoDir,
+          })
+        );
       } finally {
         delete process.env.GH_AW_TARGET_REPO_SLUG;
         delete process.env.GITHUB_BASE_REF;
@@ -2132,6 +2348,72 @@ describe("safe_outputs_handlers", () => {
       expect(mockAppendSafeOutput).not.toHaveBeenCalled();
     });
 
+    it("should allow comment_id from allows-comment-ids when add_comment target is '*'", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          target: "*",
+          allows_comment_ids: ["12345", "67890"],
+        },
+      });
+
+      const result = wildcardHandlers.addCommentHandler({ body: "Update an existing status-style comment.", comment_id: "12345" });
+
+      expect(result).toHaveProperty("content");
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_comment", comment_id: 12345 }));
+    });
+
+    it("should reject comment_id that is not listed in allows-comment-ids", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          target: "*",
+          allows_comment_ids: ["12345"],
+        },
+      });
+
+      const result = wildcardHandlers.addCommentHandler({ body: "Update an existing status-style comment.", comment_id: "67890" });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("allows-comment-ids");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should reject comment_id when add_comment target is not '*'", () => {
+      const targetingHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          target: "triggering",
+          allows_comment_ids: ["12345"],
+        },
+      });
+
+      const result = targetingHandlers.addCommentHandler({ item_number: 42, body: "Update an existing status-style comment.", comment_id: "12345" });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("target is '*'");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should reject comment_id when allows-comment-ids is empty", () => {
+      const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+        add_comment: {
+          target: "*",
+        },
+      });
+
+      const result = wildcardHandlers.addCommentHandler({ body: "Update an existing status-style comment.", comment_id: "12345" });
+
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain("allows-comment-ids");
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
     it("should refuse reply_to_id when discussions are not enabled in config", () => {
       // Default handlers have no discussions: true in config
       // Discussion check precedes context check so this error surfaces regardless of event context
@@ -2305,6 +2587,40 @@ describe("safe_outputs_handlers", () => {
   });
 
   describe("createIssueHandler", () => {
+    it("should deduplicate against fallback title derived from first meaningful body line", () => {
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {
+        create_issue: {
+          deduplicate_by_title: true,
+        },
+      });
+
+      const first = h.createIssueHandler({ body: "\n\n## Incident Summary\n\nBody A details" });
+      const second = h.createIssueHandler({ title: "Incident Summary", body: "Body B details" });
+
+      const firstResponse = JSON.parse(first.content[0].text);
+      const secondResponse = JSON.parse(second.content[0].text);
+      expect(firstResponse.result).toBe("success");
+      expect(secondResponse.result).toBe("duplicate_dropped");
+      const droppedEntry = mockAppendSafeOutput.mock.calls[1][0];
+      expect(droppedEntry._dropped_duplicate_by_title).toBe(true);
+    });
+
+    it("should fall back to Agent Output when title and body are blank", () => {
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {
+        create_issue: {
+          deduplicate_by_title: true,
+        },
+      });
+
+      const first = h.createIssueHandler({ body: "   \n\n  " });
+      const second = h.createIssueHandler({ title: "Agent Output", body: "Real details for duplicate check" });
+
+      const firstResponse = JSON.parse(first.content[0].text);
+      const secondResponse = JSON.parse(second.content[0].text);
+      expect(firstResponse.result).toBe("success");
+      expect(secondResponse.result).toBe("duplicate_dropped");
+    });
+
     it("should append create_issue entry when dedup is disabled", () => {
       handlers.createIssueHandler({ title: "Issue A", body: "Body A" });
       handlers.createIssueHandler({ title: "Issue A", body: "Body A again" });
@@ -2458,6 +2774,12 @@ describe("safe_outputs_handlers", () => {
       });
     }
 
+    function initGitRepo(repoDir) {
+      execSync("git init", { cwd: repoDir, stdio: "pipe" });
+      execSync('git config user.email "test@example.com"', { cwd: repoDir, stdio: "pipe" });
+      execSync('git config user.name "Test User"', { cwd: repoDir, stdio: "pipe" });
+    }
+
     it("should return success when no repo-memory is configured", () => {
       const h = createHandlers(mockServer, mockAppendSafeOutput, {});
       const result = h.pushRepoMemoryHandler({});
@@ -2489,11 +2811,12 @@ describe("safe_outputs_handlers", () => {
     it("should return success for valid files within limits", () => {
       const h = makeHandlersWithMemory();
       fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
       fs.writeFileSync(path.join(memoryDir, "state.json"), "x".repeat(100));
       const result = h.pushRepoMemoryHandler({ memory_id: "default" });
       const data = JSON.parse(result.content[0].text);
       expect(data.result).toBe("success");
-      expect(data.message).toContain("validation passed");
+      expect(data.message).toContain("Storage validation passed");
     });
 
     it("should return error when a file exceeds max_file_size", () => {
@@ -2522,42 +2845,43 @@ describe("safe_outputs_handlers", () => {
       expect(data.error).toContain("3 files");
     });
 
-    it("should return error when total size exceeds effective max_patch_size", () => {
-      // max_patch_size = 500 bytes, effective limit = floor(500 * 1.2) = 600 bytes
-      const h = makeHandlersWithMemory({ max_patch_size: 500, max_file_size: 1024 * 1024 });
+    it("should pass when total folder size is large but staged diff is tiny", () => {
+      const h = makeHandlersWithMemory({ max_patch_size: 50, max_file_size: 1024 * 1024 });
       fs.mkdirSync(memoryDir, { recursive: true });
-      // Write two files totaling 650 bytes (above the 600 byte effective limit)
-      fs.writeFileSync(path.join(memoryDir, "a.json"), "x".repeat(350));
-      fs.writeFileSync(path.join(memoryDir, "b.json"), "x".repeat(300));
+      initGitRepo(memoryDir);
+      fs.writeFileSync(path.join(memoryDir, "large.json"), `${"x\n".repeat(3000)}`);
+      execSync("git add . && git commit -m 'seed'", { cwd: memoryDir, stdio: "pipe" });
+      fs.appendFileSync(path.join(memoryDir, "large.json"), "small-diff\n");
       const result = h.pushRepoMemoryHandler({ memory_id: "default" });
-      expect(result.isError).toBe(true);
+      expect(result.isError).toBeUndefined();
       const data = JSON.parse(result.content[0].text);
-      expect(data.result).toBe("error");
-      expect(data.error).toContain("exceeds the allowed limit");
-      expect(data.error).toContain("push_repo_memory again");
+      expect(data.result).toBe("success");
+      expect(data.message).toContain("patch diff");
     });
 
     it("should use 'default' memory_id when memory_id is not specified", () => {
       const h = makeHandlersWithMemory();
       fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
       fs.writeFileSync(path.join(memoryDir, "notes.md"), "hello");
       const result = h.pushRepoMemoryHandler({}); // no memory_id
       const data = JSON.parse(result.content[0].text);
       expect(data.result).toBe("success");
     });
 
-    it("should scan files recursively in subdirectories", () => {
+    it("should fail when staged patch diff size exceeds effective max_patch_size", () => {
       // max_patch_size = 500 bytes, effective limit = 600 bytes
       const h = makeHandlersWithMemory({ max_patch_size: 500, max_file_size: 1024 * 1024 });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
       const subDir = path.join(memoryDir, "history");
       fs.mkdirSync(subDir, { recursive: true });
-      // Write a nested file that pushes total above effective limit
       fs.writeFileSync(path.join(subDir, "log.jsonl"), "x".repeat(700));
       const result = h.pushRepoMemoryHandler({ memory_id: "default" });
       expect(result.isError).toBe(true);
       const data = JSON.parse(result.content[0].text);
       expect(data.result).toBe("error");
-      // The nested file path should appear correctly
+      expect(data.error).toContain("Patch diff size");
       expect(data.error).toContain("exceeds the allowed limit");
     });
 
@@ -2568,6 +2892,7 @@ describe("safe_outputs_handlers", () => {
       // files are small but .git directory content is large — must not count toward limit.
       const h = makeHandlersWithMemory({ max_patch_size: 500, max_file_size: 1024 * 1024 });
       fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
       // Small memory files (well within limit)
       fs.writeFileSync(path.join(memoryDir, "memory.json"), "x".repeat(100));
       fs.writeFileSync(path.join(memoryDir, "state.json"), "x".repeat(100));
@@ -2581,7 +2906,131 @@ describe("safe_outputs_handlers", () => {
       const result = h.pushRepoMemoryHandler({ memory_id: "default" });
       const data = JSON.parse(result.content[0].text);
       expect(data.result).toBe("success");
-      expect(data.message).toContain("validation passed");
+      expect(data.message).toContain("Storage validation passed");
+    });
+
+    it("should run custom validation and distinguish it from storage validation", () => {
+      const h = makeHandlersWithMemory({
+        validation: {
+          script: `
+            const state = JSON.parse(fs.readFileSync(path.join(memoryRoot, "state.json"), "utf8"));
+            if (state.digest.length !== 16) throw new Error("digest must be 16 chars");
+            console.log("domain validator passed");
+          `,
+          timeout: 5,
+        },
+      });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
+      fs.writeFileSync(path.join(memoryDir, "state.json"), JSON.stringify({ digest: "1234567890abcdef" }));
+
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.result).toBe("success");
+      expect(data.message).toContain("Storage validation passed");
+      expect(data.message).toContain("Custom domain validation passed");
+      expect(data.storage_validation.result).toBe("success");
+      expect(data.custom_validation.result).toBe("success");
+      expect(data.custom_validation.stdout).toContain("domain validator passed");
+    });
+
+    it("should reject generically valid content that fails custom validation", () => {
+      const h = makeHandlersWithMemory({
+        validation: {
+          script: `
+            const state = JSON.parse(fs.readFileSync(path.join(memoryRoot, "state.json"), "utf8"));
+            if (state.digest.length !== 16) throw new Error("digest must be 16 chars");
+          `,
+          timeout: 5,
+        },
+      });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
+      fs.writeFileSync(path.join(memoryDir, "state.json"), JSON.stringify({ digest: "a".repeat(64) }));
+
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBe(true);
+      expect(data.result).toBe("error");
+      expect(data.storage_validation.result).toBe("success");
+      expect(data.custom_validation.result).toBe("error");
+      expect(data.custom_validation.stderr).toContain("digest must be 16 chars");
+    });
+
+    it("should fail when validation is configured without a validator script", () => {
+      const h = makeHandlersWithMemory({ validation: {} });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
+      fs.writeFileSync(path.join(memoryDir, "state.json"), "{}");
+
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBe(true);
+      expect(data.custom_validation.stderr).toContain("empty or missing");
+    });
+
+    it("should apply custom validation to the selected memory_id only", () => {
+      const otherDir = `${memoryDir}-other`;
+      const h = createHandlers(mockServer, mockAppendSafeOutput, {
+        push_repo_memory: {
+          memories: [
+            {
+              id: "default",
+              dir: memoryDir,
+              max_file_size: 1024,
+              max_patch_size: 2048,
+              max_file_count: 5,
+              validation: { script: "throw new Error('default validator should not run')", timeout: 5 },
+            },
+            {
+              id: "session",
+              dir: otherDir,
+              max_file_size: 1024,
+              max_patch_size: 2048,
+              max_file_count: 5,
+              validation: { script: "console.log(memoryId)", timeout: 5 },
+            },
+          ],
+        },
+      });
+      fs.mkdirSync(otherDir, { recursive: true });
+      initGitRepo(otherDir);
+      fs.writeFileSync(path.join(otherDir, "state.json"), "{}");
+
+      try {
+        const result = h.pushRepoMemoryHandler({ memory_id: "session" });
+        const data = JSON.parse(result.content[0].text);
+
+        expect(data.result).toBe("success");
+        expect(data.custom_validation.stdout).toContain("session");
+      } finally {
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
+    });
+
+    it("should run custom validation after format-json normalization", () => {
+      const h = makeHandlersWithMemory({
+        format_json: true,
+        validation: {
+          script: `
+            const raw = fs.readFileSync(path.join(memoryRoot, "state.json"), "utf8");
+            if (!raw.includes("\\n  \\"digest\\"")) throw new Error("expected formatted JSON");
+          `,
+          timeout: 5,
+        },
+      });
+      fs.mkdirSync(memoryDir, { recursive: true });
+      initGitRepo(memoryDir);
+      fs.writeFileSync(path.join(memoryDir, "state.json"), '{"digest":"1234567890abcdef"}');
+
+      const result = h.pushRepoMemoryHandler({ memory_id: "default" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.result).toBe("success");
+      expect(fs.readFileSync(path.join(memoryDir, "state.json"), "utf8")).toContain('\n  "digest"');
     });
   });
 
@@ -2904,6 +3353,31 @@ describe("safe_outputs_handlers", () => {
       }
     });
 
+    it("should write entry for a pull_request closed event when context eventName falls back to GITHUB_EVENT_NAME", () => {
+      const savedContext = global.context;
+      const savedEventName = process.env.GITHUB_EVENT_NAME;
+      process.env.GITHUB_EVENT_NAME = "pull_request";
+      global.context = {
+        ...global.context,
+        eventName: "",
+        payload: { action: "closed", pull_request: { number: 7, merged: true } },
+      };
+      try {
+        const result = handlers.updatePullRequestHandler({ body: "Merged PR summary" });
+        expect(result.isError).toBeUndefined();
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_pull_request", body: "Merged PR summary" }));
+      } finally {
+        global.context = savedContext;
+        if (savedEventName === undefined) {
+          delete process.env.GITHUB_EVENT_NAME;
+        } else {
+          process.env.GITHUB_EVENT_NAME = savedEventName;
+        }
+      }
+    });
+
     it("error message should mention all required fields", () => {
       try {
         handlers.updatePullRequestHandler({});
@@ -3138,6 +3612,491 @@ describe("safe_outputs_handlers", () => {
         expect(responseData.result).toBe("error");
         expect(responseData.error).toContain('"workflow_dispatch"');
         expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  // ============================================================
+  // Tests for egress context handlers (MCE1 validation)
+  // ============================================================
+
+  describe("closePullRequestHandler", () => {
+    it("should return intent error on schedule event when no explicit pull_request_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.closePullRequestHandler({});
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("close_pull_request");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on push event when no explicit pull_request_number", () => {
+      const result = handlers.closePullRequestHandler({ reason: "completed" });
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain('"push"');
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should write entry when explicit pull_request_number is provided regardless of event", () => {
+      const result = handlers.closePullRequestHandler({ pull_request_number: 5 });
+      expect(result.isError).toBeUndefined();
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("success");
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "close_pull_request", pull_request_number: 5 }));
+    });
+
+    it("should write entry when in PR context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 3 } } };
+      try {
+        const result = handlers.closePullRequestHandler({});
+        expect(result.isError).toBeUndefined();
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("success");
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("mergePullRequestHandler", () => {
+    it("should return intent error on schedule event when no explicit pull_request_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.mergePullRequestHandler({});
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("merge_pull_request");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit pull_request_number is provided", () => {
+      const result = handlers.mergePullRequestHandler({ pull_request_number: 42, merge_method: "squash" });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "merge_pull_request", pull_request_number: 42 }));
+    });
+
+    it("should write entry when in PR context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 11 } } };
+      try {
+        const result = handlers.mergePullRequestHandler({});
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("markPullRequestAsReadyForReviewHandler", () => {
+    it("should return intent error on schedule event when no explicit pull_request_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.markPullRequestAsReadyForReviewHandler({});
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("mark_pull_request_as_ready_for_review");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit pull_request_number is provided", () => {
+      const result = handlers.markPullRequestAsReadyForReviewHandler({ pull_request_number: 7 });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "mark_pull_request_as_ready_for_review", pull_request_number: 7 }));
+    });
+  });
+
+  describe("addReviewerHandler", () => {
+    it("should return intent error on schedule event when no explicit pull_request_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.addReviewerHandler({ reviewer: "octocat" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("add_reviewer");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit pull_request_number is provided", () => {
+      const result = handlers.addReviewerHandler({ pull_request_number: 3, reviewer: "octocat" });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_reviewer", pull_request_number: 3 }));
+    });
+
+    it("should write entry when in PR context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 9 } } };
+      try {
+        const result = handlers.addReviewerHandler({ reviewer: "octocat" });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("replyToPullRequestReviewCommentHandler", () => {
+    it("should return intent error on schedule event when no explicit pull_request_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.replyToPullRequestReviewCommentHandler({ comment_id: 123, body: "Reply" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("reply_to_pull_request_review_comment");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit pull_request_number is provided", () => {
+      const result = handlers.replyToPullRequestReviewCommentHandler({ pull_request_number: 5, comment_id: 123, body: "Reply" });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "reply_to_pull_request_review_comment", pull_request_number: 5 }));
+    });
+  });
+
+  describe("closeIssueHandler", () => {
+    it("should return intent error on schedule event when no explicit issue_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.closeIssueHandler({});
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("close_issue");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error on push event when no explicit issue_number", () => {
+      const result = handlers.closeIssueHandler({});
+      expect(result.isError).toBe(true);
+      const responseData = JSON.parse(result.content[0].text);
+      expect(responseData.result).toBe("error");
+      expect(responseData.error).toContain('"push"');
+      expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+    });
+
+    it("should write entry when explicit issue_number is provided", () => {
+      const result = handlers.closeIssueHandler({ issue_number: 99 });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "close_issue", issue_number: 99 }));
+    });
+
+    it("should write entry when in issue context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 55 } } };
+      try {
+        const result = handlers.closeIssueHandler({});
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should return intent error for issue_comment on a PR (not issue context)", () => {
+      const savedContext = global.context;
+      global.context = {
+        ...global.context,
+        eventName: "issue_comment",
+        payload: { issue: { number: 7, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/7" } } },
+      };
+      try {
+        const result = handlers.closeIssueHandler({});
+        expect(result.isError).toBe(true);
+        const data = JSON.parse(result.content[0].text);
+        expect(data.result).toBe("error");
+        expect(data.error).toContain("close_issue");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("addLabelsHandler", () => {
+    it("should return intent error on schedule event when no explicit item_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.addLabelsHandler({ labels: ["bug"] });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("add_labels");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit item_number is provided", () => {
+      const result = handlers.addLabelsHandler({ item_number: 10, labels: ["bug"] });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "add_labels", item_number: 10 }));
+    });
+
+    it("should write entry when in issue context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "issues", payload: { issue: { number: 20 } } };
+      try {
+        const result = handlers.addLabelsHandler({ labels: ["enhancement"] });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when in PR context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "pull_request", payload: { pull_request: { number: 4 } } };
+      try {
+        const result = handlers.addLabelsHandler({ labels: ["needs-review"] });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("removeLabelsHandler", () => {
+    it("should return intent error on schedule event when no explicit item_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.removeLabelsHandler({ labels: ["bug"] });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("remove_labels");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit item_number is provided", () => {
+      const result = handlers.removeLabelsHandler({ item_number: 15, labels: ["wip"] });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "remove_labels", item_number: 15 }));
+    });
+  });
+
+  describe("updateDiscussionHandler", () => {
+    it("should return intent error on schedule event when no explicit discussion_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.updateDiscussionHandler({ body: "New body" });
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("update_discussion");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit discussion_number is provided", () => {
+      const result = handlers.updateDiscussionHandler({ discussion_number: 7, body: "Updated body" });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "update_discussion", discussion_number: 7 }));
+    });
+
+    it("should write entry when in discussion context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "discussion", payload: { discussion: { number: 3 } } };
+      try {
+        const result = handlers.updateDiscussionHandler({ body: "Updated" });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when in discussion_comment context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "discussion_comment", payload: { discussion: { number: 3 } } };
+      try {
+        const result = handlers.updateDiscussionHandler({ body: "Updated" });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  describe("closeDiscussionHandler", () => {
+    it("should return intent error on schedule event when no explicit discussion_number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const result = handlers.closeDiscussionHandler({});
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.result).toBe("error");
+        expect(responseData.error).toContain("close_discussion");
+        expect(responseData.error).toContain('"schedule"');
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("should write entry when explicit discussion_number is provided", () => {
+      const result = handlers.closeDiscussionHandler({ discussion_number: 2 });
+      expect(result.isError).toBeUndefined();
+      expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "close_discussion", discussion_number: 2 }));
+    });
+
+    it("should write entry when in discussion context with no explicit number", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "discussion", payload: { discussion: { number: 6 } } };
+      try {
+        const result = handlers.closeDiscussionHandler({});
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+  });
+
+  // ============================================================
+  // Tests for target config bypass in createTriggeringContextHandler
+  // ============================================================
+  // When a tool is configured with target != "triggering" (e.g. "*" or a fixed number),
+  // the context check is skipped and the call passes through to defaultHandler.
+
+  describe("target config bypass (non-triggering target skips context check)", () => {
+    it("closePullRequestHandler with target '*' skips context check on schedule; defaultHandler enforces wildcard requirement", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "close-pull-request": { target: "*" },
+        });
+        const result = wildcardHandlers.closePullRequestHandler({});
+        // Context check is bypassed; defaultHandler returns wildcard requirement error, not a context error
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.error).not.toContain('"schedule"');
+        expect(responseData.error).toContain("pull_request_number");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("closePullRequestHandler with target '*' and explicit number writes entry on schedule", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "close-pull-request": { target: "*" },
+        });
+        const result = wildcardHandlers.closePullRequestHandler({ pull_request_number: 42 });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "close_pull_request", pull_request_number: 42 }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("updateDiscussionHandler with target '*' skips context check on schedule; defaultHandler enforces wildcard requirement", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "update-discussion": { target: "*" },
+        });
+        const result = wildcardHandlers.updateDiscussionHandler({ body: "Updated" });
+        // Context check is bypassed; defaultHandler returns wildcard requirement error, not a context error
+        expect(result.isError).toBe(true);
+        const responseData = JSON.parse(result.content[0].text);
+        expect(responseData.error).not.toContain('"schedule"');
+        expect(responseData.error).toContain("discussion_number");
+        expect(mockAppendSafeOutput).not.toHaveBeenCalled();
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("closeIssueHandler with fixed number target skips context check and writes entry on schedule", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        // target: "42" means the downstream will resolve using the configured number
+        const fixedHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "close-issue": { target: "42" },
+        });
+        const result = fixedHandlers.closeIssueHandler({});
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "close_issue" }));
+      } finally {
+        global.context = savedContext;
+      }
+    });
+
+    it("replyToPullRequestReviewCommentHandler with target '*' and explicit number writes entry on schedule", () => {
+      const savedContext = global.context;
+      global.context = { ...global.context, eventName: "schedule", payload: {} };
+      try {
+        const wildcardHandlers = createHandlers(mockServer, mockAppendSafeOutput, {
+          "reply-to-pull-request-review-comment": { target: "*" },
+        });
+        const result = wildcardHandlers.replyToPullRequestReviewCommentHandler({ pull_request_number: 5, comment_id: 1, body: "Reply" });
+        expect(result.isError).toBeUndefined();
+        expect(mockAppendSafeOutput).toHaveBeenCalledWith(expect.objectContaining({ type: "reply_to_pull_request_review_comment", pull_request_number: 5 }));
       } finally {
         global.context = savedContext;
       }

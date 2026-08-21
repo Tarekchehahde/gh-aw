@@ -3,6 +3,9 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/github/gh-aw/pkg/sliceutil"
 	"github.com/github/gh-aw/pkg/stringutil"
@@ -88,7 +91,7 @@ func generateDynamicTools(data *WorkflowData, markdownPath string) ([]map[string
 			fileResult, err := findWorkflowFile(workflowName, markdownPath)
 			if err != nil {
 				safeOutputsConfigLog.Printf("Warning: error finding workflow %s: %v", workflowName, err)
-				dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, make(map[string]any)))
+				dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, make(map[string]any), data.SafeOutputs.DispatchWorkflow.AllowedRefs))
 				continue
 			}
 
@@ -100,14 +103,14 @@ func generateDynamicTools(data *WorkflowData, markdownPath string) ([]map[string
 				extension = ".lock.yml"
 			} else if fileResult.ymlExists {
 				workflowPath = fileResult.ymlPath
-				extension = ".yml"
+				extension = filepath.Ext(fileResult.ymlPath)
 			} else if fileResult.mdExists {
 				workflowPath = fileResult.mdPath
 				extension = ".lock.yml"
 				useMD = true
 			} else {
 				safeOutputsConfigLog.Printf("Warning: no workflow file found for %s (checked .lock.yml, .yml, .md)", workflowName)
-				dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, make(map[string]any)))
+				dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, make(map[string]any), data.SafeOutputs.DispatchWorkflow.AllowedRefs))
 				continue
 			}
 
@@ -125,7 +128,7 @@ func generateDynamicTools(data *WorkflowData, markdownPath string) ([]map[string
 				workflowInputs = make(map[string]any)
 			}
 
-			dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, workflowInputs))
+			dynamicTools = append(dynamicTools, generateDispatchWorkflowTool(workflowName, workflowInputs, data.SafeOutputs.DispatchWorkflow.AllowedRefs))
 		}
 	}
 
@@ -166,7 +169,7 @@ func generateDynamicTools(data *WorkflowData, markdownPath string) ([]map[string
 				extension = ".lock.yml"
 			} else if fileResult.ymlExists {
 				workflowPath = fileResult.ymlPath
-				extension = ".yml"
+				extension = filepath.Ext(fileResult.ymlPath)
 			} else if fileResult.mdExists {
 				workflowPath = fileResult.mdPath
 				extension = ".lock.yml"
@@ -222,6 +225,12 @@ type ToolsMeta struct {
 	// inputSchema.required array. Used when a field that is optional in the static
 	// safe_outputs_tools.json should be required for this specific workflow.
 	RequiredFieldAdditions map[string][]string `json:"required_field_additions,omitempty"`
+	// PropertyInjections maps tool name → property name → full JSON Schema property definition.
+	// Used when a property should be injected into a tool's inputSchema at runtime based on
+	// workflow configuration (e.g., a state_reason enum restricted to configured values).
+	// If the property already exists in the static schema its definition is replaced;
+	// otherwise it is added as a new optional property.
+	PropertyInjections map[string]map[string]any `json:"property_injections,omitempty"`
 }
 
 // computeRequiredFieldRemovals returns a map of tool name → required fields to remove
@@ -254,7 +263,121 @@ func computeRequiredFieldAdditions(safeOutputs *SafeOutputsConfig) map[string][]
 	if safeOutputs.CreatePullRequests != nil && safeOutputs.CreatePullRequests.RequireTemporaryID {
 		additions["create_pull_request"] = []string{"temporary_id"}
 	}
+	issueIntentRequiredFields := []string{"rationale", "confidence"}
+	if safeOutputs.SetIssueType != nil && issueIntentRequired(safeOutputs.SetIssueType.IssueIntent) {
+		additions["set_issue_type"] = issueIntentRequiredFields
+	}
+	if safeOutputs.SetIssueField != nil && issueIntentRequired(safeOutputs.SetIssueField.IssueIntent) {
+		additions["set_issue_field"] = issueIntentRequiredFields
+	}
+	if safeOutputs.CloseIssues != nil && issueIntentRequired(safeOutputs.CloseIssues.IssueIntent) {
+		additions["close_issue"] = issueIntentRequiredFields
+	}
+	if safeOutputs.AssignToUser != nil && issueIntentRequired(safeOutputs.AssignToUser.IssueIntent) {
+		additions["assign_to_user"] = issueIntentRequiredFields
+	}
+	if safeOutputs.AssignToAgent != nil && issueIntentRequired(safeOutputs.AssignToAgent.IssueIntent) {
+		additions["assign_to_agent"] = issueIntentRequiredFields
+	}
+	if safeOutputs.SubmitPullRequestReview != nil && len(safeOutputs.SubmitPullRequestReview.AllowedEvents) > 0 {
+		if !slices.Contains(safeOutputs.SubmitPullRequestReview.AllowedEvents, "COMMENT") {
+			additions["submit_pull_request_review"] = []string{"event"}
+		}
+	}
 	return additions
+}
+
+func issueIntentRequired(issueIntent *bool) bool {
+	return issueIntent != nil && *issueIntent
+}
+
+// closeIssueStateReasonValues is the full set of supported state reasons for close_issue.
+var closeIssueStateReasonValues = []string{"completed", "not_planned", "duplicate"}
+
+// computePropertyInjections returns a map of tool name → property name → property schema
+// for properties that must be injected into the tool schema based on workflow configuration.
+//
+// Currently handles close_issue state_reason:
+//   - Omitted config (no state-reason): inject state_reason with all three supported values.
+//   - List config (state-reason: [...]): inject state_reason with the configured subset.
+//   - Scalar config (state-reason: "..."): no injection (fixed reason, agent cannot choose).
+func computePropertyInjections(safeOutputs *SafeOutputsConfig) map[string]map[string]any {
+	injections := make(map[string]map[string]any)
+	if safeOutputs == nil {
+		return injections
+	}
+	if safeOutputs.CloseIssues != nil {
+		c := safeOutputs.CloseIssues
+		// Scalar config: agent cannot change state_reason; do not expose the field.
+		if c.StateReason == "" {
+			// List or omitted: expose state_reason with the permitted enum.
+			enumValues := c.AllowedStateReason
+			if len(enumValues) == 0 {
+				enumValues = closeIssueStateReasonValues
+			} else {
+				// Validate each configured value against the supported API values so that
+				// invalid strings (e.g. "done", "wontfix") are caught at compile time rather
+				// than producing a GitHub API 422 at runtime.
+				supported := make(map[string]struct{}, len(closeIssueStateReasonValues))
+				for _, v := range closeIssueStateReasonValues {
+					supported[v] = struct{}{}
+				}
+				valid := make([]string, 0, len(enumValues))
+				for _, v := range enumValues {
+					if _, ok := supported[v]; ok {
+						valid = append(valid, v)
+					} else {
+						safeOutputsConfigLog.Printf("Warning: allowed-state-reason value %q is not a supported GitHub API value; valid values: %v", v, closeIssueStateReasonValues)
+					}
+				}
+				if len(valid) == 0 {
+					// All values were invalid; fall back to the full set so that compilation
+					// succeeds, relying on schema validation to have already warned the author.
+					safeOutputsConfigLog.Printf("Warning: all allowed-state-reason values were invalid; falling back to full supported set")
+					valid = closeIssueStateReasonValues
+				}
+				enumValues = valid
+			}
+			injections["close_issue"] = map[string]any{
+				"state_reason": map[string]any{
+					"type":        "string",
+					"enum":        enumValues,
+					"description": "Optional closing state reason. Omit to use the configured default. Select 'duplicate' together with 'duplicate_of' to mark a native duplicate relationship.",
+				},
+			}
+		}
+	}
+
+	// submit_pull_request_review event: when allowed-events restricts the set of review
+	// decisions, narrow the tool schema's event enum to match so the agent cannot select
+	// an event that runtime policy will reject. This retains runtime enforcement as
+	// defense in depth while preventing the doomed call in the first place.
+	if safeOutputs.SubmitPullRequestReview != nil && len(safeOutputs.SubmitPullRequestReview.AllowedEvents) > 0 {
+		allowedEvents := safeOutputs.SubmitPullRequestReview.AllowedEvents
+		injections["submit_pull_request_review"] = map[string]any{
+			"event": map[string]any{
+				"type":        "string",
+				"enum":        allowedEvents,
+				"description": "Review decision. Restricted by allowed-events configuration to: " + strings.Join(allowedEvents, ", ") + ".",
+				"x-synonyms":  []string{"action"},
+			},
+		}
+	}
+
+	if safeOutputs.DataEnabled {
+		dataProperty := map[string]any{"$ref": "#/0/inputSchema/$defs/structured_data"}
+		if safeOutputs.NormalizedDataSchema != nil {
+			dataProperty = safeOutputs.NormalizedDataSchema
+		}
+		for _, typeName := range dataSchemaBodyTypes {
+			if injections[typeName] == nil {
+				injections[typeName] = make(map[string]any)
+			}
+			injections[typeName]["data"] = dataProperty
+		}
+	}
+
+	return injections
 }
 
 // generateToolsMetaJSON generates the content for tools_meta.json: a compact file
@@ -274,7 +397,7 @@ func generateToolsMetaJSON(data *WorkflowData, markdownPath string) (string, err
 		}
 		result, err := json.Marshal(empty)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal empty tools meta: %w", err)
+			return "", fmt.Errorf("unable to marshal empty tools meta to JSON; expected the empty ToolsMeta struct (with empty maps/slices) to be serializable: %w", err)
 		}
 		return string(result), nil
 	}
@@ -316,18 +439,22 @@ func generateToolsMetaJSON(data *WorkflowData, markdownPath string) (string, err
 	requiredFieldRemovals := computeRequiredFieldRemovals(data.SafeOutputs)
 	requiredFieldAdditions := computeRequiredFieldAdditions(data.SafeOutputs)
 
+	// Compute property injections (e.g. state_reason enum for close_issue).
+	propertyInjections := computePropertyInjections(data.SafeOutputs)
+
 	meta := ToolsMeta{
 		DescriptionSuffixes:    descriptionSuffixes,
 		RepoParams:             repoParams,
 		DynamicTools:           dynamicTools,
 		RequiredFieldRemovals:  requiredFieldRemovals,
 		RequiredFieldAdditions: requiredFieldAdditions,
+		PropertyInjections:     propertyInjections,
 	}
 
 	result, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		safeOutputsConfigLog.Printf("Failed to marshal tools meta: %v", err)
-		return "", fmt.Errorf("failed to marshal tools meta: %w", err)
+		safeOutputsConfigLog.Printf("Error marshaling tools meta: %v", err)
+		return "", fmt.Errorf("unable to marshal tools meta to JSON; expected all computed fields (description suffixes, repo params, dynamic tools) to be serializable: %w", err)
 	}
 
 	safeOutputsConfigLog.Printf("Successfully generated tools meta JSON: %d description suffixes, %d repo params, %d dynamic tools",

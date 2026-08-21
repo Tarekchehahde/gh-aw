@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { getErrorMessage } = require("./error_helpers.cjs");
 
 const COMMENT_MEMORY_TAG = "gh-aw-comment-memory";
 const COMMENT_MEMORY_DIR = "/tmp/gh-aw/comment-memory";
@@ -9,6 +10,8 @@ const COMMENT_MEMORY_EXTENSION = ".md";
 const MAX_MEMORY_ID_LENGTH = 128;
 const COMMENT_MEMORY_MAX_SCAN_PAGES = 50;
 const COMMENT_MEMORY_MAX_SCAN_EMPTY_PAGES = 5;
+const COMMENT_MEMORY_MAX_FILE_BYTES = 16 * 1024;
+const COMMENT_MEMORY_MAX_TOTAL_BYTES = 48 * 1024;
 const COMMENT_MEMORY_PROMPT_START_MARKER = "<!-- gh-aw-comment-memory-prompt:start -->";
 const COMMENT_MEMORY_PROMPT_END_MARKER = "<!-- gh-aw-comment-memory-prompt:end -->";
 const COMMENT_MEMORY_CODE_FENCE = "``````";
@@ -118,15 +121,19 @@ function listCommentMemoryFiles(memoryDir = COMMENT_MEMORY_DIR) {
     return [];
   }
 
-  return fs
-    .readdirSync(memoryDir)
-    .filter(file => file.endsWith(COMMENT_MEMORY_EXTENSION))
-    .sort()
-    .map(file => ({
-      memoryId: file.slice(0, -COMMENT_MEMORY_EXTENSION.length),
-      filePath: path.join(memoryDir, file),
-    }))
-    .filter(entry => isSafeMemoryId(entry.memoryId));
+  try {
+    return fs
+      .readdirSync(memoryDir)
+      .filter(file => file.endsWith(COMMENT_MEMORY_EXTENSION))
+      .sort()
+      .map(file => ({
+        memoryId: file.slice(0, -COMMENT_MEMORY_EXTENSION.length),
+        filePath: path.join(memoryDir, file),
+      }))
+      .filter(entry => isSafeMemoryId(entry.memoryId));
+  } catch (err) {
+    throw new Error(`Failed to read comment-memory directory ${memoryDir}: ${getErrorMessage(err)}`, { cause: err });
+  }
 }
 
 function resolveCommentMemoryConfig(config) {
@@ -142,6 +149,8 @@ module.exports = {
   COMMENT_MEMORY_EXTENSION,
   COMMENT_MEMORY_MAX_SCAN_PAGES,
   COMMENT_MEMORY_MAX_SCAN_EMPTY_PAGES,
+  COMMENT_MEMORY_MAX_FILE_BYTES,
+  COMMENT_MEMORY_MAX_TOTAL_BYTES,
   COMMENT_MEMORY_PROMPT_START_MARKER,
   COMMENT_MEMORY_PROMPT_END_MARKER,
   COMMENT_MEMORY_CODE_FENCE,

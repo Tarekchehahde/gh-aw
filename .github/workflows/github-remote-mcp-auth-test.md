@@ -10,13 +10,10 @@ permissions:
   issues: read
   discussions: read
 
-sandbox:
-  agent:
-    sudo: false
 
+model: gpt-4.1
 engine:
   id: copilot
-  model: gpt-4.1
 tools:
   cli-proxy: true
   github:
@@ -35,7 +32,11 @@ imports:
   - shared/otlp.md
 features:
   gh-aw-detection: true
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
+
 # GitHub Remote MCP Authentication Test
 
 You are an automated testing agent that verifies GitHub remote MCP server authentication with the GitHub Actions token.

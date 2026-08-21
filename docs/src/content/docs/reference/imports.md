@@ -84,7 +84,9 @@ Paths are resolved within the `.github` folder. You can specify paths with or wi
 
 ## Shared Workflow Components
 
-Files without an `on` field are shared workflow components: they are validated, can be imported by other workflows, and are not compiled into standalone GitHub Actions. Shared components may also define import-safe `on` keys (`skip-if-match`, `skip-if-no-match`, `skip-roles`, `skip-bots`, `github-token`, `github-app`) for reuse through imports.
+Files without a trigger event are shared workflow components: they are validated, can be imported by other workflows, and are not compiled into standalone GitHub Actions. Shared components may also define import-safe `on` keys (`skip-if-match`, `skip-if-no-match`, `skip-roles`, `skip-bots`, `github-token`, `github-app`) and the top-level `ambient-folders` field for reuse through imports.
+
+A shared workflow's frontmatter can contain comments only. Comment-only frontmatter is treated as present, so the file still parses as a shared component and produces an empty frontmatter map rather than failing with `no frontmatter found`. Only truly missing or whitespace-only frontmatter is rejected.
 
 When you regularly import the same pair together, bundle them into one shared file:
 
@@ -297,6 +299,7 @@ Shared workflow files (without `on:` field) can define the fields below. Other f
 | `network` | Network permission specifications |
 | `permissions` | GitHub Actions permissions (validated, not merged) |
 | `runtimes` | Runtime version overrides (node, python, go, etc.) |
+| `plugins` | Agent Plugin references |
 | `secret-masking` | Secret masking steps |
 | `env` | Workflow-level environment variables |
 | `pre-agent-steps` | Steps that run after artifacts download, before engine execution |
@@ -317,6 +320,7 @@ Imports are processed using breadth-first traversal: direct imports first, then 
 | `permissions:` | Validation only — not merged. Main must declare all imported permissions at sufficient levels (`write` ≥ `read` ≥ `none`). |
 | `safe-outputs:` | Each type defined once; main overrides imports. Duplicate types across imports fail. |
 | `runtimes:` | Main overrides imports; imported values fill in unspecified fields. |
+| `plugins:` | Union by plugin path. Identical refs are deduplicated; compatible semantic versions select the highest version. Incompatible major versions or conflicting non-semver refs fail. |
 | `services:` | All services merged; duplicate names fail compilation. |
 | `github-app:` | Main workflow's `github-app` takes precedence; first imported value fills in if main does not define one. |
 | `checkout:` | Imported checkout entries are appended after the main workflow's entries. For duplicate (repository, path) pairs, the main workflow's entry takes precedence: first-seen wins for `ref`, and auth is mutually exclusive — once `github-token` or `github-app` is set by the main workflow, an imported duplicate cannot add the other auth method. `checkout: false` in the main workflow disables all checkout including imported entries. |
@@ -394,6 +398,29 @@ network:
 ```
 
 Consumers import it with `imports: [shared/mcp/tavily.md]`.
+
+For Azure-based integrations, combine `shared/azure-auth.md` with Azure MCP
+imports to preserve OIDC-backed Azure CLI auth inside the agent sandbox.
+Azure DevOps MCP support (`shared/mcp/azure-devops.md`) is still experimental:
+
+```aw wrap
+---
+imports:
+  - uses: shared/azure-auth.md
+    with:
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+  - uses: shared/mcp/azure-devops.md
+    with:
+      organization: YOUR_ORG
+---
+```
+
+`shared/azure-auth.md` sets `AZURE_CONFIG_DIR` to an agent-accessible path and
+re-authenticates `az` in `pre-agent-steps`, which bridges auth across the
+runner-to-sandbox process boundary. See
+[Using MCPs](/gh-aw/guides/mcps/#azure-shared-imports-oidc-azure-devops-azure-mcp)
+for network domains and read-only Azure MCP tool allowlist guidance.
 
 ### Importing MCP Gateway Settings
 

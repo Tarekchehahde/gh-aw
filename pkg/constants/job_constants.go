@@ -96,6 +96,13 @@ const AgentOutputArtifactName = "agent-output"
 // including safe outputs, agent output, engine logs, and other agent-related files.
 const AgentArtifactName = "agent"
 
+// AgentOutputFallbackArtifactName is the name of a small, dedicated artifact that contains
+// only the processed agent output JSON and the raw safe-output NDJSON. Those files are also
+// part of the large "agent" artifact, but that upload is best-effort (continue-on-error) and
+// occasionally times out against blob storage. When it does, every safe output is silently
+// dropped, so downstream jobs fall back to this tiny artifact instead.
+const AgentOutputFallbackArtifactName = "agent-output-fallback"
+
 // DetectionArtifactName is the artifact name for the threat detection log.
 const DetectionArtifactName = "detection"
 
@@ -104,6 +111,9 @@ const EvalsArtifactName = "evals"
 
 // EvalsResultFilename is the filename of the evaluation results JSONL file.
 const EvalsResultFilename = "evals.jsonl"
+
+// EvalsBranchPrefix is the branch prefix used for durable eval result storage.
+const EvalsBranchPrefix = "evals"
 
 // LegacyDetectionArtifactName is the old artifact name used before the rename.
 // Kept for backward compatibility when downloading artifacts from older workflow runs.
@@ -146,6 +156,19 @@ const ArtifactPrefixOutputName = "artifact_prefix"
 // (aw_info.json and prompt.txt).
 const ActivationArtifactName = "activation"
 
+// ActivationStageAmbientFoldersStepName is the step name used to stage ambient
+// folders before the activation artifact is packaged. It is a stable anchor
+// used to determine the insertion point for jobs.activation.steps injected
+// via built-in job step merging; keep it in sync with any renames of that
+// step.
+const ActivationStageAmbientFoldersStepName = "Stage ambient folders for activation artifact"
+
+// ActivationUploadArtifactStepName is the step name used to upload the
+// activation artifact. It is a stable anchor used to determine the insertion
+// point for jobs.activation.steps injected via built-in job step merging;
+// keep it in sync with any renames of that step.
+const ActivationUploadArtifactStepName = "Upload activation artifact"
+
 // ExperimentArtifactName is the artifact name for A/B experiment state
 // uploaded by the activation job when experiments are declared in the frontmatter.
 const ExperimentArtifactName = "experiment"
@@ -182,6 +205,12 @@ const SarifArtifactDownloadPath = "/tmp/gh-aw/sarif/"
 const SarifFileName = "code-scanning-alert.sarif"
 
 // MCP server ID constants
+
+// GitHubMCPServerID is the identifier for the GitHub MCP server.
+// Using this constant provides a single source of truth for the GitHub MCP server
+// identifier and makes refactoring easier.
+const GitHubMCPServerID MCPServerID = "github"
+
 const SafeOutputsMCPServerID MCPServerID = "safeoutputs"
 
 // MCPScriptsMCPServerID is the identifier for the mcp-scripts MCP server

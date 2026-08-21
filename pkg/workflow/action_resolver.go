@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -183,13 +184,17 @@ func ParseTagRefTSV(line string) (sha, objType string, err error) {
 	}
 	sha = parts[0]
 	objType = parts[1]
-	if len(sha) != 40 || !gitutil.IsHexString(sha) {
+	if !gitutil.IsValidFullSHACaseInsensitive(sha) {
 		return "", "", fmt.Errorf("invalid SHA format: expected 40 hex characters, got %d (%s)", len(sha), sha)
 	}
 	return sha, objType, nil
 }
 
-// resolveFromGitHub uses gh CLI to resolve the SHA for an action@version
+// resolveFromGitHub uses gh CLI to resolve the SHA for an action@version.
+// It first attempts to resolve as a tag via the git/refs/tags endpoint (which
+// also handles annotated-tag peeling). If the tag lookup fails — indicating the
+// ref is a branch name or an arbitrary commit ref — it falls back to the commits
+// endpoint, which accepts branch names, tag names, and SHAs.
 func (r *ActionResolver) resolveFromGitHub(ctx context.Context, repo, version string) (string, error) {
 	// Extract base repository (for actions like "github/codeql-action/upload-sarif")
 	baseRepo := gitutil.ExtractBaseRepo(repo)
@@ -214,7 +219,11 @@ func (r *ActionResolver) resolveFromGitHub(ctx context.Context, repo, version st
 	ForceGHHostEnv(cmd, "github.com")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve %s@%s: %w", repo, version, err)
+		// Tag lookup failed. The ref may be a branch name rather than a tag.
+		// Fall back to the commits endpoint, which resolves both branch and tag
+		// names as well as SHAs, so that authors can pin to branches (e.g. "main").
+		resolverLog.Printf("Tag lookup for %s@%s failed (%v); falling back to commits endpoint", repo, version, err)
+		return r.resolveRefViaCommitsEndpoint(ctx, baseRepo, repo, version)
 	}
 
 	sha, objType, err := ParseTagRefTSV(string(output))
@@ -243,6 +252,60 @@ func (r *ActionResolver) resolveFromGitHub(ctx context.Context, repo, version st
 	}
 	resolverLog.Printf("Resolved %s@%s to %s SHA: %s", repo, version, objType, sha)
 
+	return sha, nil
+}
+
+// resolveRefViaCommitsEndpoint resolves a branch name, tag name, or arbitrary ref
+// to its commit SHA using the GitHub API commits endpoint
+// (GET /repos/{owner}/{repo}/commits/{ref}), which accepts all ref types.
+// This is the fallback used when the tags-specific endpoint returns an error.
+func (r *ActionResolver) resolveRefViaCommitsEndpoint(ctx context.Context, baseRepo, repo, version string) (string, error) {
+	sha, err := resolveCommitRefSHA(ctx, baseRepo, version)
+	if err != nil {
+		var badSHA *notFullCommitSHAError
+		if errors.As(err, &badSHA) {
+			return "", fmt.Errorf("unexpected response resolving %s@%s: got %q (expected 40-char hex SHA)", repo, version, badSHA.response)
+		}
+		return "", fmt.Errorf("failed to resolve %s@%s: %w", repo, version, err)
+	}
+	resolverLog.Printf("Resolved %s@%s to commit SHA %s via commits endpoint", repo, version, sha)
+	return sha, nil
+}
+
+// notFullCommitSHAError is returned by resolveCommitRefSHA when the GitHub API
+// responded successfully but the payload was not a full 40-character commit SHA.
+// It carries the raw response so callers can emit context-specific diagnostics.
+type notFullCommitSHAError struct {
+	response string
+}
+
+func (e *notFullCommitSHAError) Error() string {
+	return fmt.Sprintf("got %q (expected 40-char hex SHA)", e.response)
+}
+
+// resolveCommitRefSHA resolves a branch name, tag name, or SHA in repoSlug
+// (formatted as "owner/repo") to its full 40-character commit SHA using the
+// GitHub API commits endpoint (GET /repos/{owner}/{repo}/commits/{ref}), which
+// accepts all ref types. It centralizes timeout handling, gh invocation, host
+// forcing, and SHA validation for all commit-ref resolution call sites.
+//
+// When the response is not a full SHA the returned error is a
+// *notFullCommitSHAError carrying the raw response.
+func resolveCommitRefSHA(ctx context.Context, repoSlug, ref string) (string, error) {
+	commitsPath := fmt.Sprintf("/repos/%s/commits/%s", repoSlug, ref)
+	resolverLog.Printf("Querying commits endpoint: %s", commitsPath)
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := ExecGHContext(callCtx, "api", commitsPath, "--jq", ".sha")
+	ForceGHHostEnv(cmd, "github.com")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", enrichGHError(err)
+	}
+	sha := strings.TrimSpace(string(output))
+	if !gitutil.IsValidFullSHA(sha) {
+		return "", &notFullCommitSHAError{response: sha}
+	}
 	return sha, nil
 }
 
@@ -280,21 +343,13 @@ func ResolveGhAwRef(ctx context.Context, ref string) (string, error) {
 		return ref, nil
 	}
 	resolverLog.Printf("Resolving --gh-aw-ref %q to commit SHA via GitHub API", ref)
-	apiPath := "/repos/github/gh-aw/commits/" + ref
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := ExecGHContext(callCtx, "api", apiPath, "--jq", ".sha")
-	output, err := cmd.CombinedOutput()
+	sha, err := resolveCommitRefSHA(ctx, "github/gh-aw", ref)
 	if err != nil {
-		msg := strings.TrimSpace(string(output))
-		if msg != "" {
-			return "", fmt.Errorf("failed to resolve gh-aw ref %q to SHA: %s: %w", ref, msg, err)
+		var badSHA *notFullCommitSHAError
+		if errors.As(err, &badSHA) {
+			return "", fmt.Errorf("unexpected response resolving gh-aw ref %q: got %q (expected 40-char hex SHA)", ref, badSHA.response)
 		}
 		return "", fmt.Errorf("failed to resolve gh-aw ref %q to SHA: %w", ref, err)
-	}
-	sha := strings.TrimSpace(string(output))
-	if !gitutil.IsValidFullSHA(sha) {
-		return "", fmt.Errorf("unexpected response resolving gh-aw ref %q: got %q (expected 40-char hex SHA)", ref, sha)
 	}
 	resolverLog.Printf("Resolved --gh-aw-ref %q to commit SHA %s", ref, sha)
 	return sha, nil

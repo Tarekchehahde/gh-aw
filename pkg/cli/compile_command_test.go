@@ -509,6 +509,9 @@ func TestCompileConfig_DefaultValues(t *testing.T) {
 	if config.Actionlint {
 		t.Error("Expected Actionlint to default to false")
 	}
+	if config.Shellcheck {
+		t.Error("Expected Shellcheck to default to false (shellcheck is disabled by default)")
+	}
 }
 
 // TestCompilationStats_DefaultValues tests default stats values
@@ -590,14 +593,14 @@ func TestValidationResult(t *testing.T) {
 	result := ValidationResult{
 		Workflow: "test-workflow.md",
 		Valid:    false,
-		Errors: []CompileValidationError{
+		Errors: []ValidationIssue{
 			{
 				Type:    "schema_validation",
 				Message: "Unknown property: toolz",
 				Line:    5,
 			},
 		},
-		Warnings:     []CompileValidationError{},
+		Warnings:     []ValidationIssue{},
 		CompiledFile: ".github/workflows/test-workflow.lock.yml",
 	}
 

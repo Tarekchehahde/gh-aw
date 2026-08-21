@@ -120,25 +120,34 @@ func TestActionResolverFailedResolutionCache(t *testing.T) {
 // layers. It covers the three reachable code paths: precise-version match,
 // range (major/minor) match, and no match.
 func TestLookupEmbeddedActionPin(t *testing.T) {
+	latestCheckoutPin, ok := getLatestActionPinByRepo("actions/checkout")
+	if !ok || latestCheckoutPin.Version == "" {
+		t.Fatal("expected latest embedded pin for actions/checkout")
+	}
+
+	major := strings.Split(strings.TrimPrefix(latestCheckoutPin.Version, "v"), ".")[0]
+	if major == "" {
+		t.Fatalf("failed to derive major version from %q", latestCheckoutPin.Version)
+	}
+	checkoutMajorTag := "v" + major
+
 	t.Run("precise version returns SHA", func(t *testing.T) {
-		// actions/checkout@v7.0.0 is in the embedded pin set.
-		sha, found := lookupEmbeddedActionPin("actions/checkout", "v7.0.0")
+		sha, found := lookupEmbeddedActionPin("actions/checkout", latestCheckoutPin.Version)
 		if !found {
-			t.Fatal("expected embedded pin hit for actions/checkout@v7.0.0, got not-found")
+			t.Fatalf("expected embedded pin hit for actions/checkout@%s, got not-found", latestCheckoutPin.Version)
 		}
 		if sha == "" {
-			t.Error("expected non-empty SHA for actions/checkout@v7.0.0")
+			t.Fatalf("expected non-empty SHA for actions/checkout@%s", latestCheckoutPin.Version)
 		}
 	})
 
 	t.Run("semver range returns SHA for compatible pin", func(t *testing.T) {
-		// v7 is compatible with the pinned v7.0.0.
-		sha, found := lookupEmbeddedActionPin("actions/checkout", "v7")
+		sha, found := lookupEmbeddedActionPin("actions/checkout", checkoutMajorTag)
 		if !found {
-			t.Fatal("expected embedded pin hit for actions/checkout@v7 (compatible with v7.0.0), got not-found")
+			t.Fatalf("expected embedded pin hit for actions/checkout@%s, got not-found", checkoutMajorTag)
 		}
 		if sha == "" {
-			t.Error("expected non-empty SHA for actions/checkout@v7")
+			t.Fatalf("expected non-empty SHA for actions/checkout@%s", checkoutMajorTag)
 		}
 	})
 
@@ -193,6 +202,12 @@ func TestParseTagRefTSV(t *testing.T) {
 			name:     "input without trailing newline",
 			input:    commitSHA + "\tcommit",
 			wantSHA:  commitSHA,
+			wantType: "commit",
+		},
+		{
+			name:     "uppercase SHA is accepted",
+			input:    "EA222E359276C0702A5F5203547FF9D88D0DDD76\tcommit",
+			wantSHA:  "EA222E359276C0702A5F5203547FF9D88D0DDD76",
 			wantType: "commit",
 		},
 		{

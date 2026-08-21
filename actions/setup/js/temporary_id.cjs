@@ -394,7 +394,7 @@ function resolveIssueNumber(value, temporaryIdMap) {
 
   // It's a real issue number - use context repo as default
   const issueNumber = typeof value === "number" ? value : parseInt(withoutHash, 10);
-  if (isNaN(issueNumber) || issueNumber <= 0) {
+  if (Number.isNaN(issueNumber) || issueNumber <= 0) {
     return { resolved: null, wasTemporaryId: false, errorMessage: `Invalid issue number: ${value}. Expected either a valid temporary ID (format: aw_ followed by 3-12 alphanumeric or underscore characters) or a numeric issue number.` };
   }
 
@@ -628,6 +628,7 @@ function replaceTemporaryProjectReferences(text, tempProjectMap) {
  * Checks fields that commonly contain temporary IDs:
  * - body (for create_issue, create_discussion, add_comment)
  * - parent_issue_number, sub_issue_number (for link_sub_issue)
+ * - blocked_by (for create_issue dependencies)
  * - issue_number (for add_comment, update_issue, etc.)
  * - discussion_number (for create_discussion, update_discussion)
  *
@@ -662,6 +663,13 @@ function extractTemporaryIdReferences(message) {
       if (isTemporaryId(valueStr)) {
         tempIds.add(normalizeTemporaryId(valueStr));
       }
+    }
+  }
+
+  const blockedBy = message.blocked_by;
+  for (const value of Array.isArray(blockedBy) ? blockedBy : [blockedBy]) {
+    if (value !== undefined && value !== null && isTemporaryId(String(value).trim())) {
+      tempIds.add(normalizeTemporaryId(String(value).trim()));
     }
   }
 

@@ -33,7 +33,7 @@ func TestSpec_PublicAPI_ValidateWorkflowName(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err, "ValidateWorkflowName(%q) should return an error", tt.input)
 			} else {
-				assert.NoError(t, err, "ValidateWorkflowName(%q) should not return an error", tt.input)
+				require.NoError(t, err, "ValidateWorkflowName(%q) should not return an error", tt.input)
 			}
 		})
 	}
@@ -131,7 +131,7 @@ func TestSpec_PublicAPI_ValidArtifactSetNames(t *testing.T) {
 func TestSpec_PublicAPI_ValidateArtifactSets(t *testing.T) {
 	t.Run("known artifact set returns no error", func(t *testing.T) {
 		err := cli.ValidateArtifactSets([]string{"all"})
-		assert.NoError(t, err, "ValidateArtifactSets should not error for known set \"all\"")
+		require.NoError(t, err, "ValidateArtifactSets should not error for known set \"all\"")
 	})
 
 	t.Run("unknown artifact set returns error", func(t *testing.T) {
@@ -141,7 +141,7 @@ func TestSpec_PublicAPI_ValidateArtifactSets(t *testing.T) {
 
 	t.Run("empty list returns no error", func(t *testing.T) {
 		err := cli.ValidateArtifactSets([]string{})
-		assert.NoError(t, err, "ValidateArtifactSets should not error for empty list")
+		require.NoError(t, err, "ValidateArtifactSets should not error for empty list")
 	})
 }
 
@@ -344,7 +344,7 @@ func TestSpec_PublicAPI_ValidateWorkflowIntent(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err, "ValidateWorkflowIntent(%q) should return error", tt.input)
 			} else {
-				assert.NoError(t, err, "ValidateWorkflowIntent(%q) should not return error", tt.input)
+				require.NoError(t, err, "ValidateWorkflowIntent(%q) should not return error", tt.input)
 			}
 		})
 	}
@@ -512,7 +512,6 @@ func TestSpec_PublicAPI_CalculateWorkflowHealth(t *testing.T) {
 
 // TestSpec_PublicAPI_IsDockerAvailable validates that IsDockerAvailable returns a bool without panicking.
 // Spec: "Returns true if the Docker daemon is reachable"
-// SPEC_MISMATCH: README shows func() bool but implementation signature is func(context.Context) bool.
 func TestSpec_PublicAPI_IsDockerAvailable(t *testing.T) {
 	result := cli.IsDockerAvailable(context.Background())
 	_ = result // environment-dependent; spec contract: returns bool without panic
@@ -521,7 +520,6 @@ func TestSpec_PublicAPI_IsDockerAvailable(t *testing.T) {
 // TestSpec_PublicAPI_IsDockerImageAvailable validates that IsDockerImageAvailable returns false
 // for an image that cannot be present locally.
 // Spec: "Returns true if a Docker image is present locally"
-// SPEC_MISMATCH: README shows func(string) bool but implementation signature is func(context.Context, string) bool.
 func TestSpec_PublicAPI_IsDockerImageAvailable(t *testing.T) {
 	result := cli.IsDockerImageAvailable(context.Background(), "this-image-does-not-exist-xyzzy:never")
 	assert.False(t, result, "non-existent image should not be available locally")

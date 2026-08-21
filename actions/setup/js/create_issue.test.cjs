@@ -46,7 +46,8 @@ describe("create_issue", () => {
             data: {
               resources: {
                 search: {
-                  remaining: 1000,
+                  limit: 30,
+                  remaining: 30,
                 },
               },
             },
@@ -54,6 +55,7 @@ describe("create_issue", () => {
         },
       },
       graphql: vi.fn(),
+      request: vi.fn().mockResolvedValue({ data: {} }),
     };
 
     // Mock Core
@@ -134,6 +136,20 @@ describe("create_issue", () => {
       expect(mockGithub.rest.issues.create).toHaveBeenCalledWith(
         expect.objectContaining({
           title: "This is the body",
+        })
+      );
+    });
+
+    it("should use the first meaningful body line as title when title is missing", async () => {
+      const handler = await main({});
+      const body = "\n\n## Incident Summary\n\nFull details line 1\nFull details line 2";
+      const result = await handler({ body });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.issues.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Incident Summary",
+          body: expect.stringContaining("Full details line 1\nFull details line 2"),
         })
       );
     });
@@ -666,7 +682,8 @@ describe("create_issue", () => {
         data: {
           resources: {
             search: {
-              remaining: 1,
+              limit: 35,
+              remaining: 6,
             },
           },
         },
@@ -685,6 +702,71 @@ describe("create_issue", () => {
       expect(mockGithub.rest.rateLimit.get).toHaveBeenCalledTimes(1);
       expect(mockGithub.rest.search.issuesAndPullRequests).not.toHaveBeenCalled();
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Skipping repo-level title dedup search"));
+    });
+
+    it("should skip repo-level search when search rate limit is exactly at 20 percent threshold", async () => {
+      mockGithub.rest.rateLimit.get.mockResolvedValue({
+        data: {
+          resources: {
+            search: {
+              limit: 30,
+              remaining: 6,
+            },
+          },
+        },
+      });
+
+      const handler = await main({
+        deduplicate_by_title: true,
+      });
+      const result = await handler({ title: "At threshold title" });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.search.issuesAndPullRequests).not.toHaveBeenCalled();
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("Skipping repo-level title dedup search"));
+    });
+
+    it("should not skip repo-level search when search rate limit is just above 20 percent threshold", async () => {
+      mockGithub.rest.rateLimit.get.mockResolvedValue({
+        data: {
+          resources: {
+            search: {
+              limit: 30,
+              remaining: 7,
+            },
+          },
+        },
+      });
+
+      const handler = await main({
+        deduplicate_by_title: true,
+      });
+      const result = await handler({ title: "Above threshold title" });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.search.issuesAndPullRequests).toHaveBeenCalled();
+      expect(mockCore.warning).not.toHaveBeenCalledWith(expect.stringContaining("Skipping repo-level title dedup search"));
+    });
+
+    it("should proceed with repo-level search when search rate limit values are missing", async () => {
+      mockGithub.rest.rateLimit.get.mockResolvedValue({
+        data: {
+          resources: {
+            search: {
+              remaining: 30,
+            },
+          },
+        },
+      });
+
+      const handler = await main({
+        deduplicate_by_title: true,
+      });
+      const result = await handler({ title: "Missing limit title" });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.search.issuesAndPullRequests).toHaveBeenCalled();
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining("remaining=30, limit=undefined"));
     });
 
     it("should reject invalid deduplicate-by-title configuration", async () => {
@@ -1082,6 +1164,99 @@ describe("create_issue", () => {
       expect(result2.grouped).toBe(true);
 
       // Neither call should have created an issue
+      expect(mockGithub.rest.issues.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("blocked-by dependencies", () => {
+    it("should add dependencies for same-repository and cross-repository issue references", async () => {
+      mockGithub.rest.issues.get = vi.fn().mockImplementation(({ owner, repo, issue_number }) => Promise.resolve({ data: { id: issue_number === 42 ? 9001 : 9002, owner, repo } }));
+      const handler = await main({});
+
+      const result = await handler({
+        title: "Blocked issue",
+        body: "Waits for other work.",
+        blocked_by: [42, "other-org/other-repo#7"],
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.issues.get).toHaveBeenCalledWith({
+        owner: "test-owner",
+        repo: "test-repo",
+        issue_number: 42,
+      });
+      expect(mockGithub.rest.issues.get).toHaveBeenCalledWith({
+        owner: "other-org",
+        repo: "other-repo",
+        issue_number: 7,
+      });
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", expect.objectContaining({ owner: "test-owner", repo: "test-repo", issue_number: 123, issue_id: 9001 }));
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", expect.objectContaining({ owner: "test-owner", repo: "test-repo", issue_number: 123, issue_id: 9002 }));
+    });
+
+    it("should resolve temporary IDs before adding dependencies", async () => {
+      mockGithub.rest.issues.get = vi.fn().mockResolvedValue({ data: { id: 9001 } });
+      const handler = await main({});
+
+      await handler({
+        title: "Prerequisite",
+        body: "Must finish first.",
+        temporary_id: "aw_prereq",
+      });
+      const result = await handler({
+        title: "Blocked issue",
+        body: "Waits for the prerequisite.",
+        blocked_by: "#aw_prereq",
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockGithub.rest.issues.get).toHaveBeenCalledWith({
+        owner: "test-owner",
+        repo: "test-repo",
+        issue_number: 123,
+      });
+      expect(mockGithub.request).toHaveBeenCalledWith("POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", expect.objectContaining({ issue_id: 9001 }));
+    });
+
+    it("should defer creation until blocked-by temporary IDs resolve", async () => {
+      const handler = await main({});
+      const result = await handler({
+        title: "Blocked issue",
+        body: "Waits for a later prerequisite.",
+        blocked_by: "aw_prereq",
+      });
+
+      expect(result).toMatchObject({ success: false, deferred: true });
+      expect(mockGithub.rest.issues.create).not.toHaveBeenCalled();
+    });
+
+    it("should keep the issue successful when the dependency API fails", async () => {
+      mockGithub.rest.issues.get = vi.fn().mockResolvedValue({ data: { id: 9001 } });
+      mockGithub.request = vi.fn().mockRejectedValue(new Error("dependency api unavailable"));
+      const handler = await main({});
+
+      const result = await handler({
+        title: "Blocked issue",
+        body: "Waits for other work.",
+        blocked_by: 42,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.number).toBe(123);
+      expect(result.blocked_by_errors).toEqual([expect.stringContaining("dependency api unavailable")]);
+    });
+
+    it("should preview unresolved temporary IDs in staged mode instead of deferring", async () => {
+      const handler = await main({ staged: true });
+
+      const result = await handler({
+        title: "Blocked issue",
+        body: "Waits for a prerequisite created in the same run.",
+        blocked_by: ["aw_prereq", 42],
+      });
+
+      expect(result).toMatchObject({ success: true, staged: true });
+      expect(result.previewInfo.blockedBy).toEqual(["aw_prereq", "test-owner/test-repo#42"]);
       expect(mockGithub.rest.issues.create).not.toHaveBeenCalled();
     });
   });

@@ -90,7 +90,7 @@ func TestFetchLocalWorkflow_NonExistentFile(t *testing.T) {
 
 	require.Error(t, err, "should error for non-existent file")
 	assert.Nil(t, result, "result should be nil on error")
-	assert.Contains(t, err.Error(), "not found", "error should mention file not found")
+	require.ErrorContains(t, err, "not found", "error should mention file not found")
 }
 
 func TestFetchLocalWorkflow_DirectoryInsteadOfFile(t *testing.T) {
@@ -168,9 +168,9 @@ func TestResolveCommitSHAWithRetries_PermanentFailureDoesNotRetry(t *testing.T) 
 	assert.Empty(t, sha, "No SHA should be returned when resolution fails")
 	assert.Equal(t, 1, resolveAttempts, "Permanent failures should not retry")
 	assert.Equal(t, 0, sleepCalls, "No backoff sleep should happen for permanent failures")
-	assert.Contains(t, err.Error(), "Expected the GitHub API to return a commit SHA for the ref",
+	require.ErrorContains(t, err, "Expected the GitHub API to return a commit SHA for the ref",
 		"Error should explain expected behavior")
-	assert.Contains(t, err.Error(), "@<40-char-sha>", "Error should include retry command with full SHA placeholder")
+	require.ErrorContains(t, err, "@<40-char-sha>", "Error should include retry command with full SHA placeholder")
 }
 
 func TestResolveCommitSHAWithRetries_TransientFailureExhaustsRetries(t *testing.T) {
@@ -201,7 +201,7 @@ func TestResolveCommitSHAWithRetries_TransientFailureExhaustsRetries(t *testing.
 	assert.Empty(t, sha, "No SHA should be returned when retries are exhausted")
 	assert.Equal(t, 4, resolveAttempts, "Should attempt initial call plus three retries")
 	assert.Equal(t, 3, sleepCalls, "Should sleep between each retry")
-	assert.Contains(t, err.Error(), "after 3 retries", "Error should report retry exhaustion")
+	require.ErrorContains(t, err, "after 3 retries", "Error should report retry exhaustion")
 }
 
 func TestResolveCommitSHAWithRetries_ContextCanceledDuringBackoff(t *testing.T) {
@@ -229,8 +229,8 @@ func TestResolveCommitSHAWithRetries_ContextCanceledDuringBackoff(t *testing.T) 
 	sha, err := resolveCommitSHAWithRetries(ctx, "owner", "repo", "main", ".github/workflows/test.md", "", false)
 	require.Error(t, err, "Cancellation during retry backoff should fail fast")
 	assert.Empty(t, sha, "No SHA should be returned when retry wait is canceled")
-	assert.Contains(t, err.Error(), "retry wait was cancelled", "Error should explain cancellation reason")
-	assert.Contains(t, err.Error(), "@<40-char-sha>", "Error should include exact SHA retry guidance")
+	require.ErrorContains(t, err, "retry wait was cancelled", "Error should explain cancellation reason")
+	require.ErrorContains(t, err, "@<40-char-sha>", "Error should include exact SHA retry guidance")
 }
 
 func TestFetchIncludeFromSource_WorkflowSpecParsing(t *testing.T) {
@@ -291,7 +291,7 @@ func TestFetchIncludeFromSource_WorkflowSpecParsing(t *testing.T) {
 			if tt.expectError {
 				require.Error(t, err, "expected error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "error should contain expected text")
+					require.ErrorContains(t, err, tt.errorContains, "error should contain expected text")
 				}
 			} else {
 				require.NoError(t, err, "should not error")
@@ -660,6 +660,70 @@ imports:
 	}
 }
 
+func TestFetchAndSaveRemoteIncludes_PathTraversalRejected(t *testing.T) {
+	mockFetch := func(_ context.Context, _ string, _ *WorkflowSpec, _ bool) ([]byte, string, error) {
+		return []byte("# include body\n"), "", nil
+	}
+
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(targetDir, 0o755))
+
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{RepoSlug: "github/gh-aw", Version: "main"},
+	}
+	err := fetchAndSaveRemoteIncludesWithOptions(t.Context(), "@include ../secrets/evil.md\n", includesFetchOptions{
+		spec:      spec,
+		targetDir: targetDir,
+		fetchFn:   mockFetch,
+	})
+	require.Error(t, err)
+	require.NoFileExists(t, filepath.Join(tmpDir, ".github", "secrets", "evil.md"))
+}
+
+func TestFetchAndSaveRemoteIncludes_NestedTraversalRejected(t *testing.T) {
+	mockFetch := func(_ context.Context, _ string, _ *WorkflowSpec, _ bool) ([]byte, string, error) {
+		return []byte("# include body\n"), "", nil
+	}
+
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(targetDir, 0o755))
+
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{RepoSlug: "github/gh-aw", Version: "main"},
+	}
+	// A path that doesn't start with "../" but still escapes via a sub-directory component.
+	err := fetchAndSaveRemoteIncludesWithOptions(t.Context(), "@include subdir/../../secrets/evil.md\n", includesFetchOptions{
+		spec:      spec,
+		targetDir: targetDir,
+		fetchFn:   mockFetch,
+	})
+	require.Error(t, err)
+	require.NoFileExists(t, filepath.Join(tmpDir, ".github", "secrets", "evil.md"))
+}
+
+func TestFetchAndSaveRemoteIncludes_SharedIncludeStaysUnderSharedDir(t *testing.T) {
+	mockFetch := func(_ context.Context, _ string, _ *WorkflowSpec, _ bool) ([]byte, string, error) {
+		return []byte("# include body\n"), "", nil
+	}
+
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(targetDir, 0o755))
+
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{RepoSlug: "github/gh-aw", Version: "main"},
+	}
+	err := fetchAndSaveRemoteIncludesWithOptions(t.Context(), "@include shared/helper.md\n", includesFetchOptions{
+		spec:      spec,
+		targetDir: targetDir,
+		fetchFn:   mockFetch,
+	})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(tmpDir, ".github", "shared", "helper.md"))
+}
+
 // TestFetchAndSaveRemoteFrontmatterImports_InvalidRepoSlug verifies that an invalid
 // RepoSlug (not in owner/repo format) causes the function to return early without error.
 func TestFetchAndSaveRemoteFrontmatterImports_InvalidRepoSlug(t *testing.T) {
@@ -804,6 +868,79 @@ imports:
 		"transitive dep must be written to shared/control-aux.md")
 	assert.NoFileExists(t, filepath.Join(tmpDir, "control-aux.md"),
 		"transitive dep must not be written at the root level")
+}
+
+func TestFetchAndSaveRemoteRuntimeImports_EmptyRepoSlug(t *testing.T) {
+	tmpDir := t.TempDir()
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0o755))
+
+	err := fetchAndSaveRemoteRuntimeImports(
+		t.Context(),
+		"{{#runtime-import .github/skills/example/SKILL.md}}\n",
+		&WorkflowSpec{},
+		workflowsDir,
+		false,
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(tmpDir, ".github", "skills", "example", "SKILL.md"))
+}
+
+func TestFetchAndSaveRemoteRuntimeImports_FetchesPinnedRecursiveClosure(t *testing.T) {
+	original := downloadRemoteRuntimeImportFile
+	defer func() { downloadRemoteRuntimeImportFile = original }()
+
+	tmpDir := t.TempDir()
+	workflowsDir := filepath.Join(tmpDir, ".github", "workflows")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0o755))
+
+	type request struct {
+		path string
+		ref  string
+		host string
+	}
+	var requests []request
+	downloadRemoteRuntimeImportFile = func(_ context.Context, owner, repo, remotePath, ref, host string) ([]byte, error) {
+		assert.Equal(t, "github", owner)
+		assert.Equal(t, "gh-aw", repo)
+		requests = append(requests, request{path: remotePath, ref: ref, host: host})
+		switch remotePath {
+		case ".github/skills/example/SKILL.md":
+			return []byte("---\nname: Example\n---\n{{#runtime-import ./nested.md}}\n"), nil
+		case ".github/skills/example/nested.md":
+			return []byte("nested\n"), nil
+		default:
+			return nil, fmt.Errorf("unexpected path %s", remotePath)
+		}
+	}
+
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "0123456789abcdef0123456789abcdef01234567",
+		},
+		WorkflowPath: ".github/workflows/example.md",
+		Host:         "github.com",
+	}
+
+	err := fetchAndSaveRemoteRuntimeImports(
+		t.Context(),
+		"{{#runtime-import .github/skills/example/SKILL.md}}\n",
+		spec,
+		workflowsDir,
+		false,
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []request{
+		{path: ".github/skills/example/SKILL.md", ref: "0123456789abcdef0123456789abcdef01234567", host: "github.com"},
+		{path: ".github/skills/example/nested.md", ref: "0123456789abcdef0123456789abcdef01234567", host: "github.com"},
+	}, requests)
+	assert.FileExists(t, filepath.Join(tmpDir, ".github", "skills", "example", "SKILL.md"))
+	assert.FileExists(t, filepath.Join(tmpDir, ".github", "skills", "example", "nested.md"))
 }
 
 // TestFetchFrontmatterImportsRecursive_RepoRootSlashPath verifies that when
@@ -1145,6 +1282,371 @@ safe-outputs:
 	assert.Empty(t, entries, "no files should be created for an invalid RepoSlug")
 }
 
+// --- fetchAndSaveRemoteCallWorkflows tests ---
+
+// TestFetchAndSaveRemoteCallWorkflows_NoSafeOutputs verifies the function is a no-op when
+// the workflow has no safe-outputs section.
+func TestFetchAndSaveRemoteCallWorkflows_NoSafeOutputs(t *testing.T) {
+	content := `---
+engine: copilot
+---
+
+# Workflow
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tmpDir := t.TempDir()
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil)
+	require.NoError(t, err)
+
+	entries, readErr := os.ReadDir(tmpDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_EmptyRepoSlug verifies the function is a no-op for
+// local workflows.
+func TestFetchAndSaveRemoteCallWorkflows_EmptyRepoSlug(t *testing.T) {
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Workflow
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "", // local workflow
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tmpDir := t.TempDir()
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil)
+	require.NoError(t, err)
+
+	entries, readErr := os.ReadDir(tmpDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_OnlyMacros verifies that macro-only worker lists
+// are skipped without error.
+func TestFetchAndSaveRemoteCallWorkflows_OnlyMacros(t *testing.T) {
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - ${{ vars.WORKER }}
+---
+
+# Workflow
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tmpDir := t.TempDir()
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil)
+	require.NoError(t, err)
+
+	entries, readErr := os.ReadDir(tmpDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_SkipExistingWithoutForce verifies that a pre-existing
+// worker from the same source is silently skipped.
+func TestFetchAndSaveRemoteCallWorkflows_SkipExistingWithoutForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Pre-existing worker whose source matches what we would install.
+	existingContent := []byte(`---
+source: github/gh-aw/.github/workflows/worker.md@v1.0.0
+engine: copilot
+---
+# Existing worker
+`)
+	existingFile := filepath.Join(tmpDir, "worker.md")
+	require.NoError(t, os.WriteFile(existingFile, existingContent, 0600))
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "v1.0.0",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil)
+	require.NoError(t, err)
+
+	// File must be unchanged (no download attempted because source matches).
+	gotContent, readErr := os.ReadFile(existingFile)
+	require.NoError(t, readErr)
+	assert.Equal(t, existingContent, gotContent)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_ConflictDifferentSource verifies that an existing
+// worker from a different source causes an error when force=false.
+func TestFetchAndSaveRemoteCallWorkflows_ConflictDifferentSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	conflictContent := `---
+source: otherorg/other-repo/.github/workflows/worker.md@v1
+---
+# Worker from other repo
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "worker.md"), []byte(conflictContent), 0600))
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "call-workflow worker")
+	require.ErrorContains(t, err, "already exists")
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_DownloadsWorker verifies that a worker is fetched
+// from the remote repository and written with a source field.
+func TestFetchAndSaveRemoteCallWorkflows_DownloadsWorker(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	workerContent := `---
+engine: copilot
+---
+# Worker
+`
+	downloader := func(_ context.Context, _, _, path, _ string) ([]byte, error) {
+		if filepath.Ext(path) == ".md" {
+			return []byte(workerContent), nil
+		}
+		return nil, errors.New("not found")
+	}
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tracker := &FileTracker{
+		OriginalContent: make(map[string][]byte),
+		gitRoot:         tmpDir,
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, tracker, downloader)
+	require.NoError(t, err)
+
+	workerPath := filepath.Join(tmpDir, "worker.md")
+	got, readErr := os.ReadFile(workerPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(got), "source:", "worker should have a source field injected")
+	assert.Contains(t, string(got), "github/gh-aw", "worker source should include the repo slug")
+
+	// New file must be in CreatedFiles.
+	assert.Contains(t, tracker.CreatedFiles, workerPath)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_YmlFallback verifies that when the .md download
+// fails, the function retries with a .yml extension.
+func TestFetchAndSaveRemoteCallWorkflows_YmlFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ymlContent := `name: Reusable worker
+on:
+  workflow_call:
+jobs:
+  run: {runs-on: ubuntu-latest, steps: [{run: echo hello}]}
+`
+	downloader := func(_ context.Context, _, _, remotePath, _ string) ([]byte, error) {
+		switch filepath.Ext(remotePath) {
+		case ".md":
+			return nil, errors.New("not found")
+		case ".yml":
+			return []byte(ymlContent), nil
+		}
+		return nil, fmt.Errorf("unexpected path: %s", remotePath)
+	}
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tracker := &FileTracker{
+		OriginalContent: make(map[string][]byte),
+		gitRoot:         tmpDir,
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, tracker, downloader)
+	require.NoError(t, err)
+
+	ymlPath := filepath.Join(tmpDir, "worker.yml")
+	got, readErr := os.ReadFile(ymlPath)
+	require.NoError(t, readErr)
+	assert.YAMLEq(t, ymlContent, string(got), "yml fallback content should be written verbatim")
+
+	// New .yml file must be in CreatedFiles.
+	assert.Contains(t, tracker.CreatedFiles, ymlPath)
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_TrackingBeforeWrite verifies that TrackModified is
+// called with the original file content (i.e. before os.WriteFile overwrites it), so that
+// RollbackAllFiles can restore the correct previous state.
+func TestFetchAndSaveRemoteCallWorkflows_TrackingBeforeWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalContent := `---
+source: github/gh-aw/.github/workflows/worker.md@v0.9.0
+engine: copilot
+---
+# Old worker
+`
+	workerPath := filepath.Join(tmpDir, "worker.md")
+	require.NoError(t, os.WriteFile(workerPath, []byte(originalContent), 0600))
+
+	newContent := `---
+engine: copilot
+---
+# New worker
+`
+	downloader := func(_ context.Context, _, _, remotePath, _ string) ([]byte, error) {
+		if filepath.Ext(remotePath) == ".md" {
+			return []byte(newContent), nil
+		}
+		return nil, errors.New("not found")
+	}
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "v1.0.0",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	tracker := &FileTracker{
+		OriginalContent: make(map[string][]byte),
+		gitRoot:         tmpDir,
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, true, tracker, downloader)
+	require.NoError(t, err)
+
+	// The tracker must have captured the *original* content, not the newly written bytes.
+	absWorkerPath, _ := filepath.Abs(workerPath)
+	captured, ok := tracker.OriginalContent[absWorkerPath]
+	require.True(t, ok, "worker.md should be in OriginalContent")
+	assert.Equal(t, []byte(originalContent), captured, "tracker should capture original content before overwrite")
+}
+
+// TestFetchAndSaveRemoteCallWorkflows_MapFormConfig verifies that the map-form
+// call-workflow configuration (workflows: [...]) is also handled.
+func TestFetchAndSaveRemoteCallWorkflows_MapFormConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	downloader := func(_ context.Context, _, _, remotePath, _ string) ([]byte, error) {
+		if filepath.Ext(remotePath) == ".md" {
+			return []byte("# worker\n"), nil
+		}
+		return nil, errors.New("not found")
+	}
+
+	content := `---
+engine: copilot
+safe-outputs:
+  call-workflow:
+    workflows:
+      - worker-a
+      - worker-b
+---
+
+# Orchestrator
+`
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug: "github/gh-aw",
+			Version:  "main",
+		},
+		WorkflowPath: ".github/workflows/orchestrator.md",
+	}
+
+	err := fetchAndSaveRemoteCallWorkflows(context.Background(), content, spec, tmpDir, false, false, nil, downloader)
+	require.NoError(t, err)
+
+	for _, name := range []string{"worker-a", "worker-b"} {
+		_, statErr := os.Stat(filepath.Join(tmpDir, name+".md"))
+		require.NoError(t, statErr, "%s.md should be created", name)
+	}
+}
+
 // --- extractResources tests ---
 
 // TestExtractResources_BasicList verifies that resource paths are extracted from the resources field.
@@ -1180,7 +1682,7 @@ resources:
 	resources, err := extractResources(content)
 	require.Error(t, err, "should error when a resource entry contains macro syntax")
 	assert.Nil(t, resources, "should return nil resources on error")
-	assert.Contains(t, err.Error(), "${{", "error message should mention the disallowed syntax")
+	require.ErrorContains(t, err, "${{", "error message should mention the disallowed syntax")
 }
 
 // TestExtractResources_AllMacrosRejected verifies that all-macro lists return an error.
@@ -1292,7 +1794,7 @@ resources:
 	tmpDir := t.TempDir()
 	err := fetchAndSaveRemoteResources(t.Context(), content, spec, tmpDir, false, false, nil)
 	require.Error(t, err, "should error when resources contain macro syntax")
-	assert.Contains(t, err.Error(), "${{", "error should mention the disallowed syntax")
+	require.ErrorContains(t, err, "${{", "error should mention the disallowed syntax")
 
 	entries, readErr := os.ReadDir(tmpDir)
 	require.NoError(t, readErr)
@@ -1785,9 +2287,9 @@ safe-outputs:
 
 	err := fetchAndSaveRemoteDispatchWorkflows(context.Background(), content, spec, workflowsDir, false, false, nil)
 	require.Error(t, err, "should error when existing file has a different source repo")
-	assert.Contains(t, err.Error(), "target-workflow", "error should name the conflicting file")
-	assert.Contains(t, err.Error(), "otherorg/other-repo", "error should mention existing source")
-	assert.Contains(t, err.Error(), "github/gh-aw", "error should mention the intended source")
+	require.ErrorContains(t, err, "target-workflow", "error should name the conflicting file")
+	require.ErrorContains(t, err, "otherorg/other-repo", "error should mention existing source")
+	require.ErrorContains(t, err, "github/gh-aw", "error should mention the intended source")
 }
 
 // TestFetchDispatchWorkflows_SameSourceSkips verifies that an existing dispatch-workflow
@@ -1852,8 +2354,8 @@ safe-outputs:
 
 	err := fetchAndSaveRemoteDispatchWorkflows(context.Background(), content, spec, workflowsDir, false, false, nil)
 	require.Error(t, err, "should error when existing file has no source field")
-	assert.Contains(t, err.Error(), "target-workflow", "error should name the conflicting file")
-	assert.Contains(t, err.Error(), "(no source field)", "error should show placeholder for missing source")
+	require.ErrorContains(t, err, "target-workflow", "error should name the conflicting file")
+	require.ErrorContains(t, err, "(no source field)", "error should show placeholder for missing source")
 }
 
 // TestFetchDispatchWorkflows_ForceOverwritesConflict verifies that --force bypasses conflict detection.
@@ -1890,7 +2392,60 @@ safe-outputs:
 		return nil, errors.New("download not available in unit tests")
 	}
 	err := fetchAndSaveRemoteDispatchWorkflows(context.Background(), content, spec, dir, false, true, nil, mockDownloader)
-	assert.NoError(t, err, "force=true should bypass conflict detection and return nil (download fails silently)")
+	require.NoError(t, err, "force=true should bypass conflict detection and return nil (download fails silently)")
+}
+
+func TestFetchAndSaveRemoteDispatchWorkflows_FetchesNestedFrontmatterImports(t *testing.T) {
+	dir := t.TempDir()
+	originalDownloadRemoteImportFile := downloadRemoteImportFile
+	t.Cleanup(func() {
+		downloadRemoteImportFile = originalDownloadRemoteImportFile
+	})
+
+	content := `---
+safe-outputs:
+  dispatch-workflow:
+    workflows:
+      - dependent-workflow
+---
+# Main
+`
+	spec := &WorkflowSpec{
+		RepoSpec:     RepoSpec{RepoSlug: "github/gh-aw", Version: "main"},
+		WorkflowPath: ".github/workflows/main.md",
+	}
+
+	mockDownloader := func(_ context.Context, _, _, filePath, _ string) ([]byte, error) {
+		switch filePath {
+		case ".github/workflows/dependent-workflow.md":
+			return []byte(`---
+imports:
+  - uses: shared/helper.md
+---
+# Dependent
+`), nil
+		default:
+			return nil, errors.New("unexpected workflow path: " + filePath)
+		}
+	}
+
+	downloadRemoteImportFile = func(_ context.Context, owner, repo, filePath, ref string) ([]byte, error) {
+		if owner != "github" || repo != "gh-aw" || ref != "main" {
+			return nil, errors.New("unexpected import coordinates")
+		}
+		if filePath == ".github/workflows/shared/helper.md" {
+			return []byte("---\n# Helper\n"), nil
+		}
+		return nil, errors.New("unexpected import path: " + filePath)
+	}
+
+	err := fetchAndSaveRemoteDispatchWorkflows(context.Background(), content, spec, dir, false, false, nil, mockDownloader)
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(dir, "dependent-workflow.md"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dir, "shared", "helper.md"))
+	require.NoError(t, err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1924,7 +2479,7 @@ resources:
 
 	err := fetchAndSaveRemoteResources(t.Context(), content, spec, dir, false, false, nil)
 	require.Error(t, err, "should error when markdown resource exists from a different source")
-	assert.Contains(t, err.Error(), "helper.md", "error should name the conflicting resource")
+	require.ErrorContains(t, err, "helper.md", "error should name the conflicting resource")
 }
 
 // TestFetchResources_NonMarkdownConflict verifies that a non-markdown resource that already
@@ -1949,7 +2504,7 @@ resources:
 
 	err := fetchAndSaveRemoteResources(t.Context(), content, spec, dir, false, false, nil)
 	require.Error(t, err, "should error when non-markdown resource already exists")
-	assert.Contains(t, err.Error(), "helper.yml", "error should name the conflicting resource")
+	require.ErrorContains(t, err, "helper.yml", "error should name the conflicting resource")
 }
 
 // TestFetchResources_MarkdownSameSourceSkips verifies that an existing markdown resource
@@ -1978,7 +2533,7 @@ resources:
 	}
 
 	err := fetchAndSaveRemoteResources(t.Context(), content, spec, dir, false, false, nil)
-	assert.NoError(t, err, "should not error when markdown resource is from the same source")
+	require.NoError(t, err, "should not error when markdown resource is from the same source")
 }
 
 // ---------------------------------------------------------------------------
@@ -2137,7 +2692,7 @@ safe-outputs:
 
 	err := fetchAllRemoteDependencies(context.Background(), content, spec, tmpDir, false, false, nil)
 	require.Error(t, err, "dispatch workflow conflict should be propagated")
-	assert.Contains(t, err.Error(), "dispatch workflow", "error should mention 'dispatch workflow'")
+	require.ErrorContains(t, err, "dispatch workflow", "error should mention 'dispatch workflow'")
 }
 
 // TestFetchAllRemoteDependencies_ResourceMacroErrorPropagated verifies that a resource
@@ -2160,5 +2715,5 @@ resources:
 	tmpDir := t.TempDir()
 	err := fetchAllRemoteDependencies(context.Background(), content, spec, tmpDir, false, false, nil)
 	require.Error(t, err, "resource macro error should be propagated")
-	assert.Contains(t, err.Error(), "failed to fetch resource dependencies", "error should be wrapped with dependency context")
+	require.ErrorContains(t, err, "failed to fetch resource dependencies", "error should be wrapped with dependency context")
 }

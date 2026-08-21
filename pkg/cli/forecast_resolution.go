@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/github/gh-aw/pkg/console"
-	"github.com/github/gh-aw/pkg/gitutil"
+	"github.com/github/gh-aw/pkg/errorutil"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/workflow"
 )
@@ -22,7 +22,9 @@ const (
 )
 
 var (
-	forecastFetchGitHubWorkflows      = fetchGitHubWorkflows
+	forecastFetchGitHubWorkflows = func(ctx context.Context, repoOverride string, verbose bool) (map[string]*GitHubWorkflow, error) {
+		return fetchGitHubWorkflows(ctx, repoOverride, verbose)
+	}
 	forecastListWorkflowRunsPaginated = listWorkflowRunsWithPagination
 	forecastRateLimitSleep            = func(ctx context.Context, delay time.Duration) error {
 		timer := time.NewTimer(delay)
@@ -110,11 +112,11 @@ func fetchWorkflowsWithBackoff(ctx context.Context, ids []string, repoOverride s
 	var lastErr error
 
 	for attempt := 1; attempt <= forecastRateLimitMaxAttempts; attempt++ {
-		githubWorkflows, err := forecastFetchGitHubWorkflows(repoOverride, verbose)
+		githubWorkflows, err := forecastFetchGitHubWorkflows(ctx, repoOverride, verbose)
 		if err == nil {
 			return githubWorkflows, nil
 		}
-		if !gitutil.IsRateLimitError(err.Error()) {
+		if !errorutil.IsRateLimitError(err.Error()) {
 			return nil, err
 		}
 
@@ -158,7 +160,7 @@ func listRunsWithBackoff(ctx context.Context, opts ListWorkflowRunsOptions, work
 		if err == nil {
 			return runs, total, nil
 		}
-		if !gitutil.IsRateLimitError(err.Error()) {
+		if !errorutil.IsRateLimitError(err.Error()) {
 			return nil, 0, err
 		}
 

@@ -595,7 +595,7 @@ func TestExtractEngineConfigFromJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config, err := compiler.extractEngineConfigFromJSON(tt.engineJSON)
+			config, _, err := compiler.extractEngineConfigFromJSON(tt.engineJSON)
 
 			if tt.expectError {
 				if err == nil {
@@ -701,4 +701,207 @@ Imports a custom inline engine definition from a shared workflow.
 		"lock file should set engine ID to codex")
 	assert.Contains(t, lockStr, "codex exec${",
 		"lock file should contain codex exec invocation")
+}
+
+func TestImportedBehaviorDefinedEngineDefinition(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "test-behavior-engine-import-*")
+	workflowsDir := filepath.Join(tmpDir, constants.GetWorkflowDir())
+	sharedDir := filepath.Join(workflowsDir, "shared")
+	require.NoError(t, os.MkdirAll(sharedDir, 0755))
+
+	sharedContent := `---
+engine:
+  id: auggie
+  display-name: Auggie
+  description: Auggie CLI with explicit auth binding and declarative execution behavior
+  experimental: true
+  auth:
+    - role: session
+      secret: AUGMENT_SESSION_AUTH
+  behaviors:
+    supported-env-var-keys:
+      - AUGMENT_SESSION_AUTH
+    capabilities:
+      max-turns: true
+    installation:
+      package-manager: npm
+      package-name: "@augmentcode/auggie"
+      version: "1.0.0"
+      step-name: Install Auggie
+      binary-name: auggie
+      include-node-setup: true
+      cooldown: true
+      docs-url: https://docs.augmentcode.com
+    config-file:
+      path: .auggie.json
+      step-name: Write Auggie Config
+      content: '{"sandbox":"workspace-write"}'
+      merge-strategy: json-merge
+    execution:
+      command-name: auggie
+      args:
+        - run
+      step-name: Execute Auggie CLI
+      model-env-var: AUGGIE_MODEL
+      mcp-config-env-var: AUGGIE_MCP_CONFIG
+      write-timestamp: true
+    mcp:
+      config-path: .auggie.json
+---
+
+# Shared Auggie engine definition
+`
+	sharedFile := filepath.Join(sharedDir, "auggie.md")
+	require.NoError(t, os.WriteFile(sharedFile, []byte(sharedContent), 0644))
+
+	mainContent := `---
+name: Test Imported Behavior Engine
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: read
+imports:
+  - shared/auggie.md
+---
+
+# Test Workflow
+`
+	mainFile := filepath.Join(workflowsDir, "test-imported-behavior-engine.md")
+	require.NoError(t, os.WriteFile(mainFile, []byte(mainContent), 0644))
+
+	compiler := NewCompiler()
+	err := compiler.CompileWorkflow(mainFile)
+	require.NoError(t, err, "compilation should succeed when a behavior-defined engine is imported from a shared workflow")
+
+	lockFile := filepath.Join(workflowsDir, "test-imported-behavior-engine.lock.yml")
+	lockContent, err := os.ReadFile(lockFile)
+	require.NoError(t, err, "lock file should be created")
+
+	lockStr := string(lockContent)
+	assert.Contains(t, lockStr, "Install Auggie", "lock file should contain behavior-defined install step")
+	assert.Contains(t, lockStr, "Write Auggie Config", "lock file should contain behavior-defined config step")
+	assert.Contains(t, lockStr, "Execute Auggie CLI", "lock file should contain behavior-defined execution step")
+	assert.Contains(t, lockStr, `GH_AW_INFO_ENGINE_ID: "auggie"`, "lock file should set engine ID to the imported definition")
+	assert.Contains(t, lockStr, "AUGMENT_SESSION_AUTH: ${{ secrets.AUGMENT_SESSION_AUTH }}", "lock file should bind custom auth secrets from engine.auth")
+}
+
+// TestImportedEngineWithAnthropicWIFAuth is a regression test for the v0.82.10 regression
+// where an imported engine definition with a mapping-style auth (Anthropic/Azure WIF) caused
+// "mapping was used where sequence is expected" because EngineDefinition.Auth is []AuthBinding.
+// The WIF auth mapping must be stripped before EngineDefinition unmarshaling and handled via
+// the EngineConfig path (applyEngineAuthField), matching the behaviour of inline engine blocks.
+func TestImportedEngineWithAnthropicWIFAuth(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "test-wif-auth-import-*")
+	workflowsDir := filepath.Join(tmpDir, constants.GetWorkflowDir())
+	sharedDir := filepath.Join(workflowsDir, "shared")
+	require.NoError(t, os.MkdirAll(sharedDir, 0755))
+
+	sharedContent := `---
+engine:
+  id: claude
+  auth:
+    type: github-oidc
+    provider: anthropic
+    federation-rule-id: fr_01ABC
+    organization-id: org_01XYZ
+    service-account-id: sa_01DEF
+    workspace-id: ws_01GHI
+---
+
+# Shared Anthropic WIF engine config
+`
+	sharedFile := filepath.Join(sharedDir, "wif-engine.md")
+	require.NoError(t, os.WriteFile(sharedFile, []byte(sharedContent), 0644))
+
+	mainContent := `---
+name: Test Imported WIF Engine
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+imports:
+  - shared/wif-engine.md
+---
+
+# Test Workflow
+`
+	mainFile := filepath.Join(workflowsDir, "test-wif.md")
+	require.NoError(t, os.WriteFile(mainFile, []byte(mainContent), 0644))
+
+	compiler := NewCompiler()
+	err := compiler.CompileWorkflow(mainFile)
+	require.NoError(t, err, "compilation must succeed for imported engine definition with Anthropic WIF auth mapping")
+
+	lockFile := filepath.Join(workflowsDir, "test-wif.lock.yml")
+	lockContent, err := os.ReadFile(lockFile)
+	require.NoError(t, err, "lock file should be created")
+
+	lockStr := string(lockContent)
+	assert.Contains(t, lockStr, "AWF_AUTH_TYPE: github-oidc", "lock file must contain WIF auth type")
+	assert.Contains(t, lockStr, "AWF_AUTH_PROVIDER: anthropic", "lock file must contain WIF auth provider")
+	assert.Contains(t, lockStr, "AWF_AUTH_ANTHROPIC_FEDERATION_RULE_ID: fr_01ABC", "lock file must contain federation rule ID")
+	assert.Contains(t, lockStr, "AWF_AUTH_ANTHROPIC_ORGANIZATION_ID: org_01XYZ", "lock file must contain organization ID")
+	assert.Contains(t, lockStr, "AWF_AUTH_ANTHROPIC_SERVICE_ACCOUNT_ID: sa_01DEF", "lock file must contain service account ID")
+	assert.Contains(t, lockStr, "AWF_AUTH_ANTHROPIC_WORKSPACE_ID: ws_01GHI", "lock file must contain workspace ID")
+}
+
+func TestImportedEngineWithAzureWIFAuth(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "test-azure-wif-auth-import-*")
+	workflowsDir := filepath.Join(tmpDir, constants.GetWorkflowDir())
+	sharedDir := filepath.Join(workflowsDir, "shared")
+	require.NoError(t, os.MkdirAll(sharedDir, 0755))
+
+	sharedContent := `---
+engine:
+  id: copilot
+  auth:
+    type: github-oidc
+    provider: azure
+    audience: https://cognitiveservices.azure.com
+    azure-tenant-id: tenant-id
+    azure-client-id: client-id
+    azure-scope: https://cognitiveservices.azure.com/.default
+    azure-cloud: public
+---
+
+# Shared Azure WIF engine config
+`
+	sharedFile := filepath.Join(sharedDir, "azure-wif-engine.md")
+	require.NoError(t, os.WriteFile(sharedFile, []byte(sharedContent), 0644))
+
+	mainContent := `---
+name: Test Imported Azure WIF Engine
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+imports:
+  - shared/azure-wif-engine.md
+---
+
+# Test Workflow
+`
+	mainFile := filepath.Join(workflowsDir, "test-azure-wif.md")
+	require.NoError(t, os.WriteFile(mainFile, []byte(mainContent), 0644))
+
+	compiler := NewCompiler()
+	err := compiler.CompileWorkflow(mainFile)
+	require.NoError(t, err, "compilation must succeed for imported engine definition with Azure WIF auth mapping")
+
+	lockFile := filepath.Join(workflowsDir, "test-azure-wif.lock.yml")
+	lockContent, err := os.ReadFile(lockFile)
+	require.NoError(t, err, "lock file should be created")
+
+	lockStr := string(lockContent)
+	assert.Contains(t, lockStr, "AWF_AUTH_TYPE: github-oidc", "lock file must contain WIF auth type")
+	assert.Contains(t, lockStr, "AWF_AUTH_PROVIDER: azure", "lock file must contain WIF auth provider")
+	assert.Contains(t, lockStr, "AWF_AUTH_OIDC_AUDIENCE: https://cognitiveservices.azure.com", "lock file must contain OIDC audience")
+	assert.Contains(t, lockStr, "AWF_AUTH_AZURE_TENANT_ID: tenant-id", "lock file must contain Azure tenant ID")
+	assert.Contains(t, lockStr, "AWF_AUTH_AZURE_CLIENT_ID: client-id", "lock file must contain Azure client ID")
+	assert.Contains(t, lockStr, "AWF_AUTH_AZURE_SCOPE: https://cognitiveservices.azure.com/.default", "lock file must contain Azure scope")
+	assert.Contains(t, lockStr, "AWF_AUTH_AZURE_CLOUD: public", "lock file must contain Azure cloud")
 }

@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/repoutil"
 	"github.com/goccy/go-yaml"
 )
 
-var dispatchWorkflowValidationLog = newValidationLogger("dispatch_workflow")
+var dispatchWorkflowValidationLog = logger.New("workflow:dispatch_workflow_validation")
 
 // validateDispatchWorkflow validates that the dispatch-workflow configuration is correct
 func (c *Compiler) validateDispatchWorkflow(data *WorkflowData, workflowPath string) error {
@@ -61,7 +62,7 @@ func (c *Compiler) validateDispatchWorkflow(data *WorkflowData, workflowPath str
 			githubDir := filepath.Dir(currentDir)
 			repoRoot := filepath.Dir(githubDir)
 			workflowsDir := filepath.Join(repoRoot, constants.GetWorkflowDir())
-			notFoundErr := fmt.Errorf("dispatch-workflow: workflow '%s' not found in %s\n\nChecked for: %s.md, %s.lock.yml, %s.yml\n\nTo fix:\n1. Verify the workflow file exists in %s/\n2. Ensure the filename matches exactly (case-sensitive)\n3. Use the filename without extension in your configuration", workflowName, workflowsDir, workflowName, workflowName, workflowName, workflowsDir)
+			notFoundErr := fmt.Errorf("dispatch-workflow: workflow '%s' not found in %s\n\nChecked for: %s.md, %s.lock.yml, %s.yml, %s.yaml\n\nTo fix:\n1. Verify the workflow file exists in %s/\n2. Ensure the filename matches exactly (case-sensitive)\n3. Use the filename without extension in your configuration", workflowName, workflowsDir, workflowName, workflowName, workflowName, workflowName, workflowsDir)
 			if returnErr := collector.Add(notFoundErr); returnErr != nil {
 				return returnErr
 			}

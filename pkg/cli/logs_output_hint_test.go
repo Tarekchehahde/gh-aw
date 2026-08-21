@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -11,19 +12,19 @@ import (
 )
 
 func TestRenderLogsCompactEmitsSingleHintLine(t *testing.T) {
-	stdout, _ := captureOutput(t, func() error {
-		renderLogsCompact(LogsData{
-			Summary: LogsSummary{TotalRuns: 1},
-			Runs: []RunData{{
-				RunID:        1,
-				WorkflowName: "logs",
-				Status:       "completed",
-				CreatedAt:    time.Now(),
-			}},
-			Message: usageOnlyArtifactHintMessage(),
-		})
-		return nil
+	t.Parallel()
+	var buf bytes.Buffer
+	renderLogsCompactToWriter(&buf, LogsData{
+		Summary: LogsSummary{TotalRuns: 1},
+		Runs: []RunData{{
+			RunID:        1,
+			WorkflowName: "logs",
+			Status:       "completed",
+			CreatedAt:    time.Now(),
+		}},
+		Message: usageOnlyArtifactHintMessage(),
 	})
+	stdout := buf.String()
 
 	assert.Equal(t, 1, strings.Count(stdout, "[hint] "), "compact output should emit a single hint line")
 	assert.Contains(t, stdout, usageOnlyArtifactHintMessage())
@@ -53,4 +54,43 @@ func TestRenderLogsOutputWritesArtifactHintForNonCompactFormats(t *testing.T) {
 			assert.Contains(t, stderr, usageOnlyArtifactHintMessage())
 		})
 	}
+}
+
+func TestRenderLogsOutputStaleWarningGatedByCheckStaleness(t *testing.T) {
+	// A result set whose newest run is well past the staleness threshold with no
+	// start_date/end_date requested.
+	processedRuns := []ProcessedRun{{
+		Run: WorkflowRun{
+			DatabaseID:   1,
+			Status:       "completed",
+			WorkflowName: "logs",
+			CreatedAt:    time.Now().Add(-11 * 24 * time.Hour),
+		},
+	}}
+
+	t.Run("discovery mode surfaces the stale warning", func(t *testing.T) {
+		stdout, _ := captureOutput(t, func() error {
+			return renderLogsOutput(processedRuns, renderLogsOutputOptions{
+				outputDir:      t.TempDir(),
+				format:         "console",
+				jsonOutput:     true,
+				checkStaleness: true,
+			})
+		})
+
+		assert.Contains(t, stdout, "No start_date/end_date was specified")
+	})
+
+	t.Run("stdin/explicit-run mode does not surface the stale warning", func(t *testing.T) {
+		stdout, _ := captureOutput(t, func() error {
+			return renderLogsOutput(processedRuns, renderLogsOutputOptions{
+				outputDir:  t.TempDir(),
+				format:     "console",
+				jsonOutput: true,
+				// checkStaleness left false, as it is for DownloadWorkflowLogsFromStdin.
+			})
+		})
+
+		assert.NotContains(t, stdout, "No start_date/end_date was specified")
+	})
 }

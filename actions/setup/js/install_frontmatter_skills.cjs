@@ -21,19 +21,42 @@ function parseSkillSpecs(rawSkills) {
  */
 
 /**
+ * Reports whether a skill spec is a local path reference — one that has no
+ * "@" separator and is not a GitHub Actions expression.  Local refs are
+ * installed with --from-local instead of fetching from a remote repository.
+ *
+ * @param {string} skillSpec
+ * @returns {boolean}
+ */
+function isLocalSkillRef(skillSpec) {
+  return skillSpec !== "" && !skillSpec.startsWith("${{") && !skillSpec.includes("@");
+}
+
+/**
  * @param {string} skillSpec
  * @param {string} skillsDst
  * @param {string} skillInstallAgent
  * @returns {SkillInstallCommand}
  */
 function buildSkillInstallCommand(skillSpec, skillsDst, skillInstallAgent = "") {
+  const agentArgs = skillInstallAgent ? ["--agent", skillInstallAgent] : [];
+
+  // Local path reference: install from the filesystem using --from-local.
+  // The skill name is derived from the last path component.
+  if (isLocalSkillRef(skillSpec)) {
+    const skillName = skillSpec.replace(/\\/g, "/").split("/").filter(Boolean).pop() || skillSpec;
+    return {
+      displaySpec: skillSpec,
+      args: ["skill", "install", skillSpec, skillName, "--from-local", ...agentArgs, "--dir", skillsDst, "--force"],
+    };
+  }
+
   const atIndex = skillSpec.lastIndexOf("@");
   const hasPin = atIndex >= 0;
   const skillBase = hasPin ? skillSpec.slice(0, atIndex) : skillSpec;
   const skillRef = hasPin ? skillSpec.slice(atIndex + 1) : "";
   const parts = skillBase.split("/");
   const pinArgs = skillRef ? ["--pin", skillRef] : [];
-  const agentArgs = skillInstallAgent ? ["--agent", skillInstallAgent] : [];
 
   if (parts.length >= 3) {
     return {
@@ -71,7 +94,13 @@ function countInstalledSkillFiles(skillsDst) {
     if (!currentDir) {
       continue;
     }
-    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch (err) {
+      throw new Error(`Failed to read installed skills directory ${currentDir}: ${getErrorMessage(err)}`, { cause: err });
+    }
+    for (const entry of entries) {
       const entryPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         stack.push(entryPath);
@@ -126,17 +155,18 @@ function appendSkillInstallFailure(skillSpec, errorMessage) {
  * @returns {Promise<void>}
  */
 async function writeSkillSummary(skillDir, skills, installedSkillCount, failures) {
-  core.summary
-    .addRaw("### Frontmatter skills installed\n\n")
-    .addRaw(`- Engine skill directory: \`${skillDir}\`\n`)
-    .addRaw(`- Requested references: \`${JSON.stringify(skills)}\`\n`)
-    .addRaw(`- Installed SKILL.md files: ${installedSkillCount}\n`);
+  let body = "";
+  body += `- Engine skill directory: \`${skillDir}\`\n`;
+  body += `- Requested references: \`${JSON.stringify(skills)}\`\n`;
+  body += `- Installed SKILL.md files: ${installedSkillCount}\n`;
   if (failures.length > 0) {
-    core.summary.addRaw("\n#### ⚠️ Skill install failures\n\n");
+    body += "\n#### Skill install failures\n\n";
     for (const f of failures) {
-      core.summary.addRaw(`- \`${f.skill}\`: ${f.error}\n`);
+      body += `- \`${f.skill}\`: ${f.error}\n`;
     }
   }
+  const openAttr = failures.length > 0 ? " open" : "";
+  core.summary.addRaw(`### Frontmatter skills installed\n\n<details${openAttr}>\n<summary>Skill install details</summary>\n\n${body}\n</details>\n\n`);
   await core.summary.write();
 }
 
@@ -146,7 +176,11 @@ async function main() {
   const skills = parseSkillSpecs(process.env.GH_AW_FRONTMATTER_SKILLS || "");
   const skillsDst = path.join("/tmp/gh-aw", skillDir);
 
-  fs.mkdirSync(skillsDst, { recursive: true });
+  try {
+    fs.mkdirSync(skillsDst, { recursive: true });
+  } catch (err) {
+    throw new Error(`Failed to create directory ${skillsDst}: ${getErrorMessage(err)}`, { cause: err });
+  }
 
   core.info(`Installing frontmatter skills to ${skillsDst}`);
   if (skillInstallAgent) {
@@ -178,4 +212,4 @@ async function main() {
   await writeSkillSummary(skillDir, skills, installedSkillCount, failures);
 }
 
-module.exports = { main, parseSkillSpecs, buildSkillInstallCommand, countInstalledSkillFiles, appendSkillInstallFailure };
+module.exports = { main, parseSkillSpecs, buildSkillInstallCommand, isLocalSkillRef, countInstalledSkillFiles, appendSkillInstallFailure };

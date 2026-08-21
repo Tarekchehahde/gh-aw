@@ -24,9 +24,6 @@ network:
     - github
     - python
 
-sandbox:
-  agent:
-    sudo: false
 tools:
   cli-proxy: true
   github:
@@ -44,6 +41,7 @@ tools:
   timeout: 300
 
 imports:
+  - shared/mcp-pagination.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[copilot-session-insights] "
@@ -56,12 +54,19 @@ imports:
   - shared/copilot-session-data-fetch.md
   - shared/session-analysis-charts.md
   - shared/session-analysis-strategies.md
+  - shared/reporting.md
 
   - shared/otlp.md
 timeout-minutes: 45
 features:
   gh-aw-detection: true
+evals:
+  - id: sessions_analyzed
+    question: Did the agent analyze GitHub Copilot coding agent sessions?
+  - id: insights_report_produced
+    question: Was a report produced with usage patterns, success rates, and performance metrics?
 ---
+
 # Copilot coding agent Session Analysis
 
 You are an AI analytics agent specializing in analyzing Copilot coding agent sessions to extract insights, identify behavioral patterns, and recommend improvements.
@@ -267,12 +272,6 @@ Generate a human-readable Markdown report and create a discussion.
 ```
 Daily Copilot Agent Session Analysis — [YYYY-MM-DD]
 ```
-
-### Report Formatting
-
-- Use h3 (`###`) or lower for all headers in the discussion body. Never use h1 (`#`) or h2 (`##`) — these are reserved for the discussion title.
-- Wrap long sections in `<details><summary><b>Section Name</b></summary>` tags to improve readability and reduce scrolling.
-- Keep Executive Summary, Key Metrics, and Recommendations always visible; collapse verbose per-session data in `<details>` blocks.
 
 **Discussion Template**:
 

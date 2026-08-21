@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"maps"
+	"path/filepath"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/constants"
@@ -59,6 +60,7 @@ func DetectRuntimeRequirements(workflowData *WorkflowData) []RuntimeRequirement 
 	if workflowData.MCPScripts != nil {
 		detectFromMCPScripts(workflowData.MCPScripts, requirements)
 	}
+	detectFromInlineEngineDriver(workflowData, requirements)
 
 	// When using a custom image runner, ensure Node.js is set up.
 	// Standard GitHub-hosted runners (ubuntu-*, windows-*) have Node.js pre-installed,
@@ -77,6 +79,17 @@ func DetectRuntimeRequirements(workflowData *WorkflowData) []RuntimeRequirement 
 	// harness wrappers, require Node.js runtime setup with the default version so workflows
 	// consistently execute the harness with Node 24.
 	if requiresNodeForEngineHarness(workflowData) {
+		nodeRuntime := findRuntimeByID("node")
+		if nodeRuntime != nil {
+			updateRequiredRuntime(nodeRuntime, string(constants.DefaultNodeVersion), requirements)
+		}
+	}
+
+	// When using a TypeScript Copilot SDK driver (.ts/.mts extension), require Node 24.
+	// Node 24 runs TypeScript natively; earlier versions do not support this.
+	// This only applies to file-extension-based driver detection, not to engine.command
+	// configurations (e.g. "ts-node driver.ts") which manage their own toolchain.
+	if requiresNode24ForTypeScriptSDKDriver(workflowData) {
 		nodeRuntime := findRuntimeByID("node")
 		if nodeRuntime != nil {
 			updateRequiredRuntime(nodeRuntime, string(constants.DefaultNodeVersion), requirements)
@@ -147,6 +160,38 @@ func requiresNodeForEngineHarness(workflowData *WorkflowData) bool {
 	// installation steps (GenerateNpmInstallSteps with includeNodeSetup=true), so no
 	// additional Node runtime requirement is needed for custom harness execution.
 	return strings.EqualFold(engineID, string(constants.CopilotEngine))
+}
+
+// requiresNode24ForTypeScriptSDKDriver returns true when a Copilot SDK driver is a TypeScript
+// file (.ts or .mts) detected by extension. Node 24 runs TypeScript natively; the runtime
+// setup ensures the correct version is provisioned.
+//
+// This does not apply when engine.command is set (e.g., "ts-node driver.ts"), since those
+// configurations manage their own TypeScript toolchain independently.
+func requiresNode24ForTypeScriptSDKDriver(workflowData *WorkflowData) bool {
+	if workflowData == nil || workflowData.EngineConfig == nil {
+		return false
+	}
+	if !workflowData.EngineConfig.CopilotSDK {
+		return false
+	}
+	// engine.command takes precedence; the user manages the toolchain explicitly.
+	if workflowData.EngineConfig.Command != "" {
+		return false
+	}
+	ext := filepath.Ext(workflowData.EngineConfig.Driver)
+	return strings.EqualFold(ext, ".ts") || strings.EqualFold(ext, ".mts")
+}
+
+func detectFromInlineEngineDriver(workflowData *WorkflowData, requirements map[string]*RuntimeRequirement) {
+	if workflowData == nil || workflowData.EngineConfig == nil || workflowData.EngineConfig.InlineDriver == nil {
+		return
+	}
+
+	runtime := findRuntimeByID(workflowData.EngineConfig.InlineDriver.Runtime)
+	if runtime != nil {
+		updateRequiredRuntime(runtime, "", requirements)
+	}
 }
 
 // detectFromCustomSteps scans custom steps YAML for runtime commands

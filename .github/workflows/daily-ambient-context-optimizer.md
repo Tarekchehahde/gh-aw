@@ -11,6 +11,10 @@ permissions:
   actions: read
   issues: read
   pull-requests: read
+  copilot-requests: write
+engine:
+  id: copilot
+  copilot-sdk: true
 tracker-id: daily-ambient-context-optimizer
 strict: true
 max-daily-ai-credits: 10000
@@ -18,7 +22,8 @@ network:
   allowed: [defaults, github]
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
 tools:
   cli-proxy: true
   github:
@@ -37,7 +42,7 @@ safe-outputs:
 timeout-minutes: 45
 steps:
   - name: Setup Python
-    uses: actions/setup-python@v6.3.0
+    uses: actions/setup-python@v7.0.0
     with:
       python-version: "3.12"
   - name: Prepare analysis workspace
@@ -155,9 +160,15 @@ steps:
         core.info(`PR close-rate (7d): ${rateStr} (${closed7d.length} closed, ${merged7d.length} merged)${autoPause ? ' — AUTO-PAUSE ACTIVE' : ''}`);
 
 imports:
+  - shared/mcp-pagination.md
   - shared/otlp.md
 features:
   gh-aw-detection: true
+evals:
+  - id: workflow_runs_sampled
+    question: Did the agent sample recent agentic workflow runs and inspect their ambient context?
+  - id: recommendations_produced
+    question: Were recommendations produced for prompt, skill, and agent changes to reduce ambient context size?
 ---
 
 # Daily Ambient Context Optimizer
@@ -306,6 +317,7 @@ Assess whether the request size is likely driven by:
 - too many inline agents or agent definitions that are not justified
 - duplicated guardrails, examples, or formatting rules
 - context that should be moved to deterministic `steps:` or smaller sub-agents
+- large output templates (issue body, discussion body, report formats) embedded inline in the prompt body rather than in `## skill:` blocks
 
 Review `prompt.txt` only as a compiler cross-check artifact:
 
@@ -319,11 +331,14 @@ Also review proxy/CLI feature readiness for each sampled workflow:
 
 When one or more are missing, include a recommendation to enable them and rewrite raw `gh aw` shell instructions into explicit `agentic-workflows` MCP-tool usage.
 
-## Sub-Agent Usage
+## Deep-Dive Analysis
 
-After the deterministic Python script finishes, invoke `request-optimizer` for **at most 2 sampled runs** using compact JSON summaries (never raw full prompts), and only when at least 2 sampled runs exist.
+After the deterministic Python script finishes, perform a deeper review yourself for **at most 2 sampled runs** (only when at least 2 sampled runs exist):
 
-Each sub-agent invocation may return at most 3 opportunities for its run. Aggregate and deduplicate those opportunities, then do the final prioritization yourself.
+1. For each selected run, review `run-<id>.json` alongside the deterministic analysis metrics already computed.
+2. Identify at most 3 opportunities per run, each described with `category`, `finding`, `evidence`, and `impact`.
+3. Base findings only on the compact structured metrics already gathered — never re-read raw full prompt text.
+4. Aggregate and deduplicate opportunities across the sampled runs, then do final prioritization.
 
 ## Execution Budget Guardrails
 
@@ -355,6 +370,7 @@ Prioritize recommendations that:
 3. simplify or remove low-value inline agents
 4. move deterministic data gathering out of the main prompt
 5. enable `gh-proxy` and `cli-proxy` when missing, then rewrite raw CLI-oriented problem wording to explicit `agentic-workflows` MCP-tool calls
+6. move large inline output templates (issue body, discussion body, report formats) into `## skill:` blocks so they are loaded on demand rather than unconditionally inflating the first request
 
 Do not recommend changes that would obviously weaken safety or remove necessary task context.
 
@@ -471,18 +487,9 @@ Do not use `noop` merely because the sample is small or imperfect. Create exactl
 
 If `create_issue` returns a body-size validation error, shorten the details and retry with a compact body that preserves Executive Summary, Highest-Leverage Changes, Key Metrics, and References.
 
-## agent: `request-optimizer`
----
-description: Ranks prompt-shrinking opportunities for one sampled run from compact deterministic metrics
-model: small
----
-You are a compact optimization classifier.
+## Deep-Dive Analysis Output Shape
 
-Input:
-- one JSON object for a sampled run
-- optional workflow source excerpt
-
-Return JSON only:
+Structure each per-run finding as:
 
 ```json
 {
@@ -500,6 +507,6 @@ Return JSON only:
 ```
 
 Rules:
-- return at most 3 opportunities
-- use only provided evidence
+- return at most 3 opportunities per run
+- use only provided compact evidence
 - prefer opportunities that reduce first-request size without reducing safety

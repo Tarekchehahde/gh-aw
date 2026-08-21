@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/github/gh-aw/pkg/console"
@@ -77,13 +78,14 @@ func runZizmorOnFiles(lockFiles []string, verbose bool, strict bool) error {
 	}
 
 	// Build the Docker command with JSON output for easier parsing
-	// docker run --rm -v "$(pwd)":/workdir -w /workdir ghcr.io/zizmorcore/zizmor:latest --format json <file1> <file2> ...
+	// docker run --rm -v "$(pwd)":/workdir -w /workdir ghcr.io/zizmorcore/zizmor:latest --persona auditor --format json <file1> <file2> ...
 	dockerArgs := []string{
 		"run",
 		"--rm",
 		"-v", gitRoot + ":/workdir",
 		"-w", "/workdir",
 		"ghcr.io/zizmorcore/zizmor:latest",
+		"--persona", "auditor",
 		"--format", "json",
 	}
 	dockerArgs = append(dockerArgs, relPaths...)
@@ -102,7 +104,7 @@ func runZizmorOnFiles(lockFiles []string, verbose bool, strict bool) error {
 
 	// In verbose mode, also show the command that users can run directly
 	if verbose {
-		dockerCmd := fmt.Sprintf("docker run --rm -v \"%s:/workdir\" -w /workdir ghcr.io/zizmorcore/zizmor:latest --format json %s",
+		dockerCmd := fmt.Sprintf("docker run --rm -v \"%s:/workdir\" -w /workdir ghcr.io/zizmorcore/zizmor:latest --persona auditor --format json %s",
 			gitRoot, strings.Join(relPaths, " "))
 		fmt.Fprintf(os.Stderr, "%s\n", console.FormatInfoMessage("Run zizmor directly: "+dockerCmd))
 	}
@@ -115,8 +117,8 @@ func runZizmorOnFiles(lockFiles []string, verbose bool, strict bool) error {
 	// Run the command
 	err = cmd.Run()
 
-	// Parse and reformat the output, get total warning count
-	totalWarnings, parseErr := parseAndDisplayZizmorOutput(stdout.String(), stderr.String(), verbose)
+	// Parse and reformat the output, get total warning count and high severity count
+	totalWarnings, highSeverityCount, parseErr := parseAndDisplayZizmorOutput(stdout.String(), stderr.String(), verbose)
 	if parseErr != nil {
 		zizmorLog.Printf("Failed to parse zizmor output: %v", parseErr)
 		// Fall back to showing raw output
@@ -126,6 +128,11 @@ func runZizmorOnFiles(lockFiles []string, verbose bool, strict bool) error {
 		if stderr.Len() > 0 {
 			fmt.Fprint(os.Stderr, stderr.String())
 		}
+	}
+
+	fileDescription := "workflows"
+	if len(lockFiles) == 1 {
+		fileDescription = filepath.Base(lockFiles[0])
 	}
 
 	// Check if the error is due to findings (expected) or actual failure
@@ -138,25 +145,21 @@ func runZizmorOnFiles(lockFiles []string, verbose bool, strict bool) error {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode := exitErr.ExitCode()
-			zizmorLog.Printf("Zizmor exited with code %d (warnings=%d)", exitCode, totalWarnings)
+			zizmorLog.Printf("Zizmor exited with code %d (warnings=%d, high=%d)", exitCode, totalWarnings, highSeverityCount)
 			// Exit codes 10-14 indicate findings
 			if exitCode >= 10 && exitCode <= 14 {
-				// In strict mode, findings are treated as errors
+				// High/critical severity findings always fail, regardless of strict mode
+				if highSeverityCount > 0 {
+					return fmt.Errorf("zizmor found %d high/critical severity finding(s) in %s", highSeverityCount, fileDescription)
+				}
+				// In strict mode, all findings are treated as errors
 				if strict {
-					fileDescription := "workflows"
-					if len(lockFiles) == 1 {
-						fileDescription = filepath.Base(lockFiles[0])
-					}
 					return fmt.Errorf("strict mode: zizmor found %d security warnings/errors in %s - workflows must have no zizmor findings in strict mode", totalWarnings, fileDescription)
 				}
-				// In non-strict mode, findings are logged but not treated as errors
+				// In non-strict mode, non-high findings are logged but not treated as errors
 				return nil
 			}
 			// Other exit codes are actual errors
-			fileDescription := "workflows"
-			if len(lockFiles) == 1 {
-				fileDescription = filepath.Base(lockFiles[0])
-			}
 			return fmt.Errorf("zizmor failed with exit code %d on %s", exitCode, fileDescription)
 		}
 		// Non-ExitError errors (e.g., command not found)
@@ -174,8 +177,8 @@ func runZizmorOnFile(lockFile string, verbose bool, strict bool) error {
 }
 
 // parseAndDisplayZizmorOutput parses zizmor JSON output and displays it in the desired format
-// Returns the total number of warnings found
-func parseAndDisplayZizmorOutput(stdout, stderr string, verbose bool) (int, error) {
+// Returns the total number of warnings found and the number of high/critical severity findings
+func parseAndDisplayZizmorOutput(stdout, stderr string, verbose bool) (int, int, error) {
 	// Map findings to files for detailed display
 	fileFindings := make(map[string][]zizmorFinding)
 
@@ -201,9 +204,10 @@ func parseAndDisplayZizmorOutput(stdout, stderr string, verbose bool) (int, erro
 	// Parse JSON findings from stdout
 	var findings []zizmorFinding
 	totalWarnings := 0
+	highSeverityCount := 0
 	if stdout != "" && strings.HasPrefix(strings.TrimSpace(stdout), "[") {
 		if err := json.Unmarshal([]byte(stdout), &findings); err != nil {
-			return 0, fmt.Errorf("failed to parse zizmor JSON output: %w", err)
+			return 0, 0, fmt.Errorf("failed to parse zizmor JSON output: %w", err)
 		}
 
 		// Organize findings by file
@@ -218,13 +222,38 @@ func parseAndDisplayZizmorOutput(stdout, stderr string, verbose bool) (int, erro
 					}{}
 					fileFindings[filePath] = append(fileFindings[filePath], finding)
 					totalWarnings++
+					if finding.Determinations.Severity == "High" || finding.Determinations.Severity == "Critical" {
+						highSeverityCount++
+					}
 				}
 			}
 		}
 	}
 
-	// Display reformatted output for each completed file
-	for _, filePath := range completedFiles {
+	// Build the ordered list of files to display findings for.
+	// Preserve the stderr "completed" ordering first, then append (in sorted order)
+	// any finding paths absent from that list.  This handles two failure modes:
+	//  (a) the zizmor Docker image changes its log format and no "completed"
+	//      lines are emitted at all — completedFiles stays empty and we fall
+	//      back entirely to sorted fileFindings keys.
+	//  (b) the log format is partially intact — some "completed" lines arrive
+	//      but not all — so findings for the unlisted files would otherwise be
+	//      silently dropped.
+	listedSet := make(map[string]struct{}, len(completedFiles))
+	for _, fp := range completedFiles {
+		listedSet[fp] = struct{}{}
+	}
+	var extraFiles []string
+	for fp := range fileFindings {
+		if _, seen := listedSet[fp]; !seen {
+			extraFiles = append(extraFiles, fp)
+		}
+	}
+	sort.Strings(extraFiles)
+	displayFiles := append(completedFiles, extraFiles...)
+
+	// Display reformatted output for each file with findings
+	for _, filePath := range displayFiles {
 		findings := fileFindings[filePath]
 		count := len(findings)
 
@@ -298,5 +327,5 @@ func parseAndDisplayZizmorOutput(stdout, stderr string, verbose bool) (int, erro
 		}
 	}
 
-	return totalWarnings, nil
+	return totalWarnings, highSeverityCount, nil
 }

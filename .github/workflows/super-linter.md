@@ -32,7 +32,7 @@ jobs:
       statuses: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           # super-linter needs the full git history to get the
           # list of files that changed across commits
@@ -40,6 +40,7 @@ jobs:
           persist-credentials: false
       
       - name: Run super-linter
+        # zizmor: ignore[github_action_from_unverified_creator_used]
         uses: super-linter/super-linter@v8.7.0 # x-release-please-version
         id: super-linter
         env:
@@ -49,8 +50,11 @@ jobs:
           DEFAULT_BRANCH: main
           # Only validate Markdown - other linters (Go, JS, YAML, Shell) run in CI
           VALIDATE_MARKDOWN: "true"
-          # Disable all other linters to improve performance
-          VALIDATE_ALL_CODEBASE: "false"
+          # Scheduled runs have no diff, so they must validate the full codebase.
+          VALIDATE_ALL_CODEBASE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+          # Avoid false-negative failures from super-linter summary formatter
+          ENABLE_GITHUB_ACTIONS_STEP_SUMMARY: "false"
+          ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: "false"
           FILTER_REGEX_EXCLUDE: "(^|.*/)super-linter-output/.*"
       
       - name: Check for linting issues
@@ -100,10 +104,9 @@ tools:
   edit:
   bash:
     - "*"
-
 sandbox:
   agent:
-    sudo: false
+    runtime: cloud-hypervisor
 ---
 
 # Super Linter Analysis Report

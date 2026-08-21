@@ -39,6 +39,7 @@ tracker-id: daily-cli-performance
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 tools:
   cli-proxy: true
   repo-memory:
@@ -63,6 +64,7 @@ safe-outputs:
 timeout-minutes: 20
 strict: true
 imports:
+  - shared/mcp-pagination.md
   - uses: shared/daily-audit-base.md
     with:
       title-prefix: "[daily-cli-performance] "
@@ -78,7 +80,13 @@ features:
   gh-aw-detection: true
 sandbox:
   agent:
-    sudo: false
+    id: awf
+    runtime: docker-sbx
+evals:
+  - id: benchmarks_run
+    question: Did the agent run CLI performance benchmarks and track performance trends?
+  - id: report_created_or_regression_flagged
+    question: Was a performance report produced, or was a regression flagged when performance degraded?
 ---
 
 {{#runtime-import? .github/shared-instructions.md}}
@@ -225,11 +233,42 @@ if [ ! -f /tmp/gh-aw/repo-memory/default/benchmark_history.jsonl ]; then
   touch /tmp/gh-aw/repo-memory/default/benchmark_history.jsonl
 fi
 
-# Prune history to the last 14 entries (bounded context window)
 HISTORY_FILE="/tmp/gh-aw/repo-memory/default/benchmark_history.jsonl"
 MAX_HISTORY_ENTRIES=14
+
+# Drop any lines that are not valid single-line JSON objects. This repairs files
+# corrupted by earlier runs that appended pretty-printed (multi-line) JSON.
+python3 - "$HISTORY_FILE" << 'PYEOF' || { echo "Error: failed to sanitize history file"; exit 1; }
+import json
+import sys
+
+path = sys.argv[1]
+valid = []
+dropped = 0
+with open(path, 'r') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            dropped += 1
+            continue
+        if isinstance(entry, dict):
+            valid.append(json.dumps(entry, separators=(',', ':')))
+        else:
+            dropped += 1
+if dropped:
+    print(f"Dropped {dropped} malformed history line(s)")
+with open(path, 'w') as f:
+    for line in valid:
+        f.write(line + "\n")
+print(f"Valid history entries: {len(valid)}")
+PYEOF
+
+# Prune history to the last 14 entries (bounded context window)
 ENTRY_COUNT=$(wc -l < "$HISTORY_FILE" | tr -d ' ')
-echo "Current history entries: $ENTRY_COUNT"
 if [ "$ENTRY_COUNT" -gt "$MAX_HISTORY_ENTRIES" ]; then
   echo "Pruning history to last $MAX_HISTORY_ENTRIES entries (was $ENTRY_COUNT)"
   tail -"$MAX_HISTORY_ENTRIES" "$HISTORY_FILE" > "${HISTORY_FILE}.tmp" \
@@ -238,11 +277,12 @@ if [ "$ENTRY_COUNT" -gt "$MAX_HISTORY_ENTRIES" ]; then
     || { echo "Error: failed to replace history file after pruning"; exit 1; }
 fi
 
-# Append current results to history
-{
-  cat /tmp/gh-aw/agent/benchmarks/current_metrics.json
-  echo ""
-} >> "$HISTORY_FILE"
+# Append current results to history as a single compacted JSONL line.
+# NOTE: current_metrics.json is pretty-printed, so it MUST be compacted before
+# appending — appending it verbatim breaks the one-object-per-line JSONL format.
+python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(',', ':')))" \
+  /tmp/gh-aw/agent/benchmarks/current_metrics.json >> "$HISTORY_FILE" \
+  || { echo "Error: failed to append current metrics to history file"; exit 1; }
 
 echo "Historical data updated ($(wc -l < "$HISTORY_FILE" | tr -d ' ') entries)"
 ```
@@ -261,6 +301,7 @@ Analyze benchmark trends and detect performance regressions
 """
 import json
 import os
+import statistics
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -275,6 +316,11 @@ MAX_HISTORY_ENTRIES = 14
 # Regression thresholds
 REGRESSION_THRESHOLD = 1.10  # 10% slower is a regression
 WARNING_THRESHOLD = 1.05     # 5% slower is a warning
+
+# Environment-noise detection: when most unrelated benchmarks regress at once, the
+# runner was almost certainly noisy (shared/overloaded CI host), not the code.
+NOISE_MIN_REGRESSIONS = 3    # need at least this many regressions to suspect noise
+NOISE_REGRESSION_RATIO = 0.5 # ...covering at least this fraction of all benchmarks
 
 def load_history():
     """Load historical benchmark data — capped at last MAX_HISTORY_ENTRIES entries to bound context size"""
@@ -313,9 +359,10 @@ def analyze_benchmark(name, current_ns, history_data):
             'change_percent': 0
         }
     
-    # Calculate average of recent history (last 7 data points)
+    # Use the median of recent history (last 7 data points) as the baseline —
+    # the median is far less sensitive to one-off noisy runs than the mean
     recent_history = historical_values[-7:] if len(historical_values) >= 7 else historical_values
-    avg_historical = sum(recent_history) / len(recent_history)
+    avg_historical = statistics.median(recent_history)
     
     # Calculate change percentage
     change_percent = ((current_ns - avg_historical) / avg_historical) * 100
@@ -376,12 +423,26 @@ def main():
         elif result['status'] == 'stable':
             analysis['summary']['stable'] += 1
     
+    # Detect likely environment noise: many unrelated benchmarks slowing down in the
+    # same run points at a noisy runner rather than a real code regression.
+    # Warnings count as degraded too, since noise spreads unevenly across benchmarks.
+    summary_counts = analysis['summary']
+    regressions = summary_counts['regressions']
+    degraded = regressions + summary_counts['warnings']
+    total = summary_counts['total']
+    likely_noise = (
+        regressions >= NOISE_MIN_REGRESSIONS
+        and total > 0
+        and degraded / total >= NOISE_REGRESSION_RATIO
+    )
+    analysis['summary']['likely_environment_noise'] = likely_noise
+
     # Save analysis
     with open(OUTPUT_FILE, 'w') as f:
         json.dump(analysis, f, indent=2)
     
     summary = analysis['summary']
-    print(f"Analysis complete! total={summary['total']} regressions={summary['regressions']} warnings={summary['warnings']} improvements={summary['improvements']}")
+    print(f"Analysis complete! total={summary['total']} regressions={summary['regressions']} warnings={summary['warnings']} improvements={summary['improvements']} likely_environment_noise={summary['likely_environment_noise']}")
 
 if __name__ == '__main__':
     main()
@@ -408,10 +469,11 @@ cat /tmp/gh-aw/agent/benchmarks/analysis.json | python3 -m json.tool
 If regressions are detected, open issues with detailed information.
 
 **Rules for opening issues:**
-1. Open one issue per regression detected (max 3 as per safe-outputs config)
-2. Include benchmark name, current performance, historical average, and change percentage
-3. Add "performance" and "automation" labels
-4. Use title format: `[performance] Regression in [BenchmarkName]: X% slower`
+1. Do **not** open regression issues when the analysis reports `"likely_environment_noise": true` (many unrelated benchmarks regressing at once indicates a noisy runner, not a code regression) — mention it in the report instead and recommend a re-run
+2. Otherwise, open one issue per regression detected (max 3 as per safe-outputs config)
+3. Include benchmark name, current performance, historical median, and change percentage
+4. Add "performance" and "automation" labels
+5. Use title format: `[performance] Regression in [BenchmarkName]: X% slower`
 
 **Issue template:**
 
@@ -495,6 +557,13 @@ def main():
         print("✅ No performance regressions detected!")
         return
     
+    if analysis['summary'].get('likely_environment_noise'):
+        print(f"⏭️ {len(regressions)} regression(s) detected across unrelated benchmarks — "
+              "classified as likely environment noise, no regression issues will be opened.")
+        with open('/tmp/gh-aw/agent/benchmarks/regressions.json', 'w') as f:
+            json.dump([], f, indent=2)
+        return
+
     print(f"⚠️ Found {len(regressions)} regression(s):")
     for reg in regressions:
         print(f"  - {reg['name']}: {reg['change_percent']:+.1f}%")
@@ -511,7 +580,7 @@ chmod +x /tmp/gh-aw/agent/benchmarks/create_issues.py
 python3 /tmp/gh-aw/agent/benchmarks/create_issues.py
 ```
 
-Now, for each regression found, use the `create issue` tool to open an issue with the details.
+Now, for each regression found in `regressions.json` (empty when the run was classified as likely environment noise), use the `create issue` tool to open an issue with the details.
 
 ## Phase 5: Generate Performance Report
 
@@ -683,10 +752,11 @@ Target compilation times (from PR description):
 Performance data is stored in:
 - **Location**: `/tmp/gh-aw/repo-memory/default/`
 - **File**: `benchmark_history.jsonl`
-- **Format**: JSON Lines (one entry per day)
+- **Format**: JSON Lines (one compacted single-line JSON object per day — never pretty-printed)
 - **Retention**: Last 14 entries (≈2 weeks) — older entries are pruned each run to bound context size (`MAX_HISTORY_ENTRIES` in the bash pruning step and `analyze_trends.py`)
+- **Self-healing**: Lines that are not valid single-line JSON objects are dropped before appending, repairing any previously corrupted file
 
-Each entry contains:
+Each entry is written as one line; shown formatted here for readability:
 ```json
 {
   "timestamp": "2025-12-31T17:00:00Z",
@@ -701,5 +771,11 @@ Each entry contains:
   }
 }
 ```
+
+## Reporting Guidelines
+
+- Use `###` (h3) or lower for all report headers; never use `#` or `##` inside the report body.
+- Wrap long lists, tables, and detailed findings in `<details><summary><b>...</b></summary>...</details>` blocks for progressive disclosure.
+- Structure reports as: overview → key metrics/issues → collapsible detail → next actions.
 
 Begin your daily performance analysis now!

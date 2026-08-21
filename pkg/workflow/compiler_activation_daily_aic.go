@@ -25,7 +25,13 @@ func (c *Compiler) buildDailyAICAppTokenMintStep(app *GitHubAppConfig) []string 
 	steps = append(steps, "      - name: Generate GitHub App token for daily AIC guardrail\n")
 	steps = append(steps, fmt.Sprintf("        id: %s\n", dailyAICAppTokenStepID))
 	if app.shouldIgnoreMissingKey() {
-		steps = append(steps, fmt.Sprintf("        if: %s && %s\n", maxDailyAICreditsConfiguredIfExpr, buildIgnoreIfMissingCondition(app)))
+		guard := buildIgnoreIfMissingCondition(app)
+		steps = appendStepEnvAssignments(steps, guard.EnvAssignments)
+		if condition := combineGitHubIfExpressions(maxDailyAICreditsConfiguredIfExpr, guard.Condition); condition != "" {
+			steps = append(steps, fmt.Sprintf("        if: %s\n", condition))
+		} else {
+			steps = append(steps, fmt.Sprintf("        if: %s\n", maxDailyAICreditsConfiguredIfExpr))
+		}
 	} else {
 		steps = append(steps, fmt.Sprintf("        if: %s\n", maxDailyAICreditsConfiguredIfExpr))
 	}
@@ -91,10 +97,12 @@ func (c *Compiler) resolveDailyAICToken(data *WorkflowData) string {
 }
 
 func (c *Compiler) buildActivationDailyAICGuardrailStep(data *WorkflowData) []string {
+	compilerActivationJobLog.Printf("Building daily AIC guardrail step: dedicated_app=%t, cache_enabled=%t", data.MaxDailyAICreditsGitHubApp != nil, data.WorkflowID != "")
 	var steps []string
 	// When a dedicated GitHub App is configured for the daily AIC guardrail, mint
 	// its token first so the subsequent steps can reference it.
 	if data.MaxDailyAICreditsGitHubApp != nil {
+		compilerActivationJobLog.Print("Prepending dedicated daily-AIC app-token mint step")
 		steps = append(steps, c.buildDailyAICAppTokenMintStep(data.MaxDailyAICreditsGitHubApp)...)
 	}
 	// Prepend cache restore step so cached AIC values from prior runs are available
@@ -163,6 +171,7 @@ func buildDailyAICActivationJobEnv(data *WorkflowData) map[string]string {
 	}
 	value := strings.TrimSpace(*data.MaxDailyAICredits)
 	if value == "" {
+		compilerActivationJobLog.Print("Daily AIC guardrail configured but max-daily-ai-credits value is empty; omitting activation job env")
 		return nil
 	}
 	if isExpression(value) {

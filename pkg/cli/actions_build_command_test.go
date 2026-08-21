@@ -24,7 +24,7 @@ func TestActionsBuildCommand_NoActionsDir(t *testing.T) {
 	// Test with non-existent actions directory
 	err = ActionsBuildCommand()
 	require.Error(t, err, "Should error when actions/ directory does not exist")
-	assert.Contains(t, err.Error(), "actions/ directory does not exist", "Error should mention missing directory")
+	require.ErrorContains(t, err, "actions/ directory does not exist", "Error should mention missing directory")
 }
 
 func TestActionsValidateCommand_NoActionsDir(t *testing.T) {
@@ -58,6 +58,7 @@ func TestActionsCleanCommand_NoActionsDir(t *testing.T) {
 }
 
 func TestGetActionDirectories(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		setup       func(string) error
@@ -111,6 +112,7 @@ func TestGetActionDirectories(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			err := tt.setup(tmpDir)
 			require.NoError(t, err, "Setup should not fail")
@@ -129,6 +131,7 @@ func TestGetActionDirectories(t *testing.T) {
 }
 
 func TestGetActionDirectories_SortedOutput(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	actionsDir := filepath.Join(tmpDir, "actions")
 	// Create directories in reverse-alphabetical order to verify sorting
@@ -142,6 +145,7 @@ func TestGetActionDirectories_SortedOutput(t *testing.T) {
 }
 
 func TestValidateActionYml(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		actionYmlContent string
@@ -217,6 +221,7 @@ runs:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			actionPath := filepath.Join(tmpDir, "test-action")
 			err := os.MkdirAll(actionPath, 0755)
@@ -233,7 +238,7 @@ runs:
 			if tt.expectError {
 				require.Error(t, err, "Expected an error")
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
 				require.NoError(t, err, "Should not error for valid action.yml")
@@ -243,6 +248,7 @@ runs:
 }
 
 func TestGetActionDependencies(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		actionName string
@@ -262,6 +268,7 @@ func TestGetActionDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			deps := getActionDependencies(tt.actionName)
 			assert.GreaterOrEqual(t, len(deps), tt.minDeps, "Should return at least minimum dependencies")
 		})
@@ -284,7 +291,7 @@ func TestActionsBuildCommand_EmptyActionsDir(t *testing.T) {
 
 	// Test with empty actions directory
 	err = ActionsBuildCommand()
-	assert.NoError(t, err, "Should not error with empty actions directory")
+	require.NoError(t, err, "Should not error with empty actions directory")
 }
 
 func TestActionsValidateCommand_EmptyActionsDir(t *testing.T) {
@@ -303,7 +310,7 @@ func TestActionsValidateCommand_EmptyActionsDir(t *testing.T) {
 
 	// Test with empty actions directory
 	err = ActionsValidateCommand()
-	assert.NoError(t, err, "Should not error with empty actions directory")
+	require.NoError(t, err, "Should not error with empty actions directory")
 }
 
 func TestActionsCleanCommand_EmptyActionsDir(t *testing.T) {
@@ -322,10 +329,11 @@ func TestActionsCleanCommand_EmptyActionsDir(t *testing.T) {
 
 	// Test with empty actions directory
 	err = ActionsCleanCommand()
-	assert.NoError(t, err, "Should not error with empty actions directory")
+	require.NoError(t, err, "Should not error with empty actions directory")
 }
 
 func TestIsCompositeAction(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		actionYmlContent string
@@ -373,6 +381,7 @@ runs:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			actionPath := filepath.Join(tmpDir, "test-action")
 			err := os.MkdirAll(actionPath, 0755)

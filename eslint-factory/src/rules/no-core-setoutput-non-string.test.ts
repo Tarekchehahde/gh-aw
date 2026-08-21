@@ -9,6 +9,13 @@ const cjsRuleTester = new RuleTester({
   },
 });
 
+const esmRuleTester = new RuleTester({
+  languageOptions: {
+    ecmaVersion: 2022,
+    sourceType: "module",
+  },
+});
+
 describe("no-core-setoutput-non-string", () => {
   it("uses the correct docs URL", () => {
     expect(noCoreSetOutputNonStringRule.meta.docs.url).toBe("https://github.com/github/gh-aw/tree/main/eslint-factory#no-core-setoutput-non-string");
@@ -34,6 +41,13 @@ describe("no-core-setoutput-non-string", () => {
   it("valid: non-core.setOutput calls are not flagged", () => {
     cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
       valid: [`other.setOutput("count", 0);`, `setOutput("count", 0);`, `myCore.setOutput("count", 0);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: coreObj alias with string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`coreObj.setOutput("aic", roundedAIC);`, `coreObj.setOutput("result", "hello");`, `coreObj.setOutput("count", String(items.length));`],
       invalid: [],
     });
   });
@@ -181,6 +195,312 @@ describe("no-core-setoutput-non-string", () => {
         {
           code: `core["setOutput"]("count", 0);`,
           errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `core["setOutput"]("count", String(0));` }] }],
+        },
+      ],
+    });
+  });
+
+  it("invalid: coreObj alias with numeric value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `coreObj.setOutput("aic", 0);`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              data: { kind: "numeric literal", valueText: "0" },
+              suggestions: [{ messageId: "wrapWithString", data: { valueText: "0" }, output: `coreObj.setOutput("aic", String(0));` }],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: coreObj alias with boolean value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `coreObj.setOutput("success", true);`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [{ messageId: "wrapWithString", output: `coreObj.setOutput("success", String(true));` }],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: coreObj alias with null value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `coreObj.setOutput("result", null);`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [
+                { messageId: "useEmptyString", output: `coreObj.setOutput("result", "");` },
+                { messageId: "wrapWithString", output: `coreObj.setOutput("result", String(null));` },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: single-assignment const alias with string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`const c = core; c.setOutput("n", "str");`, `const c = core; c.setOutput("n", someVariable);`, `const c = coreObj; c.setOutput("n", "str");`],
+      invalid: [],
+    });
+  });
+
+  it("invalid: single-assignment const alias with non-string value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const c = core; c.setOutput("count", items.length);`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `const c = core; c.setOutput("count", String(items.length));` }] }],
+        },
+        {
+          code: `const c = core; c.setOutput("flag", true);`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `const c = core; c.setOutput("flag", String(true));` }] }],
+        },
+        {
+          code: `const c = core; c.setOutput("result", null);`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [
+                { messageId: "useEmptyString", output: `const c = core; c.setOutput("result", "");` },
+                { messageId: "wrapWithString", output: `const c = core; c.setOutput("result", String(null));` },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: let alias with reassignment is NOT flagged (not a safe const alias)", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`let c = core; c = other; c.setOutput("n", 1);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: non-core const alias is NOT flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`const c = other; c.setOutput("n", 1);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: destructured setOutput from core with string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`const { setOutput } = core; setOutput("n", "str");`, `const { setOutput } = core; setOutput("n", someVariable);`, `const { setOutput: so } = core; so("n", "str");`],
+      invalid: [],
+    });
+  });
+
+  it("invalid: destructured setOutput from core with non-string value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `const { setOutput } = core; setOutput("count", items.length);`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `const { setOutput } = core; setOutput("count", String(items.length));` }] }],
+        },
+        {
+          code: `const { setOutput } = core; setOutput("flag", true);`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `const { setOutput } = core; setOutput("flag", String(true));` }] }],
+        },
+        {
+          code: `const { setOutput: so } = core; so("n", items.length);`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `const { setOutput: so } = core; so("n", String(items.length));` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: standalone setOutput identifier from non-core source is NOT flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`function setOutput(k, v) {} setOutput("n", 1);`, `const { setOutput } = other; setOutput("n", 1);`],
+      invalid: [],
+    });
+  });
+
+  it("valid: function parameter with core-alias name and string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [`function f(core) { core.setOutput("n", "str"); }`, `function f(core) { core.setOutput("n", someVariable); }`, `function f(coreObj) { coreObj.setOutput("n", "str"); }`],
+      invalid: [],
+    });
+  });
+
+  it("invalid: function parameter with core-alias name and non-string value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `function f(core) { core.setOutput("count", items.length); }`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `function f(core) { core.setOutput("count", String(items.length)); }` }] }],
+        },
+        {
+          code: `function f(coreObj) { coreObj.setOutput("flag", true); }`,
+          errors: [{ messageId: "nonStringValue", suggestions: [{ messageId: "wrapWithString", output: `function f(coreObj) { coreObj.setOutput("flag", String(true)); }` }] }],
+        },
+      ],
+    });
+  });
+
+  it("valid: function parameter not in CORE_ALIASES is not treated as core (shadow-exclusion)", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [
+        // `coreArg` is not in CORE_ALIASES — must not be treated as a core object
+        `function f(coreArg) { coreArg.setOutput("n", 0); }`,
+        `function f(myCore) { myCore.setOutput("n", 0); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: JSDoc-annotated DI parameter with string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setOutput("n", "str"); }`,
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setOutput("n", someVariable); }`,
+        // coreLib as a differently-named DI parameter
+        `/** @param {typeof import('@actions/core')} coreLib */
+function f(coreLib) { coreLib.setOutput("n", String(count)); }`,
+        // double-quote variant
+        `/** @param {typeof import("@actions/core")} coreArg */
+function f(coreArg) { coreArg.setOutput("n", "str"); }`,
+        // un-annotated parameter must NOT be treated as core
+        `function f(coreArg) { coreArg.setOutput("n", 0); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("valid: export async function with JSDoc-annotated DI parameter is accepted (ESM)", () => {
+    esmRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [
+        // export function — JSDoc is before the ExportNamedDeclaration, not the inner FunctionDeclaration
+        `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setOutput("n", "str"); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: JSDoc-annotated DI parameter with non-string value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setOutput("count", 0); }`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              data: { kind: "numeric literal", valueText: "0" },
+              suggestions: [
+                {
+                  messageId: "wrapWithString",
+                  data: { valueText: "0" },
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { coreArg.setOutput("count", String(0)); }`,
+                },
+              ],
+            },
+          ],
+        },
+        {
+          code: `/** @param {typeof import('@actions/core')} coreLib */
+function g(coreLib) { coreLib.setOutput("flag", true); }`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [
+                {
+                  messageId: "wrapWithString",
+                  output: `/** @param {typeof import('@actions/core')} coreLib */
+function g(coreLib) { coreLib.setOutput("flag", String(true)); }`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("invalid: export async function with JSDoc-annotated DI parameter with non-string value is flagged (ESM)", () => {
+    esmRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        // export async function — JSDoc is before the ExportNamedDeclaration
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setOutput("count", 0); }`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [
+                {
+                  messageId: "wrapWithString",
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+export async function main(coreArg) { coreArg.setOutput("count", String(0)); }`,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("valid: JSDoc-annotated DI param destructuring with string value is accepted", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setOutput } = coreArg; setOutput("n", "str"); }`,
+        `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setOutput } = coreArg; setOutput("n", someVariable); }`,
+      ],
+      invalid: [],
+    });
+  });
+
+  it("invalid: JSDoc-annotated DI param destructuring with non-string value is flagged", () => {
+    cjsRuleTester.run("no-core-setoutput-non-string", noCoreSetOutputNonStringRule, {
+      valid: [],
+      invalid: [
+        {
+          code: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setOutput } = coreArg; setOutput("count", 0); }`,
+          errors: [
+            {
+              messageId: "nonStringValue",
+              suggestions: [
+                {
+                  messageId: "wrapWithString",
+                  output: `/** @param {typeof import('@actions/core')} coreArg */
+function f(coreArg) { const { setOutput } = coreArg; setOutput("count", String(0)); }`,
+                },
+              ],
+            },
+          ],
         },
       ],
     });

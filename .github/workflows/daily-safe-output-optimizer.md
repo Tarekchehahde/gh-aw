@@ -15,9 +15,12 @@ permissions:
 
 sandbox:
   agent:
-    sudo: false
-
-engine: claude
+    runtime: cloud-hypervisor
+    id: awf
+engine:
+  id: claude
+  mcp:
+    tool-timeout: 10m
 safe-outputs:
   create-issue:
     expires: 2d
@@ -42,6 +45,7 @@ imports:
       title-prefix: "[safe-output-optimizer] "
       expires: 3d
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   agentic-workflows:
@@ -64,6 +68,13 @@ experiments:
     weight: [50, 50]
     start_date: "2026-06-09"
 
+evals:
+  - id: errored_calls_analyzed
+    question: Did the agent analyze gateway logs for errored safe output tool calls?
+  - id: issues_created_or_noop
+    question: Were issues created to improve tool descriptions for errored calls, or was noop used when no errors were found?
+features:
+  gh-aw-detection: true
 ---
 
 # Safe Output Tool Optimizer
@@ -401,8 +412,6 @@ After updating the tool description:
 - **Be specific**: Provide exact field names, workflow names, run IDs
 - **Be evidence-based**: Show actual error examples, not assumptions
 - **Be actionable**: Recommend specific description improvements
-
-- **Report Formatting**: Use h3 (###) or lower for all headers in your report to maintain proper document hierarchy. Wrap long sections in `<details><summary>Section Name</summary>` tags to improve readability and reduce scrolling.
 
 ### Issue Creation Rules
 

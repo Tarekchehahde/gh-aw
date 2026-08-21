@@ -16,6 +16,7 @@ const fs = require("fs");
 
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { execGitSync } = require("./git_helpers.cjs");
+const { parseDiffGitHeader } = require("./patch_path_helpers.cjs");
 
 /**
  * Debug logging helper - logs to stderr when DEBUG env var matches
@@ -102,6 +103,77 @@ function buildExcludePathspecs(excludedFiles) {
 }
 
 /**
+ * Compute net UTF-8 bytes added by a unified diff.
+ *
+ * "Net added bytes" per file = (bytes in added lines) − (bytes in deleted lines), clamped to
+ * zero per file, then summed across all files in the diff.
+ *
+ * Using the net value instead of raw additions means that files which are
+ * completely rewritten with similar-sized content (e.g. a JSON object whose
+ * keys are regenerated) contribute only their actual growth to the patch-size
+ * budget rather than their entire new content.  This avoids the false positive
+ * where the tool reports "entire source code size" for a rewrite that barely
+ * changes the logical payload.
+ *
+ * Clamping is applied per file, not globally, so that a large deletion in one
+ * file cannot mask a large addition in a different file.  Each file's net
+ * contribution is clamped to zero independently before being added to the
+ * running total.
+ *
+ * Rules:
+ *   - Only lines inside diff hunks (after the first "@@" line) are examined.
+ *   - Lines that start with "+++" (file header) are excluded because they appear
+ *     before the first "@@" and are never inside a hunk.
+ *   - A new "diff " line flushes the current file's net contribution and resets
+ *     per-file counters.
+ *
+ * @param {string} patchContent - Output of `git diff` (unified diff format)
+ * @returns {number} Sum of per-file net added bytes (≥ 0)
+ */
+function getPatchDiffSizeBytes(patchContent) {
+  let inHunk = false;
+  let fileAdd = 0;
+  let fileDel = 0;
+  let total = 0;
+  for (const line of patchContent.split("\n")) {
+    if (line.startsWith("diff ")) {
+      total += Math.max(0, fileAdd - fileDel);
+      fileAdd = 0;
+      fileDel = 0;
+      inHunk = false;
+    } else if (line.startsWith("@@")) {
+      inHunk = true;
+    }
+    if (inHunk) {
+      if (line.startsWith("+")) {
+        fileAdd += Buffer.byteLength(line + "\n", "utf8");
+      } else if (line.startsWith("-")) {
+        fileDel += Buffer.byteLength(line + "\n", "utf8");
+      }
+    }
+  }
+  total += Math.max(0, fileAdd - fileDel);
+  return total;
+}
+
+/**
+ * Compute the net patch diff size for staged changes (git diff --cached).
+ *
+ * Returns the net bytes added by the staged diff: additions minus deletions,
+ * clamped to zero.  This is the "diff size" used to enforce max-patch-size on
+ * repo-memory pushes.
+ *
+ * @param {Object} options
+ * @param {(args: string[], opts?: Record<string, any>) => string} options.execGitSyncFn
+ * @param {string} [options.cwd]
+ * @returns {number}
+ */
+function getStagedPatchDiffSizeBytes({ execGitSyncFn, cwd }) {
+  const patchContent = execGitSyncFn(["diff", "--cached"], { stdio: "pipe", cwd });
+  return getPatchDiffSizeBytes(patchContent);
+}
+
+/**
  * Compute the net diff size in bytes between two refs in the given git repo.
  *
  * This is the value that should be compared against `max_patch_size` in
@@ -129,6 +201,7 @@ function computeIncrementalDiffSize({ baseRef, headRef, cwd, tmpPath, excludedFi
     return null;
   }
   const excludeArgs = buildExcludePathspecs(excludedFiles);
+  /** @type {any} */
   let diffSize = null;
   try {
     execGitSync(["diff", "--binary", `--output=${tmpPath}`, `${baseRef}..${headRef}`, ...excludeArgs], { cwd });
@@ -151,6 +224,286 @@ function computeIncrementalDiffSize({ baseRef, headRef, cwd, tmpPath, excludedFi
   return diffSize;
 }
 
+/**
+ * Returns true when value looks like a plain git branch/ref name.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isValidGitBranchName(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("{") || trimmed.includes('"message"')) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Rewrite format-patch "new file" hunks to modify diffs when the path already exists
+ * on origin/<baseBranch> in a separate target-repo checkout (cross-repo safe outputs).
+ *
+ * @param {string} patchContent
+ * @param {{ agentCwd: string, targetTreeCwd: string, baseBranch: string, pinnedSha?: string, execGit?: typeof execGitSync }} options
+ * @returns {string}
+ */
+function rewriteCrossRepoCreatePatches(patchContent, options) {
+  const { agentCwd, targetTreeCwd, baseBranch, pinnedSha, execGit = execGitSync } = options;
+  if (!patchContent || !agentCwd || !targetTreeCwd || agentCwd === targetTreeCwd || !isValidGitBranchName(baseBranch)) {
+    return patchContent;
+  }
+
+  const targetBaseRef = `refs/remotes/origin/${baseBranch}`;
+  try {
+    execGit(["show-ref", "--verify", "--quiet", targetBaseRef], { cwd: targetTreeCwd });
+  } catch {
+    return patchContent;
+  }
+
+  const parts = patchContent.split(/(?=^diff --git )/m);
+  if (parts.length <= 1) {
+    return patchContent;
+  }
+
+  const rewritten = [parts[0]];
+  for (let i = 1; i < parts.length; i += 1) {
+    const block = parts[i];
+    const headerLine = (block.split(/\r?\n/, 1)[0] || "").trimEnd();
+    const parsed = parseDiffGitHeader(headerLine);
+    if (!parsed.parseable || !block.includes("new file mode")) {
+      rewritten.push(block);
+      continue;
+    }
+
+    const filePath = parsed.newPath || parsed.oldPath;
+    if (!filePath || filePath === "dev/null") {
+      rewritten.push(block);
+      continue;
+    }
+
+    try {
+      execGit(["cat-file", "-e", `${targetBaseRef}:${filePath}`], { cwd: targetTreeCwd });
+    } catch {
+      rewritten.push(block);
+      continue;
+    }
+
+    const modeMatch = block.match(/^new file mode (\d{6})$/m);
+    const modifyDiff = buildCrossRepoModifyDiff(filePath, {
+      agentCwd,
+      targetTreeCwd,
+      targetBaseRef,
+      pinnedSha,
+      execGit,
+      patchMode: modeMatch ? modeMatch[1] : null,
+    });
+    rewritten.push(modifyDiff || block);
+  }
+
+  return rewritten.join("");
+}
+
+/**
+ * Quote a path the way format-patch does when it contains spaces or special characters.
+ * @param {string} filePath
+ * @returns {string}
+ */
+function quoteGitPathIfNeeded(filePath) {
+  if (/[\s"\\\t]/.test(filePath) || /[^\x20-\x7e]/.test(filePath)) {
+    const escaped = filePath.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `"${escaped}"`;
+  }
+  return filePath;
+}
+
+/**
+ * @param {string} filePath
+ * @returns {string}
+ */
+function formatDiffGitHeaderLine(filePath) {
+  const quoted = quoteGitPathIfNeeded(filePath);
+  if (quoted.startsWith('"')) {
+    const inner = quoted.slice(1, -1);
+    return `diff --git "a/${inner}" "b/${inner}"`;
+  }
+  return `diff --git a/${filePath} b/${filePath}`;
+}
+
+/**
+ * @param {"---" | "+++"} marker
+ * @param {string} filePath
+ * @returns {string}
+ */
+function formatDiffPathLine(marker, filePath) {
+  const side = marker === "---" ? "a" : "b";
+  const quoted = quoteGitPathIfNeeded(filePath);
+  if (quoted.startsWith('"')) {
+    const inner = quoted.slice(1, -1);
+    return `${marker} "${side}/${inner}"`;
+  }
+  return `${marker} ${side}/${filePath}`;
+}
+
+/**
+ * @param {string} stdout
+ * @returns {string | null}
+ */
+function parseLsTreeMode(stdout) {
+  const match = String(stdout || "")
+    .trim()
+    .match(/^(\d{6})\s+/);
+  return match ? match[1] : null;
+}
+
+/**
+ * @param {typeof execGitSync} execGit
+ * @param {string} cwd
+ * @param {string} treeish
+ * @param {string} filePath
+ * @returns {string | null}
+ */
+function readGitFileMode(execGit, cwd, treeish, filePath) {
+  try {
+    return parseLsTreeMode(execGit(["ls-tree", treeish, "--", filePath], { cwd }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} filePath
+ * @param {{ agentCwd: string, targetTreeCwd: string, targetBaseRef: string, pinnedSha?: string, execGit: typeof execGitSync, patchMode?: string | null }} options
+ * @returns {string | null}
+ */
+function buildCrossRepoModifyDiff(filePath, options) {
+  const { agentCwd, targetTreeCwd, targetBaseRef, pinnedSha, execGit, patchMode } = options;
+  const os = require("os");
+  const path = require("path");
+
+  let oldSha;
+  let newSha;
+  try {
+    oldSha = execGit(["rev-parse", `${targetBaseRef}:${filePath}`], { cwd: targetTreeCwd }).trim();
+  } catch {
+    return null;
+  }
+
+  const agentRef = pinnedSha || "HEAD";
+  try {
+    newSha = execGit(["rev-parse", `${agentRef}:${filePath}`], { cwd: agentCwd }).trim();
+  } catch {
+    return null;
+  }
+
+  if (oldSha === newSha) {
+    return null;
+  }
+
+  const oldMode = readGitFileMode(execGit, targetTreeCwd, targetBaseRef, filePath);
+  const newMode = readGitFileMode(execGit, agentCwd, agentRef, filePath) || patchMode || oldMode;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-aw-cross-repo-patch-"));
+  try {
+    const oldFile = path.join(tmpDir, "old");
+    const newFile = path.join(tmpDir, "new");
+    fs.writeFileSync(oldFile, execGit(["cat-file", "blob", oldSha], { cwd: targetTreeCwd }));
+    fs.writeFileSync(newFile, execGit(["cat-file", "blob", newSha], { cwd: agentCwd }));
+
+    const diffResult = require("child_process").spawnSync("git", ["diff", "--no-index", "--no-color", "old", "new"], {
+      cwd: tmpDir,
+      encoding: "utf8",
+    });
+    if (diffResult.status !== 0 && diffResult.status !== 1) {
+      return null;
+    }
+    const diffBody = diffResult.stdout || "";
+    if (!diffBody.trim()) {
+      return null;
+    }
+
+    const diffLines = diffBody.split("\n");
+    const hunkStart = diffLines.findIndex(line => line.startsWith("@@"));
+    if (hunkStart === -1) {
+      return null;
+    }
+    const hunkBody = diffLines.slice(hunkStart).join("\n");
+
+    let modeHeader;
+    if (oldMode && newMode && oldMode !== newMode) {
+      modeHeader = `old mode ${oldMode}\nnew mode ${newMode}\nindex ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)}\n`;
+    } else if (newMode || oldMode) {
+      modeHeader = `index ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)} ${newMode || oldMode}\n`;
+    } else {
+      modeHeader = `index ${oldSha.substring(0, 7)}..${newSha.substring(0, 7)}\n`;
+    }
+
+    return `${formatDiffGitHeaderLine(filePath)}\n${modeHeader}${formatDiffPathLine("---", filePath)}\n${formatDiffPathLine("+++", filePath)}\n${hunkBody}`;
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Returns true when `ancestor` is an ancestor of (or identical to) `descendant`.
+ * Any git failure (unknown revision, missing object, corrupt object store) is
+ * treated as "not an ancestor" - callers only need a boolean signal for base
+ * selection. Failures are suppressed here (suppressLogs: true); callers that
+ * need richer diagnostics on an unexpected failure should call
+ * describeGitFailure on their own caught error instead.
+ * @param {string} ancestor
+ * @param {string} descendant
+ * @param {string|undefined} cwd
+ * @returns {boolean}
+ */
+function isAncestorCommit(ancestor, descendant, cwd) {
+  try {
+    execGitSync(["merge-base", "--is-ancestor", "--", ancestor, descendant], { cwd, suppressLogs: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when the repository is a partial clone (objects are fetched lazily
+ * from a promisor remote). In gh-aw checkouts credentials are not persisted, so any
+ * lazy fetch is unauthenticated and fails - which surfaces as confusing git errors.
+ * @param {string|undefined} cwd
+ * @returns {boolean}
+ */
+function isPartialClone(cwd) {
+  try {
+    return execGitSync(["config", "--get", "remote.origin.promisor"], { cwd, suppressLogs: true }).trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Appends a partial-clone diagnostic to an error message when the failure looks like
+ * a failed lazy object hydration from an unauthenticated promisor remote.
+ * @param {string} message
+ * @param {string|undefined} cwd
+ * @returns {string}
+ */
+function describeGitFailure(message, cwd) {
+  if (!/promisor|Authentication failed|Invalid username or token|fetch-pack|object not found/i.test(message)) {
+    return message;
+  }
+  if (!isPartialClone(cwd)) {
+    return message;
+  }
+  return (
+    `${message} ` +
+    "This repository is a partial clone (remote.origin.promisor=true), so git tried to lazily fetch missing objects from the remote. " +
+    "That fetch is unauthenticated because the checkout used persist-credentials: false. " +
+    "Fetch the required objects during checkout (for example checkout.fetch-depth: 0 without a blob filter) to avoid lazy fetches."
+  );
+}
+
 module.exports = {
   sanitizeForFilename,
   sanitizeBranchNameForPatch,
@@ -159,4 +512,11 @@ module.exports = {
   getPatchPathForBranchInRepo,
   buildExcludePathspecs,
   computeIncrementalDiffSize,
+  getPatchDiffSizeBytes,
+  getStagedPatchDiffSizeBytes,
+  isValidGitBranchName,
+  rewriteCrossRepoCreatePatches,
+  isAncestorCommit,
+  isPartialClone,
+  describeGitFailure,
 };

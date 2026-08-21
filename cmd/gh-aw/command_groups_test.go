@@ -26,6 +26,7 @@ func TestCommandGroupAssignments(t *testing.T) {
 		{name: "deploy command in setup group", commandName: "deploy", expectedGroup: "setup", shouldHaveGroup: true},
 		{name: "upgrade command in setup group", commandName: "upgrade", expectedGroup: "setup", shouldHaveGroup: true},
 		{name: "secrets command in setup group", commandName: "secrets", expectedGroup: "setup", shouldHaveGroup: true},
+		{name: "doctor command in setup group", commandName: "doctor", expectedGroup: "setup", shouldHaveGroup: true},
 
 		// Development Commands
 		{name: "compile command in development group", commandName: "compile", expectedGroup: "development", shouldHaveGroup: true},
@@ -65,16 +66,21 @@ func TestCommandGroupAssignments(t *testing.T) {
 		// Note: help command is special in Cobra and managed separately, so we don't test it here
 	}
 
+	// Build a command lookup map once before running parallel subtests.
+	// Cobra's Commands() triggers a lazy sort that is not thread-safe: calling it
+	// concurrently from multiple goroutines can corrupt the internal commands slice,
+	// causing intermittent "command not found" failures. Fetching commands here
+	// (serially, before any subtest calls t.Parallel()) ensures the sort runs
+	// exactly once and the resulting map is read-only in the subtests.
+	commandMap := make(map[string]*cobra.Command, len(rootCmd.Commands()))
+	for _, cmd := range rootCmd.Commands() {
+		commandMap[cmd.Name()] = cmd
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Find the command
-			var foundCmd *cobra.Command
-			for _, cmd := range rootCmd.Commands() {
-				if cmd.Name() == tt.commandName {
-					foundCmd = cmd
-					break
-				}
-			}
+			t.Parallel()
+			foundCmd := commandMap[tt.commandName]
 
 			if foundCmd == nil {
 				t.Fatalf("Command %q not found", tt.commandName)
@@ -134,15 +140,17 @@ func TestNoCommandsInAdditionalCommandsWithGroups(t *testing.T) {
 	// Commands that should NOT be in Additional Commands (should have groups)
 	commandsShouldHaveGroups := []string{"remove", "update", "deploy", "trial", "mcp-server", "pr"}
 
+	// Build a command lookup map once before running parallel subtests.
+	// See TestCommandGroupAssignments for the rationale.
+	commandMap := make(map[string]*cobra.Command, len(rootCmd.Commands()))
+	for _, cmd := range rootCmd.Commands() {
+		commandMap[cmd.Name()] = cmd
+	}
+
 	for _, cmdName := range commandsShouldHaveGroups {
 		t.Run("command "+cmdName+" has group", func(t *testing.T) {
-			var foundCmd *cobra.Command
-			for _, cmd := range rootCmd.Commands() {
-				if cmd.Name() == cmdName {
-					foundCmd = cmd
-					break
-				}
-			}
+			t.Parallel()
+			foundCmd := commandMap[cmdName]
 
 			if foundCmd == nil {
 				t.Fatalf("Command %q not found", cmdName)

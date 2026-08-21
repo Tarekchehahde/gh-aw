@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/github/gh-aw/pkg/constants"
+	"github.com/github/gh-aw/pkg/ctxutil"
 	"github.com/github/gh-aw/pkg/fileutil"
 	"github.com/github/gh-aw/pkg/logger"
 	"github.com/github/gh-aw/pkg/parser"
@@ -52,6 +53,10 @@ type GenerateAutoUpdateWorkflowOptions struct {
 	ActionTag string
 	// Resolver optionally resolves setup-cli action tags to SHA-pinned refs.
 	Resolver SHAResolver
+	// CustomCron is an optional cron expression that overrides the default
+	// fuzzy weekly schedule. When non-empty, it is used as-is in the generated
+	// workflow without scattering. An empty string falls back to FUZZY:WEEKLY.
+	CustomCron string
 }
 
 // GenerateAutoUpdateWorkflow generates or removes the agentic-auto-upgrade.yml workflow
@@ -78,12 +83,24 @@ func GenerateAutoUpdateWorkflow(opts GenerateAutoUpdateWorkflowOptions) error {
 		return nil
 	}
 
-	seed := buildAutoUpdateSeed(opts.RepoSlug)
-	cronSchedule, err := parser.ScatterSchedule("FUZZY:WEEKLY", seed)
-	if err != nil {
-		return fmt.Errorf("failed to scatter FUZZY:WEEKLY schedule for auto-update workflow: %w", err)
+	actionMode := opts.ActionMode
+	if actionMode == "" {
+		actionMode = DetectActionMode(opts.Version)
 	}
-	autoUpdateWorkflowLog.Printf("Scattered FUZZY:WEEKLY to %q for seed %q", cronSchedule, seed)
+
+	var cronSchedule string
+	if opts.CustomCron != "" {
+		cronSchedule = opts.CustomCron
+		autoUpdateWorkflowLog.Printf("Using custom cron schedule: %q", cronSchedule)
+	} else {
+		seed := buildAutoUpdateSeed(opts.RepoSlug, actionMode)
+		var err error
+		cronSchedule, err = parser.ScatterSchedule("FUZZY:WEEKLY", seed)
+		if err != nil {
+			return fmt.Errorf("failed to scatter FUZZY:WEEKLY schedule for auto-update workflow: %w", err)
+		}
+		autoUpdateWorkflowLog.Printf("Scattered FUZZY:WEEKLY to %q for seed %q", cronSchedule, seed)
+	}
 
 	setupActionRef := opts.SetupActionRef
 	if setupActionRef == "" {
@@ -94,21 +111,18 @@ func GenerateAutoUpdateWorkflow(opts GenerateAutoUpdateWorkflowOptions) error {
 		githubScriptPin = getActionPin("actions/github-script")
 	}
 
-	actionMode := opts.ActionMode
-	if actionMode == "" {
-		actionMode = ActionModeDev
-	}
-	ctx := opts.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	content := buildAutoUpdateWorkflowYAML(
+	ctx := ctxutil.OrBackground(opts.Context)
+	content, err := buildAutoUpdateWorkflowYAML(
 		cronSchedule,
 		setupActionRef,
 		githubScriptPin,
 		generateInstallCLISteps(ctx, actionMode, opts.Version, opts.ActionTag, opts.Resolver),
 		getCLICmdPrefix(actionMode),
+		opts.CustomCron != "",
 	)
+	if err != nil {
+		return fmt.Errorf("failed to finalize auto-update workflow YAML: %w", err)
+	}
 
 	autoUpdateWorkflowLog.Printf("Writing auto-update workflow to %s", outputFile)
 	if err := fileutil.EnsureParentDir(outputFile, constants.DirPermPublic); err != nil {
@@ -123,9 +137,24 @@ func GenerateAutoUpdateWorkflow(opts GenerateAutoUpdateWorkflowOptions) error {
 }
 
 // buildAutoUpdateSeed returns the deterministic seed string used to scatter the
-// FUZZY:WEEKLY cron schedule. It combines the repo slug with the fixed workflow
-// identifier so that repositories scatter to distinct time slots.
-func buildAutoUpdateSeed(repoSlug string) string {
+// FUZZY:WEEKLY cron schedule.
+//
+// In dev mode a stable "dev/" prefix is used instead of the slug, which may not
+// be available (e.g. in sandbox environments where the git remote URL is a
+// localhost proxy). This mirrors the behaviour of normalizeScheduleString in
+// schedule_preprocessing.go and prevents the generated schedule from changing
+// between dev builds when --schedule-seed is sometimes provided and sometimes not.
+//
+// In all other modes (release, action, script) the repo slug is incorporated so
+// that different repositories scatter to distinct time slots. Note: released
+// binaries auto-detect ActionModeAction, not ActionModeRelease, so checking only
+// IsRelease() would cause ActionModeAction builds to silently use the dev seed.
+func buildAutoUpdateSeed(repoSlug string, actionMode ActionMode) string {
+	if actionMode.IsDev() {
+		// Dev mode: use a fixed prefix that does not depend on git remote detection.
+		return "dev/" + autoUpdateWorkflowIdentifier
+	}
+	// Release/action/script mode: incorporate repo slug for per-repo scattering.
 	if repoSlug != "" {
 		return repoSlug + "/" + autoUpdateWorkflowIdentifier
 	}
@@ -135,23 +164,42 @@ func buildAutoUpdateSeed(repoSlug string) string {
 // buildAutoUpdateWorkflowYAML generates the YAML content for agentic-auto-upgrade.yml.
 func buildAutoUpdateWorkflowYAML(
 	cronSchedule, setupActionRef, githubScriptPin, installCLISteps, cliCmdPrefix string,
-) string {
-	customInstructions := `Alternative regeneration methods:
+	isCustomCron bool,
+) (string, error) {
+	var customInstructions string
+	if isCustomCron {
+		customInstructions = `Alternative regeneration methods:
   make recompile
 
 Or use the gh-aw CLI directly:
   ./gh-aw compile --validate --verbose
 
-The workflow is generated when auto_upgrade is set to true in aw.json.
+The workflow is generated when auto_upgrade.cron is set in aw.json.
+The schedule is pinned to the custom cron expression configured in aw.json.`
+	} else {
+		customInstructions = `Alternative regeneration methods:
+  make recompile
+
+Or use the gh-aw CLI directly:
+  ./gh-aw compile --validate --verbose
+
+The workflow is generated when auto_upgrade is enabled in aw.json (true or object form).
+When auto_upgrade is an object without a cron, the fuzzy weekly schedule is used.
 The weekly schedule is deterministically scattered based on the repository slug.`
+	}
+
+	scheduleComment := "Custom schedule (auto-upgrade)"
+	if !isCustomCron {
+		scheduleComment = "Weekly (auto-upgrade)"
+	}
 
 	header := GenerateWorkflowHeader("", "pkg/workflow/auto_update_workflow.go", customInstructions)
 
-	return header + `name: Agentic Auto-Upgrade
+	yaml := header + `name: Agentic Auto-Upgrade
 
 on:
   schedule:
-    - cron: "` + cronSchedule + `"  # Weekly (auto-upgrade)
+    - cron: "` + cronSchedule + `"  # ` + scheduleComment + `
   workflow_dispatch:
 
 permissions:
@@ -184,4 +232,9 @@ jobs:
             const { mainNotifyIssue } = require('${{ runner.temp }}/gh-aw/actions/run_operation_update_upgrade.cjs');
             await mainNotifyIssue();
 `
+	finalYAML, err := finalizeRunnerTempSafety(yaml)
+	if err != nil {
+		return "", fmt.Errorf("runner temp safety: %w", err)
+	}
+	return finalYAML, nil
 }

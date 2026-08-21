@@ -14,6 +14,28 @@ import (
 	"github.com/github/gh-aw/pkg/testutil"
 )
 
+func extractWorkflowStepByName(t *testing.T, workflowYAML, stepName string) string {
+	t.Helper()
+
+	marker := "- name: " + stepName
+	nameIdx := strings.Index(workflowYAML, marker)
+	if nameIdx == -1 {
+		t.Fatalf("Expected %q step in generated workflow", stepName)
+	}
+
+	lineStart := nameIdx
+	for lineStart > 0 && workflowYAML[lineStart-1] != '\n' {
+		lineStart--
+	}
+	indent := workflowYAML[lineStart:nameIdx]
+	stepSection := workflowYAML[lineStart:]
+	nextStepMarker := "\n" + indent + "- name:"
+	if next := strings.Index(stepSection[1:], nextStepMarker); next != -1 {
+		stepSection = stepSection[:next+1]
+	}
+	return stepSection
+}
+
 func TestAccessLogUploadConditional(t *testing.T) {
 	compiler := NewCompiler()
 
@@ -317,6 +339,138 @@ This workflow should generate a unified artifact upload step that includes the p
 	t.Log("Unified artifact upload step verified successfully (includes prompt)")
 }
 
+func TestAmbientFoldersIncludedInActivationArtifact(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "ambient-folders-artifact-test")
+	sharedDir := filepath.Join(tmpDir, "shared")
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sharedContent := `---
+ambient-folders:
+  - .squad
+jobs:
+  activation:
+    pre-steps:
+      - name: Create ambient folder
+        run: |
+          mkdir -p .squad
+          echo team > .squad/team.md
+---
+
+# Shared ambient folder setup
+`
+	if err := os.WriteFile(filepath.Join(sharedDir, "ambient.md"), []byte(sharedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testContent := `---
+on: workflow_dispatch
+permissions:
+  contents: read
+engine: copilot
+strict: false
+imports:
+  - shared/ambient.md
+---
+
+# Test Ambient Folders
+`
+	testFile := filepath.Join(tmpDir, "test-workflow.md")
+	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compiler := NewCompiler()
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		t.Fatalf("Failed to compile workflow: %v", err)
+	}
+
+	lockContent, err := os.ReadFile(stringutil.MarkdownToLockFile(testFile))
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+	lockYAML := string(lockContent)
+
+	for _, want := range []string{
+		"Stage ambient folders for activation artifact",
+		"GH_AW_AMBIENT_FOLDERS: \".squad\"",
+		"/tmp/gh-aw/ambient-folders",
+		"Restore ambient folders from activation artifact",
+		".squad",
+	} {
+		if !strings.Contains(lockYAML, want) {
+			t.Fatalf("Expected compiled workflow to contain %q, got:\n%s", want, lockYAML)
+		}
+	}
+}
+
+func TestAmbientFoldersRestoredAfterCustomCheckout(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "ambient-folders-custom-checkout-test")
+	sharedDir := filepath.Join(tmpDir, "shared")
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sharedContent := `---
+ambient-folders:
+  - .squad
+jobs:
+  activation:
+    pre-steps:
+      - name: Create ambient folder
+        run: |
+          mkdir -p .squad
+          echo team > .squad/team.md
+---
+
+# Shared ambient folder setup
+`
+	if err := os.WriteFile(filepath.Join(sharedDir, "ambient.md"), []byte(sharedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testContent := `---
+on: workflow_dispatch
+permissions:
+  contents: read
+engine: copilot
+strict: false
+imports:
+  - shared/ambient.md
+steps:
+  - name: Custom checkout
+    uses: actions/checkout@v4
+---
+
+# Test Ambient Folders With Custom Checkout
+`
+	testFile := filepath.Join(tmpDir, "test-workflow.md")
+	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compiler := NewCompiler()
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		t.Fatalf("Failed to compile workflow: %v", err)
+	}
+
+	lockContent, err := os.ReadFile(stringutil.MarkdownToLockFile(testFile))
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+	lockYAML := string(lockContent)
+	checkoutIndex := strings.Index(lockYAML, "name: Custom checkout")
+	if checkoutIndex == -1 {
+		t.Fatalf("Expected custom checkout step in compiled workflow, got:\n%s", lockYAML)
+	}
+	restoreIndex := strings.LastIndex(lockYAML, "Restore ambient folders from activation artifact")
+	if restoreIndex == -1 {
+		t.Fatalf("Expected ambient restore step in compiled workflow, got:\n%s", lockYAML)
+	}
+	if restoreIndex < checkoutIndex {
+		t.Fatalf("Expected final ambient restore after custom checkout; checkout index %d, restore index %d", checkoutIndex, restoreIndex)
+	}
+}
+
 func TestPatchIncludedInArtifactWhenThreatDetectionEnabled(t *testing.T) {
 	// When push-to-pull-request-branch is staged, usesPatchesAndCheckouts() returns false.
 	// But if threat detection is enabled, the detection job needs patches for security
@@ -378,5 +532,113 @@ Push some changes.
 	}
 	if !strings.Contains(uploadSection, "/tmp/gh-aw/aw-*.bundle") {
 		t.Error("Expected '/tmp/gh-aw/aw-*.bundle' in unified artifact upload when threat detection is enabled with staged push-to-pull-request-branch")
+	}
+}
+
+// TestAgentOutputFallbackArtifact verifies that safe-output processing does not depend on the
+// large "agent" artifact upload succeeding: a small dedicated artifact carries the agent output,
+// and downstream jobs match both artifacts when downloading. See gh-aw#53099, where a timed-out
+// upload of the agent artifact silently dropped every safe output.
+func TestAgentOutputFallbackArtifact(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "agent-output-fallback-test")
+
+	testContent := `---
+on: workflow_dispatch
+permissions:
+  contents: read
+engine: copilot
+strict: false
+safe-outputs:
+  create-issue:
+---
+
+# Test Agent Output Fallback
+
+Body.
+`
+
+	testFile := filepath.Join(tmpDir, "test-workflow.md")
+	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compiler := NewCompiler()
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		t.Fatalf("Failed to compile workflow: %v", err)
+	}
+
+	lockContent, err := os.ReadFile(stringutil.MarkdownToLockFile(testFile))
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+	lockYAML := string(lockContent)
+
+	uploadSection := extractWorkflowStepByName(t, lockYAML, "Upload agent output fallback artifact")
+	for _, expected := range []string{
+		"name: agent-output-fallback\n",
+		"/tmp/gh-aw/agent_output.json",
+		"/tmp/gh-aw/safeoutputs.jsonl",
+		"if-no-files-found: ignore",
+		"continue-on-error: true",
+	} {
+		if !strings.Contains(uploadSection, expected) {
+			t.Errorf("Expected %q in fallback upload step, got:\n%s", expected, uploadSection)
+		}
+	}
+
+	// The fallback artifact must be uploaded before the (large, failure-prone) agent artifact.
+	uploadIdx := strings.Index(lockYAML, "- name: Upload agent output fallback artifact")
+	agentUploadIdx := strings.Index(lockYAML, "- name: Upload agent artifacts")
+	if agentUploadIdx == -1 {
+		t.Fatal("Upload agent artifacts step not found")
+	}
+	if uploadIdx > agentUploadIdx {
+		t.Error("Expected the agent output fallback upload to come before the unified agent artifact upload")
+	}
+
+	// Downstream jobs must match both artifacts so the agent output is still found when the
+	// unified agent artifact upload failed.
+	if !strings.Contains(lockYAML, `pattern: "{agent,agent-output-fallback}"`) {
+		t.Error("Expected agent output download to match both the agent and fallback artifacts")
+	}
+	if !strings.Contains(lockYAML, "merge-multiple: true") {
+		t.Error("Expected 'merge-multiple: true' so both artifacts extract into the same directory")
+	}
+}
+
+func TestAgentOutputFallbackArtifact_NoSafeOutputs(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "agent-output-fallback-no-safe-outputs-test")
+
+	testContent := `---
+on: workflow_dispatch
+permissions:
+  contents: read
+engine: copilot
+strict: false
+---
+
+# Test No Agent Output Fallback
+
+Body.
+`
+
+	testFile := filepath.Join(tmpDir, "test-workflow.md")
+	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compiler := NewCompiler()
+	if err := compiler.CompileWorkflow(testFile); err != nil {
+		t.Fatalf("Failed to compile workflow: %v", err)
+	}
+
+	lockContent, err := os.ReadFile(stringutil.MarkdownToLockFile(testFile))
+	if err != nil {
+		t.Fatalf("Failed to read lock file: %v", err)
+	}
+	lockYAML := string(lockContent)
+
+	if strings.Contains(lockYAML, "Upload agent output fallback artifact") {
+		t.Error("Expected no fallback artifact upload when safe-outputs is not declared")
 	}
 }

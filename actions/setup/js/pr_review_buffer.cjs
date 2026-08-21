@@ -112,6 +112,9 @@ function createReviewBuffer() {
   /** @type {boolean} When true, dismiss older same-workflow REQUEST_CHANGES reviews after posting a replacement review. */
   let supersedeOlderReviews = false;
 
+  /** @type {string} When non-empty, pins the review to this commit SHA instead of the live PR head or GH_AW_HEAD_SHA. */
+  let pinnedCommitId = "";
+
   /**
    * Best-effort execution-state capture.
    * When the installation token is out of quota, metadata collection should not
@@ -246,6 +249,17 @@ function createReviewBuffer() {
   }
 
   /**
+   * Pin the review to a specific commit SHA, overriding GH_AW_HEAD_SHA and the live PR head.
+   * @param {string} commitId - The commit SHA to pin the review to
+   */
+  function setPinnedCommitId(commitId) {
+    if (commitId && typeof commitId === "string") {
+      pinnedCommitId = commitId;
+      core.info(`PR review pinned to commit: ${commitId}`);
+    }
+  }
+
+  /**
    * Check if there are buffered comments to submit.
    * @returns {boolean}
    */
@@ -298,6 +312,20 @@ function createReviewBuffer() {
       return { success: false, error: "Pull request head SHA not available" };
     }
 
+    // Use the head SHA captured at trigger time (GH_AW_HEAD_SHA, injected by the compiler)
+    // when available, falling back to the live PR head SHA. This pins the review to the
+    // commit the agent actually reviewed, preventing attribution drift when new commits are
+    // pushed during the run (most common under workflow_run triggers where the safe_outputs
+    // job runs after the agent job and pulls.get() may return a newer HEAD sha).
+    // A user-specified pinnedCommitId (from the commit-id config option) takes highest priority.
+    const awHeadSHA = process.env.GH_AW_HEAD_SHA || "";
+    const resolvedCommitId = pinnedCommitId || awHeadSHA || pullRequest.head.sha;
+    if (pinnedCommitId && pinnedCommitId !== pullRequest.head.sha) {
+      core.info(`Using config-pinned commit SHA: ${pinnedCommitId} (PR head is now ${pullRequest.head.sha})`);
+    } else if (awHeadSHA && awHeadSHA !== pullRequest.head.sha) {
+      core.info(`Using trigger-time head SHA: ${awHeadSHA} (PR head is now ${pullRequest.head.sha})`);
+    }
+
     // Determine review event and body
     let event = reviewMetadata ? reviewMetadata.event : "COMMENT";
     let body = reviewMetadata ? reviewMetadata.body : "";
@@ -324,17 +352,19 @@ function createReviewBuffer() {
 
     // Add footer to review body if we should and we have footer context
     if (shouldAddFooter && footerContext) {
-      body += generateFooterWithMessages(
-        footerContext.workflowName,
-        footerContext.runUrl,
-        footerContext.workflowSource,
-        footerContext.workflowSourceURL,
-        footerContext.triggeringIssueNumber,
-        footerContext.triggeringPRNumber,
-        footerContext.triggeringDiscussionNumber,
-        undefined,
-        { skipDetectionCaution: true }
-      );
+      body +=
+        "\n\n" +
+        generateFooterWithMessages(
+          footerContext.workflowName,
+          footerContext.runUrl,
+          footerContext.workflowSource,
+          footerContext.workflowSourceURL,
+          footerContext.triggeringIssueNumber,
+          footerContext.triggeringPRNumber,
+          footerContext.triggeringDiscussionNumber,
+          undefined,
+          { skipDetectionCaution: true }
+        );
 
       const callerWorkflowId = process.env.GH_AW_CALLER_WORKFLOW_ID || "";
       if (callerWorkflowId) {
@@ -465,7 +495,7 @@ function createReviewBuffer() {
       owner: repoParts.owner,
       repo: repoParts.repo,
       pull_number: pullRequestNumber,
-      commit_id: pullRequest.head.sha,
+      commit_id: resolvedCommitId,
       event: event,
     };
 
@@ -497,7 +527,7 @@ function createReviewBuffer() {
       }
       const workflowCallMarker = workflowCallId ? generateWorkflowCallIdMarker(workflowCallId) : "";
       try {
-        /** @type {Array<{id: number, state?: string, user?: {login?: string, type?: string}, body?: string}>} */
+        /** @type {any[]} */
         const reviews = [];
         let page = 1;
         const perPage = 100;
@@ -620,10 +650,29 @@ function createReviewBuffer() {
           core.info(`Created PR review #${review.id}: ${review.html_url}`);
           return buildReviewSuccessResult(review, "COMMENT", comments.length, afterState);
         } catch (retryError) {
-          core.error(`Failed to submit PR review on retry: ${getErrorMessage(retryError)}`);
+          const retryErrorMsg = getErrorMessage(retryError);
+          // If the COMMENT retry still fails due to unresolvable line(s), fall back to body-only COMMENT.
+          if (retryErrorMsg.includes("Line could not be resolved") || retryErrorMsg.includes("Path could not be resolved")) {
+            core.warning(`COMMENT retry on own PR failed with unresolvable line(s): ${retryErrorMsg}. Falling back to body-only COMMENT.`);
+            try {
+              const ownPrBodyOnlyParams = { ...requestParams };
+              delete ownPrBodyOnlyParams.comments;
+              ownPrBodyOnlyParams.event = "COMMENT";
+              ownPrBodyOnlyParams.body = appendUnanchoredCommentsSection(typeof requestParams.body === "string" ? requestParams.body : "", comments);
+              const { data: review } = await createReviewWithRetry(ownPrBodyOnlyParams);
+              await maybeSupersedeOlderReviews(review.id);
+              const afterState = await fetchAfterStateIfAvailable();
+              core.info(`Created PR review #${review.id} (own-PR body-only COMMENT): ${review.html_url}`);
+              return buildReviewSuccessResult(review, "COMMENT", 0, afterState);
+            } catch (bodyOnlyError) {
+              core.error(`Failed to submit body-only COMMENT review: ${getErrorMessage(bodyOnlyError)}`);
+              return { success: false, error: getErrorMessage(bodyOnlyError) };
+            }
+          }
+          core.error(`Failed to submit PR review on retry: ${retryErrorMsg}`);
           return {
             success: false,
-            error: getErrorMessage(retryError),
+            error: retryErrorMsg,
           };
         }
       }
@@ -664,21 +713,63 @@ function createReviewBuffer() {
       // body-only review so that the overall review (and its footer body) is still submitted
       // successfully. Matches both "Line could not be resolved" and "Path could not be resolved".
       if ((errorMessage.includes("Line could not be resolved") || errorMessage.includes("Path could not be resolved")) && comments.length > 0) {
+        const unresolvableCommentIndices = extractUnresolvableCommentIndices(error, comments.length);
+        if (unresolvableCommentIndices.length > 0 && unresolvableCommentIndices.length < comments.length) {
+          const unresolvableCommentIndexSet = new Set(unresolvableCommentIndices);
+          const resolvableComments = comments.filter((_, index) => !unresolvableCommentIndexSet.has(index));
+          const unresolvableComments = comments.filter((_, index) => unresolvableCommentIndexSet.has(index));
+          core.warning(
+            `PR review submission failed due to unresolvable comment line(s): ${errorMessage}. ` +
+              `Retrying with ${resolvableComments.length} resolvable inline comment(s); ` +
+              `${unresolvableComments.length} comment(s) will be appended to the review body.`
+          );
+          try {
+            const partialParams = {
+              ...requestParams,
+              comments: resolvableComments,
+              body: appendUnanchoredCommentsSection(typeof requestParams.body === "string" ? requestParams.body : "", unresolvableComments),
+            };
+            const { data: review } = await createReviewWithRetry(partialParams);
+            await maybeSupersedeOlderReviews(review.id);
+            const afterState = await fetchAfterStateIfAvailable();
+            core.info(`Created PR review #${review.id} (partial-anchor fallback): ${review.html_url}`);
+            return buildReviewSuccessResult(review, event, resolvableComments.length, afterState);
+          } catch (partialRetryError) {
+            core.warning(`Failed to submit partially anchored PR review: ${getErrorMessage(partialRetryError)}. Falling back to body-only review.`);
+          }
+        }
+
         core.warning(`PR review submission failed due to unresolvable comment line(s): ${errorMessage}. Retrying as body-only review.`);
+        const bodyOnlyParams = { ...requestParams };
+        delete bodyOnlyParams.comments;
+        bodyOnlyParams.body = appendUnanchoredCommentsSection(typeof requestParams.body === "string" ? requestParams.body : "", comments);
         try {
-          const bodyOnlyParams = { ...requestParams };
-          delete bodyOnlyParams.comments;
-          bodyOnlyParams.body = appendUnanchoredCommentsSection(typeof requestParams.body === "string" ? requestParams.body : "", comments);
           const { data: review } = await createReviewWithRetry(bodyOnlyParams);
           await maybeSupersedeOlderReviews(review.id);
           const afterState = await fetchAfterStateIfAvailable();
           core.info(`Created PR review #${review.id} (body-only fallback): ${review.html_url}`);
           return buildReviewSuccessResult(review, event, 0, afterState);
         } catch (retryError) {
-          core.error(`Failed to submit body-only PR review: ${getErrorMessage(retryError)}`);
+          const retryErrorMsg = getErrorMessage(retryError);
+          // If body-only also fails because it's a self-authored PR, retry as body-only COMMENT.
+          if (bodyOnlyParams.event !== "COMMENT" && ownPrMessages.some(msg => retryErrorMsg.includes(msg))) {
+            core.warning(`Body-only ${bodyOnlyParams.event} review rejected on own PR. Retrying as body-only COMMENT.`);
+            try {
+              bodyOnlyParams.event = "COMMENT";
+              const { data: review } = await createReviewWithRetry(bodyOnlyParams);
+              await maybeSupersedeOlderReviews(review.id);
+              const afterState = await fetchAfterStateIfAvailable();
+              core.info(`Created PR review #${review.id} (body-only COMMENT fallback): ${review.html_url}`);
+              return buildReviewSuccessResult(review, "COMMENT", 0, afterState);
+            } catch (ownPrRetryError) {
+              core.error(`Failed to submit body-only COMMENT review: ${getErrorMessage(ownPrRetryError)}`);
+              return { success: false, error: getErrorMessage(ownPrRetryError) };
+            }
+          }
+          core.error(`Failed to submit body-only PR review: ${retryErrorMsg}`);
           return {
             success: false,
-            error: getErrorMessage(retryError),
+            error: retryErrorMsg,
           };
         }
       }
@@ -713,6 +804,7 @@ function createReviewBuffer() {
     setIncludeFooter: setFooterMode, // Backward compatibility alias
     setStaged,
     setSupersedeOlderReviews,
+    setPinnedCommitId,
     hasBufferedComments,
     hasReviewMetadata,
     getBufferedCount,
@@ -721,7 +813,173 @@ function createReviewBuffer() {
   };
 }
 
-module.exports = { createReviewBuffer };
+/**
+ * Create a registry that manages per-PR review buffers.
+ * Each distinct (repo, prNumber) pair gets its own independent buffer instance.
+ *
+ * Default settings applied to every newly created buffer (footerMode, footerContext,
+ * staged, supersedeOlderReviews) can be configured via the returned setters before
+ * any messages are processed.
+ *
+ * @returns {Object} Registry with getOrCreate, getAllEntries, hasAnyContent, and config setters
+ */
+function createPrReviewBufferRegistry() {
+  /** @type {Map<string, Object>} */
+  const bufferMap = new Map();
+
+  /** @type {{repo: string, prNumber: number, buffer: Object}[]} */
+  const insertionOrder = [];
+
+  // Defaults applied to each new buffer when it is first created.
+  /** @type {string|boolean} */
+  let defaultFooterMode = "always";
+  /** @type {Object | null} */
+  let defaultFooterContext = null;
+  let defaultStaged = false;
+  let defaultSupersedeOlderReviews = false;
+  /** @type {string} */
+  let defaultPinnedCommitId = "";
+
+  /**
+   * Get or create the buffer for the given (repo, prNumber) pair.
+   * Returns null when repo or prNumber are falsy (unresolvable target).
+   * @param {string | null} repo - Repository slug (owner/repo)
+   * @param {number | null} prNumber - Pull request number
+   * @returns {Object | null} Buffer for this PR, or null if target cannot be resolved
+   */
+  function getOrCreate(repo, prNumber) {
+    if (!repo || !prNumber) {
+      return null;
+    }
+    const k = `${repo}#${prNumber}`;
+    if (!bufferMap.has(k)) {
+      const buffer = createReviewBuffer();
+      buffer.setFooterMode(defaultFooterMode);
+      if (defaultFooterContext) {
+        buffer.setFooterContext(defaultFooterContext);
+      }
+      if (defaultStaged) {
+        buffer.setStaged(true);
+      }
+      if (defaultSupersedeOlderReviews) {
+        buffer.setSupersedeOlderReviews(true);
+      }
+      if (defaultPinnedCommitId) {
+        buffer.setPinnedCommitId(defaultPinnedCommitId);
+      }
+      bufferMap.set(k, buffer);
+      insertionOrder.push({ repo, prNumber, buffer });
+      core.info(`PR review registry: created buffer for ${repo}#${prNumber}`);
+    }
+    return bufferMap.get(k);
+  }
+
+  /**
+   * Return all buffered entries in insertion order.
+   * @returns {{repo: string, prNumber: number, buffer: Object}[]}
+   */
+  function getAllEntries() {
+    return insertionOrder;
+  }
+
+  /**
+   * Returns true if any buffer has buffered comments or review metadata.
+   * @returns {boolean}
+   */
+  function hasAnyContent() {
+    return insertionOrder.some(e => e.buffer.hasBufferedComments() || e.buffer.hasReviewMetadata());
+  }
+
+  /** @param {string|boolean} value */
+  function setDefaultFooterMode(value) {
+    defaultFooterMode = value;
+  }
+
+  /** @param {Object} ctx */
+  function setDefaultFooterContext(ctx) {
+    defaultFooterContext = ctx;
+  }
+
+  /** @param {boolean} value */
+  function setDefaultStaged(value) {
+    defaultStaged = value === true;
+  }
+
+  /** @param {boolean} value */
+  function setDefaultSupersedeOlderReviews(value) {
+    defaultSupersedeOlderReviews = value === true;
+  }
+
+  /** @param {string} value */
+  function setDefaultPinnedCommitId(value) {
+    if (value && typeof value === "string") {
+      defaultPinnedCommitId = value;
+    }
+  }
+
+  return {
+    getOrCreate,
+    getAllEntries,
+    hasAnyContent,
+    setDefaultFooterMode,
+    setDefaultFooterContext,
+    setDefaultStaged,
+    setDefaultSupersedeOlderReviews,
+    setDefaultPinnedCommitId,
+  };
+}
+
+module.exports = { createReviewBuffer, createPrReviewBufferRegistry };
+
+/**
+ * Parse API validation errors to identify specific inline comments that could not be resolved.
+ * Returns 0-based indexes corresponding to items in the buffered comments array.
+ *
+ * @param {unknown} error
+ * @param {number} totalComments
+ * @returns {number[]}
+ */
+function extractUnresolvableCommentIndices(error, totalComments) {
+  const indices = new Set();
+  // prettier-ignore
+  const errorAsAny = /** @type {any} */ (error);
+  const candidateErrors = [errorAsAny, errorAsAny?.originalError, errorAsAny?.cause];
+
+  for (const candidate of candidateErrors) {
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+    // prettier-ignore
+    const candidateAsAny = /** @type {any} */ (candidate);
+    const apiErrors = candidateAsAny.response && candidateAsAny.response.data && Array.isArray(candidateAsAny.response.data.errors) ? candidateAsAny.response.data.errors : null;
+    if (!apiErrors) {
+      continue;
+    }
+
+    for (const apiError of apiErrors) {
+      const field = typeof apiError?.field === "string" ? apiError.field : "";
+      const message = typeof apiError?.message === "string" ? apiError.message : "";
+      if (!message.includes("Line could not be resolved") && !message.includes("Path could not be resolved")) {
+        continue;
+      }
+
+      const fieldMatch = field.match(/comments(?:\[|\.)(\d+)(?:\]|\.|$)/);
+      if (!fieldMatch) {
+        continue;
+      }
+
+      const parsedIndex = Number.parseInt(fieldMatch[1], 10);
+      if (!Number.isInteger(parsedIndex) || parsedIndex < 0 || parsedIndex >= totalComments) {
+        continue;
+      }
+
+      indices.add(parsedIndex);
+    }
+  }
+
+  return Array.from(indices).sort((a, b) => a - b);
+}
+
 /**
  * Append a fallback section that preserves inline comment content when comments cannot be anchored.
  * @param {string} reviewBody

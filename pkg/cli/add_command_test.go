@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/github/gh-aw/pkg/gitutil"
 	"github.com/github/gh-aw/pkg/testutil"
 	"github.com/github/gh-aw/pkg/workflow"
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ func validateEngineStub(engine string) error {
 }
 
 func TestNewAddCommand(t *testing.T) {
+	t.Parallel()
 	cmd := NewAddCommand(validateEngineStub)
 
 	require.NotNil(t, cmd, "NewAddCommand should not return nil")
@@ -83,21 +85,13 @@ func TestNewAddCommand(t *testing.T) {
 }
 
 func TestNewAddCommand_MentionsEnterpriseSourceResolution(t *testing.T) {
+	t.Parallel()
 	cmd := NewAddCommand(validateEngineStub)
 	require.NotNil(t, cmd)
 
 	assert.Contains(t, cmd.Long, "Note: In GitHub Enterprise repos, shorthand source specs resolve on your enterprise host by default.")
 	assert.Contains(t, cmd.Long, "For github/*, githubnext/*, and microsoft/* sources, shorthand resolves on github.com.")
 	assert.Contains(t, cmd.Long, "Use full https://github.com/... source URLs for other public github.com workflows.")
-}
-
-func TestNewAddCommand_DeprecatesDisableSecurityScannerFlag(t *testing.T) {
-	cmd := NewAddCommand(validateEngineStub)
-	require.NotNil(t, cmd)
-
-	flag := cmd.Flags().Lookup("disable-security-scanner")
-	require.NotNil(t, flag, "add command should keep --disable-security-scanner as a deprecated alias")
-	assert.Equal(t, "use --no-security-scanner instead", flag.Deprecated)
 }
 
 func TestAddWorkflows(t *testing.T) {
@@ -129,10 +123,10 @@ func TestAddWorkflows(t *testing.T) {
 			if tt.expectError {
 				require.Error(t, err, "Expected error for test case: %s", tt.name)
 				if tt.errorContains != "" {
-					assert.Contains(t, err.Error(), tt.errorContains, "Error should contain expected message")
+					require.ErrorContains(t, err, tt.errorContains, "Error should contain expected message")
 				}
 			} else {
-				assert.NoError(t, err, "Should not error for test case: %s", tt.name)
+				require.NoError(t, err, "Should not error for test case: %s", tt.name)
 			}
 		})
 	}
@@ -367,6 +361,321 @@ func TestAddCommandArgs(t *testing.T) {
 	require.NoError(t, err, "Should not error with multiple arguments")
 }
 
+func TestRejectBootstrapProfileForRegularAdd(t *testing.T) {
+	profileWithConfig := &resolvedBootstrapProfile{
+		PackageID: "githubnext/central-agentic-ops",
+		Profile: &repositoryPackageBootstrap{
+			Config: []repositoryPackageBootstrapAction{
+				{Type: "repo-variable", Name: "EXAMPLE", Prompt: "Enter value"},
+			},
+		},
+	}
+
+	t.Run("rejects regular add for packages with manifest config", func(t *testing.T) {
+		err := rejectBootstrapProfileForRegularAdd([]string{"githubnext/central-agentic-ops"}, profileWithConfig)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "package githubnext/central-agentic-ops declares aw.yml config")
+		require.ErrorContains(t, err, "gh aw add-wizard githubnext/central-agentic-ops")
+	})
+
+	t.Run("uses requested sources in the add-wizard guidance", func(t *testing.T) {
+		err := rejectBootstrapProfileForRegularAdd([]string{"githubnext/central-agentic-ops", "./local-workflow.md"}, profileWithConfig)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "gh aw add-wizard githubnext/central-agentic-ops ./local-workflow.md")
+	})
+
+	t.Run("allows packages without manifest config", func(t *testing.T) {
+		err := rejectBootstrapProfileForRegularAdd([]string{"owner/pkg"}, nil)
+		require.NoError(t, err)
+
+		err = rejectBootstrapProfileForRegularAdd([]string{"owner/pkg"}, &resolvedBootstrapProfile{
+			PackageID: "owner/pkg",
+			Profile:   &repositoryPackageBootstrap{Config: nil},
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestEnsureAddRepositoryInitialized(t *testing.T) {
+	originalFindGitRoot := addFindGitRoot
+	originalInitRepository := addInitRepository
+	originalMissingInitMarkers := addMissingInitMarkers
+	t.Cleanup(func() {
+		addFindGitRoot = originalFindGitRoot
+		addInitRepository = originalInitRepository
+		addMissingInitMarkers = originalMissingInitMarkers
+	})
+
+	t.Run("skips initialization outside a git checkout", func(t *testing.T) {
+		addFindGitRoot = func() (string, error) { return "", gitutil.ErrNotGitRepository }
+		addMissingInitMarkers = func(string, string) ([]string, error) {
+			t.Fatal("missing init markers check should be skipped outside a git checkout")
+			return nil, nil
+		}
+		addInitRepository = func(InitOptions) error {
+			t.Fatal("InitRepository should not run outside a git checkout")
+			return nil
+		}
+
+		err := ensureAddRepositoryInitialized("", false, false)
+		require.NoError(t, err)
+	})
+
+	t.Run("runs init when required markers are missing", func(t *testing.T) {
+		repoDir := t.TempDir()
+		addFindGitRoot = func() (string, error) { return repoDir, nil }
+		addMissingInitMarkers = func(baseDir string, engineOverride string) ([]string, error) {
+			assert.Equal(t, ".", baseDir)
+			assert.Equal(t, "claude", engineOverride)
+			return []string{".gitattributes"}, nil
+		}
+
+		called := false
+		addInitRepository = func(opts InitOptions) error {
+			called = true
+			assert.True(t, opts.Verbose)
+			assert.Equal(t, "claude", opts.Engine)
+			assert.True(t, opts.NoGitattributes)
+			assert.True(t, opts.Skill)
+			assert.True(t, opts.Agent)
+			assert.True(t, opts.MCP)
+			assert.False(t, opts.CodespaceEnabled)
+			assert.False(t, opts.Completions)
+			assert.False(t, opts.CreatePR)
+			return nil
+		}
+
+		err := ensureAddRepositoryInitialized("claude", true, true)
+		require.NoError(t, err)
+		assert.True(t, called)
+	})
+
+	t.Run("does nothing when markers are already present", func(t *testing.T) {
+		repoDir := t.TempDir()
+		addFindGitRoot = func() (string, error) { return repoDir, nil }
+		addMissingInitMarkers = func(string, string) ([]string, error) { return nil, nil }
+		addInitRepository = func(InitOptions) error {
+			t.Fatal("InitRepository should not run when markers are already present")
+			return nil
+		}
+
+		err := ensureAddRepositoryInitialized("", false, false)
+		require.NoError(t, err)
+	})
+}
+
+// TestEnsureAddRepositoryInitializedWithDetails_AbsolutePaths verifies that
+// ensureAddRepositoryInitializedWithDetails returns absolute paths for files
+// that were actually written by init, and skips files that init deliberately
+// does not create (e.g. .gitattributes when --no-gitattributes is used).
+func TestEnsureAddRepositoryInitializedWithDetails_AbsolutePaths(t *testing.T) {
+	repoDir := t.TempDir()
+
+	originalFindGitRoot := addFindGitRoot
+	originalInitRepository := addInitRepository
+	originalMissingInitMarkers := addMissingInitMarkers
+	t.Cleanup(func() {
+		addFindGitRoot = originalFindGitRoot
+		addInitRepository = originalInitRepository
+		addMissingInitMarkers = originalMissingInitMarkers
+	})
+
+	// Use a marker whose isBootstrapInitMarkerSatisfied check uses the default
+	// branch (file exists and size > 0), so the test does not need to reproduce
+	// marker-specific content such as a SKILL.md or MCP config.
+	writtenMarker := ".vscode/settings.json"
+	skippedMarker := ".gitattributes"
+
+	addFindGitRoot = func() (string, error) { return repoDir, nil }
+	addMissingInitMarkers = func(string, string) ([]string, error) {
+		return []string{writtenMarker, skippedMarker}, nil
+	}
+	addInitRepository = func(InitOptions) error {
+		// Simulate init: create the settings.json marker but skip .gitattributes.
+		p := filepath.Join(repoDir, filepath.FromSlash(writtenMarker))
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(p, []byte(`{}`), 0644)
+	}
+
+	files, err := ensureAddRepositoryInitializedWithDetails("", false, true)
+	require.NoError(t, err)
+
+	// Only the actually-written file should be returned.
+	require.Len(t, files, 1)
+	// The returned path must be absolute.
+	require.True(t, filepath.IsAbs(files[0]), "expected absolute path, got %q", files[0])
+	require.Equal(t, filepath.Join(repoDir, filepath.FromSlash(writtenMarker)), files[0])
+}
+
+func TestAddResolvedWorkflows_IgnoresBootstrapRequireOwnerTypeDuringInstall(t *testing.T) {
+	originalCheckOwnerType := bootstrapCheckOwnerType
+	t.Cleanup(func() {
+		bootstrapCheckOwnerType = originalCheckOwnerType
+	})
+
+	bootstrapCheckOwnerType = func(context.Context, string) (string, error) { return "User", nil }
+
+	resolved := &ResolvedWorkflows{
+		Workflows: nil,
+		BootstrapProfile: &resolvedBootstrapProfile{
+			PackageID: "githubnext/central-agentic-ops",
+			Profile: &repositoryPackageBootstrap{
+				Config: []repositoryPackageBootstrapAction{{Type: "require-owner-type", Value: "org"}},
+			},
+		},
+	}
+
+	_, err := AddResolvedWorkflows(context.Background(), []string{"githubnext/central-agentic-ops"}, resolved, AddOptions{NoGitattributes: true})
+	require.NoError(t, err)
+}
+
+func TestCompileDispatchWorkflowDependencies_FallsBackToRawFrontmatter(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "dispatch-workflow-fallback-*")
+	workflowsDir := setupMinimalGitRepo(t, tmpDir)
+
+	mainPath := filepath.Join(workflowsDir, "dispatcher.md")
+	workerPath := filepath.Join(workflowsDir, "worker.md")
+
+	require.NoError(t, os.WriteFile(mainPath, []byte(`---
+name: Dispatcher
+on:
+  workflow_dispatch:
+safe-outputs:
+  dispatch-workflow:
+    workflows: [worker]
+imports:
+  - uses: shared/missing.md
+---
+
+# Dispatcher
+`), 0o644))
+	require.NoError(t, os.WriteFile(workerPath, []byte(`---
+name: Worker
+on:
+  workflow_dispatch:
+---
+
+# Worker
+`), 0o644))
+
+	compileDispatchWorkflowDependencies(context.Background(), mainPath, false, true, "", false, nil)
+
+	lockPath := filepath.Join(workflowsDir, "worker.lock.yml")
+	_, err := os.Stat(lockPath)
+	require.NoError(t, err, "dispatch dependency should still be compiled when merged parse fails")
+	lockContent, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(lockContent), "name: \"Worker\"", "compiled dispatch dependency should preserve its workflow name")
+}
+
+// TestCompileCallWorkflowDependencies_PropagatesError verifies that a worker compilation
+// failure causes compileCallWorkflowDependencies to return an error rather than silently
+// continuing. A bad worker .md that contains invalid content triggers this path.
+func TestCompileCallWorkflowDependencies_PropagatesError(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "call-workflow-error-*")
+	workflowsDir := setupMinimalGitRepo(t, tmpDir)
+
+	mainPath := filepath.Join(workflowsDir, "orchestrator.md")
+	workerPath := filepath.Join(workflowsDir, "worker.md")
+
+	require.NoError(t, os.WriteFile(mainPath, []byte(`---
+name: Orchestrator
+on:
+  workflow_dispatch:
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`), 0o644))
+
+	// Write an intentionally broken worker file (no frontmatter — compile will fail).
+	require.NoError(t, os.WriteFile(workerPath, []byte(`not valid workflow content`), 0o644))
+
+	err := compileCallWorkflowDependencies(context.Background(), mainPath, false, true, "", false, nil)
+	require.Error(t, err, "worker compilation failure should propagate as an error")
+	require.ErrorContains(t, err, "worker", "error should mention the worker name")
+}
+
+// TestCompileCallWorkflowDependencies_ForceRecompilesStale verifies that when force=true,
+// a worker whose .lock.yml already exists is still recompiled.
+func TestCompileCallWorkflowDependencies_ForceRecompilesStale(t *testing.T) {
+	tmpDir := testutil.TempDir(t, "call-workflow-force-*")
+	workflowsDir := setupMinimalGitRepo(t, tmpDir)
+
+	mainPath := filepath.Join(workflowsDir, "orchestrator.md")
+	workerPath := filepath.Join(workflowsDir, "worker.md")
+	lockPath := filepath.Join(workflowsDir, "worker.lock.yml")
+
+	require.NoError(t, os.WriteFile(mainPath, []byte(`---
+name: Orchestrator
+on:
+  workflow_dispatch:
+safe-outputs:
+  call-workflow:
+    - worker
+---
+
+# Orchestrator
+`), 0o644))
+	require.NoError(t, os.WriteFile(workerPath, []byte(`---
+name: Worker
+on:
+  workflow_dispatch:
+---
+
+# Worker
+`), 0o644))
+
+	// Write a stale (empty) lock file.
+	require.NoError(t, os.WriteFile(lockPath, []byte("# stale lock"), 0o644))
+
+	// Without force: stale lock is preserved.
+	err := compileCallWorkflowDependencies(context.Background(), mainPath, false, true, "", false, nil)
+	require.NoError(t, err)
+	content, _ := os.ReadFile(lockPath)
+	assert.Equal(t, "# stale lock", string(content), "without force, stale lock should not be recompiled")
+
+	// With force: stale lock gets recompiled.
+	err = compileCallWorkflowDependencies(context.Background(), mainPath, false, true, "", true, nil)
+	require.NoError(t, err)
+	recompiled, _ := os.ReadFile(lockPath)
+	assert.NotEqual(t, "# stale lock", string(recompiled), "with force, stale lock should be recompiled")
+	assert.Contains(t, string(recompiled), "name: \"Worker\"", "recompiled lock should contain worker name")
+}
+
+func TestValidateWorkflowDestination_SkipsExistingWorkflowFromSameSource(t *testing.T) {
+	workflowsDir := t.TempDir()
+	existingPath := filepath.Join(workflowsDir, "dependabot.md")
+	require.NoError(t, os.WriteFile(existingPath, []byte(`---
+source: githubnext/central-agentic-ops/.github/workflows/dependabot.md@main
+---
+# Dependabot
+`), 0o644))
+
+	skip, err := validateWorkflowDestination(workflowsDir, "dependabot", "githubnext/central-agentic-ops", AddOptions{})
+	require.NoError(t, err)
+	assert.True(t, skip)
+}
+
+func TestValidateWorkflowDestination_ErrorsForExistingWorkflowFromDifferentSource(t *testing.T) {
+	workflowsDir := t.TempDir()
+	existingPath := filepath.Join(workflowsDir, "dependabot.md")
+	require.NoError(t, os.WriteFile(existingPath, []byte(`---
+source: octo/other/.github/workflows/dependabot.md@main
+---
+# Dependabot
+`), 0o644))
+
+	skip, err := validateWorkflowDestination(workflowsDir, "dependabot", "githubnext/central-agentic-ops", AddOptions{})
+	require.Error(t, err)
+	assert.False(t, skip)
+	require.ErrorContains(t, err, "workflow 'dependabot' already exists")
+}
+
 // TestAddMultipleWorkflowsNameFlag verifies that --name is not allowed when multiple workflows are specified.
 func TestAddMultipleWorkflowsNameFlag(t *testing.T) {
 	cmd := NewAddCommand(validateEngineStub)
@@ -376,7 +685,7 @@ func TestAddMultipleWorkflowsNameFlag(t *testing.T) {
 
 	err := cmd.Execute()
 	require.Error(t, err, "Should error when --name is used with multiple workflows")
-	assert.Contains(t, err.Error(), "--name flag cannot be used when adding multiple workflows", "Error should mention --name restriction")
+	require.ErrorContains(t, err, "--name was set while multiple workflows were provided", "Error should mention --name restriction")
 }
 
 // setupMinimalGitRepo initialises a bare-minimum git repo in dir and returns the
@@ -623,7 +932,7 @@ func TestAddWorkflowWithTracking_ActionWorkflow_Force(t *testing.T) {
 	// Without --force: should fail
 	err := addWorkflowWithTracking(context.Background(), resolved, nil, AddOptions{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists")
+	require.ErrorContains(t, err, "already exists")
 
 	// With --force: should overwrite
 	err = addWorkflowWithTracking(context.Background(), resolved, nil, AddOptions{Force: true})
@@ -631,6 +940,108 @@ func TestAddWorkflowWithTracking_ActionWorkflow_Force(t *testing.T) {
 	written, err := os.ReadFile(destFile)
 	require.NoError(t, err)
 	assert.Equal(t, newContent, written)
+}
+
+func TestAddWorkflowsWithTracking_PackageResourceWritesOwnershipRecord(t *testing.T) {
+	tempDir := testutil.TempDir(t, "test-package-resource-*")
+	setupMinimalGitRepo(t, tempDir)
+
+	resourceContent := []byte("name: Bug report\n")
+	workflows := []*ResolvedWorkflow{
+		{
+			Spec: &WorkflowSpec{
+				RepoSpec: RepoSpec{
+					RepoSlug:    "owner/repo",
+					Version:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					PackagePath: "packages/repo-assist",
+				},
+				WorkflowPath:           "packages/repo-assist/templates/bug.yml",
+				WorkflowName:           "bug",
+				DestinationPath:        ".github/ISSUE_TEMPLATE/bug.yml",
+				FromRepositoryManifest: true,
+				IsPackageResourceFile:  true,
+			},
+			Content: resourceContent,
+			SourceInfo: &FetchedWorkflow{
+				Content:    resourceContent,
+				CommitSHA:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				IsLocal:    false,
+				SourcePath: "packages/repo-assist/templates/bug.yml",
+			},
+			IsPackageResourceFile: true,
+		},
+	}
+
+	err := addWorkflowsWithTracking(context.Background(), workflows, NewFileTracker(), AddOptions{
+		NoGitattributes:        true,
+		DisableSecurityScanner: true,
+		Quiet:                  true,
+	})
+	require.NoError(t, err)
+
+	resourcePath := filepath.Join(tempDir, ".github", "ISSUE_TEMPLATE", "bug.yml")
+	written, err := os.ReadFile(resourcePath)
+	require.NoError(t, err)
+	assert.Equal(t, resourceContent, written)
+
+	recordFiles, err := filepath.Glob(filepath.Join(tempDir, ".github", "aw", "packages", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, recordFiles, 1)
+	record, err := os.ReadFile(recordFiles[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(record), `"source": "owner/repo/packages/repo-assist@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`)
+	assert.Contains(t, string(record), `"destination": ".github/ISSUE_TEMPLATE/bug.yml"`)
+	assert.Contains(t, string(record), `"sha256":`)
+}
+
+func TestAddWorkflowsWithTracking_PackageResourceRejectsLocalDrift(t *testing.T) {
+	tempDir := testutil.TempDir(t, "test-package-resource-drift-*")
+	setupMinimalGitRepo(t, tempDir)
+
+	spec := &WorkflowSpec{
+		RepoSpec: RepoSpec{
+			RepoSlug:    "owner/repo",
+			Version:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			PackagePath: "packages/repo-assist",
+		},
+		WorkflowPath:           "packages/repo-assist/policy/controls.json",
+		WorkflowName:           "controls",
+		DestinationPath:        ".github/aw/policy/controls.json",
+		FromRepositoryManifest: true,
+		IsPackageResourceFile:  true,
+	}
+	first := []*ResolvedWorkflow{{
+		Spec:                  spec,
+		Content:               []byte(`{"version":1}`),
+		SourceInfo:            &FetchedWorkflow{Content: []byte(`{"version":1}`), CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		IsPackageResourceFile: true,
+	}}
+	err := addWorkflowsWithTracking(context.Background(), first, NewFileTracker(), AddOptions{
+		NoGitattributes:        true,
+		DisableSecurityScanner: true,
+		Quiet:                  true,
+	})
+	require.NoError(t, err)
+
+	resourcePath := filepath.Join(tempDir, ".github", "aw", "policy", "controls.json")
+	require.NoError(t, os.WriteFile(resourcePath, []byte(`{"local":true}`), 0644))
+
+	second := []*ResolvedWorkflow{{
+		Spec:                  spec,
+		Content:               []byte(`{"version":2}`),
+		SourceInfo:            &FetchedWorkflow{Content: []byte(`{"version":2}`), CommitSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		IsPackageResourceFile: true,
+	}}
+	err = addWorkflowsWithTracking(context.Background(), second, NewFileTracker(), AddOptions{
+		NoGitattributes:        true,
+		DisableSecurityScanner: true,
+		Quiet:                  true,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "local modifications")
+	written, readErr := os.ReadFile(resourcePath)
+	require.NoError(t, readErr)
+	assert.Equal(t, `{"local":true}`, string(written))
 }
 
 func TestAddWorkflowsWithTracking_RollsBackWrittenFilesOnWriteFailure(t *testing.T) {
@@ -669,7 +1080,7 @@ func TestAddWorkflowsWithTracking_RollsBackWrittenFilesOnWriteFailure(t *testing
 		Quiet:                  true,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to write destination file")
+	require.ErrorContains(t, err, "failed to write destination file")
 
 	_, statErr := os.Stat(filepath.Join(workflowsDir, "ok.md"))
 	assert.True(t, os.IsNotExist(statErr), "successful writes from this operation should be rolled back on later write failure")
@@ -717,7 +1128,7 @@ func TestAddSkillFileWithTracking_RejectsInvalidPaths(t *testing.T) {
 
 		err := addSkillFileWithTracking(resolved, nil, AddOptions{Quiet: true}, gitRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "escapes destination skill directory")
+		require.ErrorContains(t, err, "escapes destination skill directory")
 	})
 
 	t.Run("rejects source path when skill root cannot be determined", func(t *testing.T) {
@@ -732,7 +1143,7 @@ func TestAddSkillFileWithTracking_RejectsInvalidPaths(t *testing.T) {
 
 		err := addSkillFileWithTracking(resolved, nil, AddOptions{Quiet: true}, gitRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to determine relative path")
+		require.ErrorContains(t, err, "failed to determine relative path")
 	})
 }
 
@@ -765,7 +1176,7 @@ func TestAddCopilotRequestsPermissionToContent(t *testing.T) {
 		content := "---\nengine: copilot\npermissions: read-all\n---\nDo the thing.\n"
 		_, err := addCopilotRequestsPermissionToContent(content)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "non-mapping scalar")
+		require.ErrorContains(t, err, "non-mapping scalar")
 	})
 }
 

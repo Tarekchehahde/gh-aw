@@ -33,6 +33,7 @@ func (e *CodexEngine) RenderMCPConfig(yaml *strings.Builder, tools map[string]an
 			IsLast:                 isLast,
 			ActionMode:             GetActionModeFromWorkflowData(workflowData),
 			WriteSinkGuardPolicies: deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
+			ContainerPinMappings:   workflowData.getContainerPinMappings(),
 		})
 	}
 
@@ -75,6 +76,8 @@ func (e *CodexEngine) RenderMCPConfig(yaml *strings.Builder, tools map[string]an
 			if hasMCPScripts {
 				renderer.RenderMCPScriptsMCP(&mcpConfigContent, workflowData.MCPScripts, workflowData)
 			}
+		case enclaveMCPServerName:
+			writeEnclaveMCPTOML(&mcpConfigContent, workflowData)
 		default:
 			// Handle custom MCP tools using shared helper (with adapter for isLast parameter)
 			HandleCustomMCPToolInSwitch(&mcpConfigContent, toolName, expandedTools, false, func(yaml *strings.Builder, toolName string, toolConfig map[string]any, isLast bool) error {
@@ -100,7 +103,7 @@ func (e *CodexEngine) RenderMCPConfig(yaml *strings.Builder, tools map[string]an
 
 	// Derive the delimiter from the content so it is stable across builds.
 	delimiter := GenerateHeredocDelimiterFromContent("MCP_CONFIG", mcpConfigContent.String())
-	yaml.WriteString("          cat > \"${RUNNER_TEMP}/gh-aw/mcp-config/config.toml\" << " + delimiter + "\n")
+	yaml.WriteString("          cat > \"${RUNNER_TEMP}/gh-aw/mcp-config/config.toml\" << " + delimiter + "\n") //nolint:generatedyamlheredoc // Legacy Codex config rendering remains to be migrated.
 	yaml.WriteString(mcpConfigContent.String())
 
 	// End the heredoc for config.toml
@@ -141,7 +144,7 @@ func (e *CodexEngine) RenderMCPConfig(yaml *strings.Builder, tools map[string]an
 	}
 	e.renderShellEnvironmentPolicyToml(&shellPolicyContent, tools, mcpTools, "          ")
 	shellPolicyDelimiter := GenerateHeredocDelimiterFromContent("CODEX_SHELL_POLICY", shellPolicyContent.String())
-	yaml.WriteString("          cat > \"/tmp/gh-aw/mcp-config/config.toml\" << " + shellPolicyDelimiter + "\n")
+	yaml.WriteString("          cat > \"/tmp/gh-aw/mcp-config/config.toml\" << " + shellPolicyDelimiter + "\n") //nolint:generatedyamlheredoc // Legacy Codex policy rendering remains to be migrated.
 	yaml.WriteString(shellPolicyContent.String())
 	yaml.WriteString("          " + shellPolicyDelimiter + "\n")
 	if isFirewallEnabled(workflowData) {
@@ -153,7 +156,7 @@ func (e *CodexEngine) RenderMCPConfig(yaml *strings.Builder, tools map[string]an
 		customConfigDelimiter := GenerateHeredocDelimiterFromContent("CODEX_CUSTOM_CONFIG", workflowData.EngineConfig.Config)
 		yaml.WriteString("          \n")
 		yaml.WriteString("          # Append engine-level custom Codex config\n")
-		yaml.WriteString("          cat >> \"/tmp/gh-aw/mcp-config/config.toml\" << " + customConfigDelimiter + "\n")
+		yaml.WriteString("          cat >> \"/tmp/gh-aw/mcp-config/config.toml\" << " + customConfigDelimiter + "\n") //nolint:generatedyamlheredoc // Legacy custom config rendering remains to be migrated.
 		yaml.WriteString(workflowData.EngineConfig.Config)
 		if !strings.HasSuffix(workflowData.EngineConfig.Config, "\n") {
 			yaml.WriteString("\n")
@@ -212,6 +215,7 @@ func (e *CodexEngine) renderCodexMCPConfigWithContext(yaml *strings.Builder, too
 		Format:                   "toml",
 		RewriteLocalhostToDocker: rewriteLocalhost,
 		GuardPolicies:            deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
+		ContainerPinMappings:     workflowData.getContainerPinMappings(),
 	}
 
 	err := renderSharedMCPConfig(yaml, toolName, toolConfig, renderer)
@@ -236,6 +240,7 @@ func (e *CodexEngine) renderCodexJSONMCPConfigWithContext(yaml *strings.Builder,
 		IndentLevel:              "              ",
 		RewriteLocalhostToDocker: rewriteLocalhost,
 		GuardPolicies:            deriveWriteSinkGuardPolicyFromWorkflow(workflowData),
+		ContainerPinMappings:     workflowData.getContainerPinMappings(),
 	}
 
 	yaml.WriteString("              \"" + toolName + "\": {\n")

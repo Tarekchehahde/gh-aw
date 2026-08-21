@@ -3,6 +3,7 @@
 package workflow
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -179,7 +180,7 @@ func TestNewGHAWManifest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewGHAWManifest(tt.secretNames, tt.actionRefs, tt.resolutionFailures, tt.containers, tt.redirect, tt.skillSpecs, tt.onField)
+			m := NewGHAWManifest(tt.secretNames, tt.actionRefs, tt.resolutionFailures, tt.containers, tt.redirect, tt.skillSpecs, nil, tt.onField)
 			require.NotNil(t, m, "manifest should not be nil")
 			assert.Equal(t, tt.wantVersion, m.Version, "manifest version")
 			if tt.wantSecrets != nil {
@@ -210,6 +211,27 @@ func TestNewGHAWManifest(t *testing.T) {
 	}
 }
 
+func TestCollectMemoryValidationScripts(t *testing.T) {
+	data := &WorkflowData{
+		RepoMemoryConfig: &RepoMemoryConfig{Memories: []RepoMemoryEntry{
+			{ID: "repo", Validation: &MemoryValidationConfig{Script: "repo validation"}},
+		}},
+		CacheMemoryConfig: &CacheMemoryConfig{Caches: []CacheMemoryEntry{
+			{ID: "cache", Validation: &MemoryValidationConfig{Script: "cache validation"}},
+			{ID: "unvalidated"},
+		}},
+	}
+
+	scripts := collectMemoryValidationScripts(data)
+
+	require.Len(t, scripts, 2)
+	assert.Equal(t, "cache-memory:cache", scripts[0].Memory)
+	assert.Equal(t, "repo-memory:repo", scripts[1].Memory)
+	assert.Len(t, scripts[0].SHA256, 64)
+	assert.Len(t, scripts[1].SHA256, 64)
+	assert.NotEqual(t, scripts[0].SHA256, scripts[1].SHA256)
+}
+
 func TestNewGHAWManifestContainerDigest(t *testing.T) {
 	containers := []GHAWManifestContainer{
 		{
@@ -221,7 +243,7 @@ func TestNewGHAWManifestContainerDigest(t *testing.T) {
 			Image: "alpine:3.14", // no digest
 		},
 	}
-	m := NewGHAWManifest(nil, nil, nil, containers, "", nil, nil)
+	m := NewGHAWManifest(nil, nil, nil, containers, "", nil, nil, nil)
 	require.Len(t, m.Containers, 2, "should have two containers")
 
 	// Sorted: alpine before node
@@ -431,4 +453,23 @@ func TestParseActionRefs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewGHAWManifestPlugins(t *testing.T) {
+	m := NewGHAWManifest(nil, nil, nil, nil, "", nil, []string{
+		"octo-org/agent-plugin@" + strings.Repeat("a", 40),
+		"octo-org/agent-plugin@" + strings.Repeat("a", 40), // duplicate, deduplicated
+		"octo-org/other-plugin@" + strings.Repeat("b", 40),
+	}, nil)
+	require.NotNil(t, m, "manifest should not be nil")
+	assert.Equal(t, []string{
+		"octo-org/agent-plugin@" + strings.Repeat("a", 40),
+		"octo-org/other-plugin@" + strings.Repeat("b", 40),
+	}, m.Plugins, "manifest plugins should be deduplicated and sorted")
+}
+
+func TestNewGHAWManifestPluginsEmpty(t *testing.T) {
+	m := NewGHAWManifest(nil, nil, nil, nil, "", nil, nil, nil)
+	require.NotNil(t, m, "manifest should not be nil")
+	assert.Nil(t, m.Plugins, "manifest plugins should be nil when no plugins are provided")
 }

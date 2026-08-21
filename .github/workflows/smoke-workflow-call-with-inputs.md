@@ -40,6 +40,10 @@ safe-outputs:
 timeout-minutes: 5
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
+    id: awf
 ---
 
 # Smoke Test: Workflow Call with Inputs

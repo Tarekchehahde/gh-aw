@@ -7,13 +7,60 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/github/gh-aw/pkg/constants"
-	"github.com/github/gh-aw/pkg/types"
 	"github.com/github/gh-aw/pkg/workflow/compilerenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResolveAWFContainerAgentTimeoutMinutes(t *testing.T) {
+	defaultFallback := int(constants.DefaultAgenticWorkflowTimeout / time.Minute)
+
+	t.Run("uses numeric timeout-minutes when provided", func(t *testing.T) {
+		t.Setenv(compilerenv.DefaultTimeoutMinutes, "")
+		got := resolveAWFContainerAgentTimeoutMinutes(&WorkflowData{TimeoutMinutes: "timeout-minutes: 30"})
+		assert.Equal(t, 30, got)
+	})
+
+	t.Run("falls back to default when timeout-minutes is omitted or non-numeric", func(t *testing.T) {
+		t.Setenv(compilerenv.DefaultTimeoutMinutes, "")
+		tests := []struct {
+			name string
+			data *WorkflowData
+		}{
+			{name: "nil workflow data", data: nil},
+			{name: "empty timeout", data: &WorkflowData{}},
+			{name: "expression timeout", data: &WorkflowData{TimeoutMinutes: "timeout-minutes: ${{ inputs.timeout-minutes }}"}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := resolveAWFContainerAgentTimeoutMinutes(tt.data)
+				assert.Equal(t, defaultFallback, got)
+			})
+		}
+	})
+
+	t.Run("uses GH_AW_DEFAULT_TIMEOUT_MINUTES override for omitted and non-numeric values", func(t *testing.T) {
+		t.Setenv(compilerenv.DefaultTimeoutMinutes, "45")
+		tests := []struct {
+			name string
+			data *WorkflowData
+		}{
+			{name: "missing timeout", data: &WorkflowData{}},
+			{name: "expression timeout", data: &WorkflowData{TimeoutMinutes: "timeout-minutes: ${{ inputs.timeout-minutes }}"}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got := resolveAWFContainerAgentTimeoutMinutes(tt.data)
+				assert.Equal(t, 45, got)
+			})
+		}
+	})
+}
 
 // TestBuildAWFConfigJSON verifies that BuildAWFConfigJSON produces a valid JSON config
 // that contains the expected network, apiProxy, and container fields.
@@ -118,8 +165,7 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 				},
 				SandboxConfig: &SandboxConfig{
 					Agent: &AgentSandboxConfig{
-						Type:             SandboxTypeAWF,
-						NetworkIsolation: true,
+						Type: SandboxTypeAWF,
 					},
 				},
 			},
@@ -389,6 +435,27 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 		assert.Contains(t, jsonStr, `"enableTokenSteering":true`, "apiProxy should emit enableTokenSteering by default")
 	})
 
+	t.Run("token steering can be disabled in the sandbox config", func(t *testing.T) {
+		disabled := false
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{TokenSteering: &disabled},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"enableTokenSteering":false`, "apiProxy should emit the sandbox token-steering override")
+	})
+
 	t.Run("token steering is disabled when max-ai-credits is negative", func(t *testing.T) {
 		config := AWFCommandConfig{
 			EngineName:     "copilot",
@@ -471,55 +538,6 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 		assert.Contains(t, jsonStr, fmt.Sprintf(`"maxRuns":%d`, constants.DefaultMaxRuns), "apiProxy should emit default maxRuns when unset")
 	})
 
-	t.Run("engine token-weights multipliers are emitted in apiProxy modelMultipliers", func(t *testing.T) {
-		config := AWFCommandConfig{
-			EngineName:     "copilot",
-			AllowedDomains: "github.com",
-			WorkflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{
-					ID: "copilot",
-					TokenWeights: &types.TokenWeights{
-						Multipliers: map[string]float64{
-							"gpt-5":      1.2,
-							"gpt-5-mini": 0.8,
-						},
-					},
-				},
-				NetworkPermissions: &NetworkPermissions{
-					Firewall: &FirewallConfig{Enabled: true},
-				},
-			},
-		}
-
-		jsonStr, err := BuildAWFConfigJSON(config)
-		require.NoError(t, err)
-		assert.Contains(t, jsonStr, `"modelMultipliers"`, "apiProxy should emit modelMultipliers")
-		assert.Contains(t, jsonStr, `"gpt-5":1.2`, "apiProxy should include configured model multiplier")
-		assert.Contains(t, jsonStr, `"gpt-5-mini":0.8`, "apiProxy should include configured model multiplier")
-	})
-
-	t.Run("apiProxy modelMultipliers omitted when engine token-weights multipliers are empty", func(t *testing.T) {
-		config := AWFCommandConfig{
-			EngineName:     "copilot",
-			AllowedDomains: "github.com",
-			WorkflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{
-					ID: "copilot",
-					TokenWeights: &types.TokenWeights{
-						Multipliers: map[string]float64{},
-					},
-				},
-				NetworkPermissions: &NetworkPermissions{
-					Firewall: &FirewallConfig{Enabled: true},
-				},
-			},
-		}
-
-		jsonStr, err := BuildAWFConfigJSON(config)
-		require.NoError(t, err)
-		assert.NotContains(t, jsonStr, `"modelMultipliers"`, "apiProxy should omit modelMultipliers when empty")
-	})
-
 	t.Run("anthropic API target is included in apiProxy targets", func(t *testing.T) {
 		config := AWFCommandConfig{
 			EngineName:     "claude",
@@ -542,51 +560,6 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 
 		assert.Contains(t, jsonStr, `"anthropic"`, "should include anthropic target")
 		assert.Contains(t, jsonStr, "corp-gateway.example.com", "should include the anthropic host")
-	})
-
-	t.Run("antigravity engine routes API target through gemini provider", func(t *testing.T) {
-		config := AWFCommandConfig{
-			EngineName:     "antigravity",
-			AllowedDomains: "github.com",
-			WorkflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{ID: "antigravity"},
-				NetworkPermissions: &NetworkPermissions{
-					Firewall: &FirewallConfig{Enabled: true},
-				},
-			},
-		}
-
-		jsonStr, err := BuildAWFConfigJSON(config)
-		require.NoError(t, err)
-
-		assert.Contains(t, jsonStr, `"gemini"`, "should include gemini target for antigravity engine")
-		assert.Contains(t, jsonStr, "generativelanguage.googleapis.com", "should include default Gemini API hostname")
-		assert.NotContains(t, jsonStr, `"antigravity"`, "should not include unsupported antigravity target key")
-	})
-
-	t.Run("antigravity custom base URL maps to gemini provider target", func(t *testing.T) {
-		config := AWFCommandConfig{
-			EngineName:     "antigravity",
-			AllowedDomains: "github.com",
-			WorkflowData: &WorkflowData{
-				EngineConfig: &EngineConfig{
-					ID: "antigravity",
-					Env: map[string]string{
-						"ANTIGRAVITY_API_BASE_URL": "https://antigravity-proxy.internal.example.com/v1",
-					},
-				},
-				NetworkPermissions: &NetworkPermissions{
-					Firewall: &FirewallConfig{Enabled: true},
-				},
-			},
-		}
-
-		jsonStr, err := BuildAWFConfigJSON(config)
-		require.NoError(t, err)
-
-		assert.Contains(t, jsonStr, `"gemini"`, "should include gemini target for antigravity engine")
-		assert.Contains(t, jsonStr, "antigravity-proxy.internal.example.com", "should include host from ANTIGRAVITY_API_BASE_URL")
-		assert.NotContains(t, jsonStr, `"antigravity"`, "should not include unsupported antigravity target key")
 	})
 
 	t.Run("no API targets section when no custom endpoints are configured", func(t *testing.T) {
@@ -789,6 +762,206 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 		assert.NotContains(t, jsonStr, `"authHeader"`, "authHeader should be absent when not configured")
 	})
 
+	t.Run("copilot extraHeaders from frontmatter sandbox.agent.targets.copilot are included", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								ExtraHeaders: map[string]string{
+									"x-openrouter-title": "my-workflow",
+									"http-referer":       "https://github.com/org/repo",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"copilot"`, "should include copilot target")
+		assert.Contains(t, jsonStr, `"extraHeaders"`, "should include extraHeaders in copilot target")
+		assert.Contains(t, jsonStr, `"x-openrouter-title"`, "should include x-openrouter-title header key")
+		assert.Contains(t, jsonStr, `"my-workflow"`, "should include header value")
+	})
+
+	t.Run("copilot extraBodyFields from frontmatter sandbox.agent.targets.copilot are included", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								ExtraBodyFields: map[string]string{
+									"custom-field": "custom-value",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"extraBodyFields"`, "should include extraBodyFields in copilot target")
+		assert.Contains(t, jsonStr, `"custom-field"`, "should include body field key")
+		assert.Contains(t, jsonStr, `"custom-value"`, "should include body field value")
+	})
+
+	t.Run("copilot sessionId from frontmatter sandbox.agent.targets.copilot is included", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								SessionId: "${{ github.run_id }}",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"sessionId"`, "should include sessionId in copilot target")
+		assert.Contains(t, jsonStr, `"${{ github.run_id }}"`, "should include sessionId value")
+	})
+
+	t.Run("copilot authHeader from frontmatter sandbox.agent.targets.copilot is included", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								AuthHeader: "api-key",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"copilot"`, "should include copilot target")
+		assert.Contains(t, jsonStr, `"authHeader":"api-key"`, "should include copilot authHeader in apiProxy targets")
+		assert.NotContains(t, jsonStr, `"host":""`, "should not emit empty host when only authHeader is set")
+	})
+
+	t.Run("copilot BYOK fields coexist with host from GetCopilotAPITarget", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID:        "copilot",
+					APITarget: "copilot-gateway.internal",
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								ExtraHeaders: map[string]string{
+									"x-title": "my-workflow",
+								},
+								SessionId: "run-123",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, "copilot-gateway.internal", "should include host from api-target")
+		assert.Contains(t, jsonStr, `"extraHeaders"`, "should include extraHeaders alongside host")
+		assert.Contains(t, jsonStr, `"sessionId"`, "should include sessionId alongside host")
+	})
+
+	t.Run("copilot BYOK fields create entry even without host override", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						Targets: map[string]*AgentAPIProxyTargetConfig{
+							"copilot": {
+								ExtraHeaders: map[string]string{
+									"x-title": "my-workflow",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"copilot"`, "should include copilot target entry even without host")
+		assert.Contains(t, jsonStr, `"extraHeaders"`, "should include extraHeaders")
+		assert.NotContains(t, jsonStr, `"host":""`, "should not emit empty host")
+	})
+
+	t.Run("copilot BYOK fields are absent when not configured", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{ID: "copilot"},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.NotContains(t, jsonStr, `"extraHeaders"`, "extraHeaders should be absent when not configured")
+		assert.NotContains(t, jsonStr, `"extraBodyFields"`, "extraBodyFields should be absent when not configured")
+		assert.NotContains(t, jsonStr, `"sessionId"`, "sessionId should be absent when not configured")
+	})
+
 	t.Run("sandbox agent platform is emitted in awf platform config", func(t *testing.T) {
 		config := AWFCommandConfig{
 			EngineName:     "copilot",
@@ -929,6 +1102,292 @@ func TestBuildAWFConfigJSON(t *testing.T) {
 		jsonStr, err := BuildAWFConfigJSON(config)
 		require.NoError(t, err)
 		assert.NotContains(t, jsonStr, `"modelFallback"`, "apiProxy should omit modelFallback when not configured")
+	})
+
+	t.Run("model-fallback is disabled by default for a custom anthropic API target", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "claude",
+			AllowedDomains: "github.com,openrouter.ai",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "claude",
+					Env: map[string]string{
+						"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1",
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"modelFallback":{"enabled":false}`, "apiProxy should disable modelFallback for custom Anthropic providers")
+	})
+
+	t.Run("model-fallback is disabled by default for a custom openai API target", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "codex",
+			AllowedDomains: "github.com,llm-router.internal.example.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "codex",
+					Env: map[string]string{
+						"OPENAI_BASE_URL": "https://llm-router.internal.example.com/v1",
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"modelFallback":{"enabled":false}`, "apiProxy should disable modelFallback for custom OpenAI-compatible providers")
+	})
+
+	t.Run("model-fallback is disabled by default for expression-valued custom API targets", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "claude",
+			AllowedDomains: "github.com,openrouter.ai",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "claude",
+					Env: map[string]string{
+						"ANTHROPIC_BASE_URL": "${{ vars.LLM_URL }}",
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"modelFallback":{"enabled":false}`, "apiProxy should disable modelFallback for expression-valued custom API targets")
+	})
+
+	t.Run("explicit model-fallback overrides the custom API target default", func(t *testing.T) {
+		enabled := TemplatableBool("true")
+		config := AWFCommandConfig{
+			EngineName:     "claude",
+			AllowedDomains: "github.com,openrouter.ai",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "claude",
+					Env: map[string]string{
+						"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1",
+					},
+				},
+				SandboxConfig: &SandboxConfig{
+					Agent: &AgentSandboxConfig{
+						ModelFallback: &enabled,
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"modelFallback":{"enabled":true}`, "explicit sandbox.agent.model-fallback should win over the custom-target default")
+	})
+
+	t.Run("default-ai-credits-pricing is emitted for BYOK self-hosted model at zero cost", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+				},
+				DefaultAiCreditsPricing: &AiCreditsPricingConfig{
+					Input:  0,
+					Output: 0,
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"defaultAiCreditsPricing"`, "apiProxy should emit defaultAiCreditsPricing when configured")
+		assert.Contains(t, jsonStr, `"input":0`, "apiProxy.defaultAiCreditsPricing.input should be 0")
+		assert.Contains(t, jsonStr, `"output":0`, "apiProxy.defaultAiCreditsPricing.output should be 0")
+	})
+
+	t.Run("default-ai-credits-pricing is emitted with non-zero rates", func(t *testing.T) {
+		cachedInput := 0.3
+		cacheWrite := 3.0
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+				},
+				DefaultAiCreditsPricing: &AiCreditsPricingConfig{
+					Input:       3.0,
+					Output:      15.0,
+					CachedInput: &cachedInput,
+					CacheWrite:  &cacheWrite,
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.Contains(t, jsonStr, `"defaultAiCreditsPricing"`, "apiProxy should emit defaultAiCreditsPricing when configured")
+		assert.Contains(t, jsonStr, `"input":3`, "apiProxy.defaultAiCreditsPricing.input should be 3")
+		assert.Contains(t, jsonStr, `"output":15`, "apiProxy.defaultAiCreditsPricing.output should be 15")
+		assert.Contains(t, jsonStr, `"cachedInput":0.3`, "apiProxy.defaultAiCreditsPricing.cachedInput should be emitted")
+		assert.Contains(t, jsonStr, `"cacheWrite":3`, "apiProxy.defaultAiCreditsPricing.cacheWrite should be emitted")
+	})
+
+	t.Run("default-ai-credits-pricing is omitted when not configured", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "copilot",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "copilot",
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		assert.NotContains(t, jsonStr, `"defaultAiCreditsPricing"`, "apiProxy should omit defaultAiCreditsPricing when not configured")
+	})
+
+	t.Run("models.providers cost overlay is emitted in apiProxy config when AWF supports providers", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "claude",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "claude",
+				},
+				ModelCosts: map[string]any{
+					"providers": map[string]any{
+						"anthropic": map[string]any{
+							"models": map[string]any{
+								"accounts/fireworks/models/minimax-m3": map[string]any{
+									"cost": map[string]any{
+										"input":       "3e-07",
+										"output":      "1.5e-06",
+										"cache_read":  "3e-08",
+										"cache_write": "3.75e-07",
+									},
+								},
+							},
+						},
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true, Version: string(constants.AWFAPIProxyProvidersMinVersion)},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonStr), &parsed))
+		apiProxy, ok := parsed["apiProxy"].(map[string]any)
+		require.True(t, ok, "expected apiProxy object")
+		providers, ok := apiProxy["providers"].(map[string]any)
+		require.True(t, ok, "expected apiProxy.providers object")
+		anthropic, ok := providers["anthropic"].(map[string]any)
+		require.True(t, ok, "expected anthropic provider")
+		models, ok := anthropic["models"].(map[string]any)
+		require.True(t, ok, "expected anthropic.models object")
+		model, ok := models["accounts/fireworks/models/minimax-m3"].(map[string]any)
+		require.True(t, ok, "expected custom model key in providers")
+		cost, ok := model["cost"].(map[string]any)
+		require.True(t, ok, "expected model cost object")
+		assert.Equal(t, "3e-08", cost["cache_read"], "apiProxy.providers should preserve custom cache_read pricing")
+	})
+
+	t.Run("models.providers is not emitted when AWF version does not support apiProxy.providers", func(t *testing.T) {
+		config := AWFCommandConfig{
+			EngineName:     "claude",
+			AllowedDomains: "github.com",
+			WorkflowData: &WorkflowData{
+				EngineConfig: &EngineConfig{
+					ID: "claude",
+				},
+				ModelCosts: map[string]any{
+					"providers": map[string]any{
+						"anthropic": map[string]any{
+							"models": map[string]any{
+								"accounts/fireworks/models/minimax-m3": map[string]any{
+									"cost": map[string]any{
+										"input":  "3e-07",
+										"output": "1.5e-06",
+									},
+								},
+							},
+						},
+					},
+				},
+				NetworkPermissions: &NetworkPermissions{
+					Firewall: &FirewallConfig{Enabled: true, Version: "v0.27.41"},
+				},
+			},
+		}
+
+		jsonStr, err := BuildAWFConfigJSON(config)
+		require.NoError(t, err)
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonStr), &parsed))
+		apiProxy, ok := parsed["apiProxy"].(map[string]any)
+		require.True(t, ok, "expected apiProxy object")
+		_, hasProviders := apiProxy["providers"]
+		assert.False(t, hasProviders, "apiProxy should omit providers when AWF version does not support it")
+	})
+}
+
+func TestExtractModelCostProviders(t *testing.T) {
+	t.Run("returns a cloned providers map", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			ModelCosts: map[string]any{
+				"providers": map[string]any{
+					"anthropic": map[string]any{"models": map[string]any{}},
+				},
+			},
+		}
+
+		got := extractModelCostProviders(workflowData)
+		require.NotNil(t, got)
+		got["openai"] = map[string]any{}
+
+		origProviders := workflowData.ModelCosts["providers"].(map[string]any)
+		_, mutatedOriginal := origProviders["openai"]
+		assert.False(t, mutatedOriginal, "returned providers map should not alias ModelCosts.providers")
+	})
+
+	t.Run("returns nil when providers has unexpected type", func(t *testing.T) {
+		workflowData := &WorkflowData{
+			ModelCosts: map[string]any{
+				"providers": map[string]string{"anthropic": "invalid"},
+			},
+		}
+		assert.Nil(t, extractModelCostProviders(workflowData))
 	})
 }
 
@@ -1149,6 +1608,35 @@ func TestBuildAWFConfigJSON_SchemaCompliance(t *testing.T) {
 				}(),
 			},
 		},
+		{
+			name: "config with copilot BYOK extra headers and sessionId",
+			config: AWFCommandConfig{
+				EngineName:     "copilot",
+				AllowedDomains: "github.com",
+				WorkflowData: &WorkflowData{
+					EngineConfig: &EngineConfig{ID: "copilot"},
+					NetworkPermissions: &NetworkPermissions{
+						Firewall: &FirewallConfig{Enabled: true},
+					},
+					SandboxConfig: &SandboxConfig{
+						Agent: &AgentSandboxConfig{
+							Targets: map[string]*AgentAPIProxyTargetConfig{
+								"copilot": {
+									ExtraHeaders: map[string]string{
+										"x-openrouter-title": "my-workflow",
+										"http-referer":       "https://github.com/org/repo",
+									},
+									ExtraBodyFields: map[string]string{
+										"custom-field": "custom-value",
+									},
+									SessionId: "run-12345",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -1200,6 +1688,36 @@ func TestValidateAWFConfigJSON_AllowsTemplatableModelFallbackEnabled(t *testing.
 func TestValidateAWFConfigJSON_AllowsMaxTurnCacheMisses(t *testing.T) {
 	err := validateAWFConfigJSON(`{"apiProxy":{"enabled":true,"maxCacheMisses":3}}`)
 	require.NoError(t, err, "maxCacheMisses should pass compile-time schema validation")
+}
+
+func TestValidateAWFConfigJSON_AllowsSbxContainerRuntime(t *testing.T) {
+	err := validateAWFConfigJSON(`{"container":{"containerRuntime":"sbx"}}`)
+	require.NoError(t, err, "container.containerRuntime=sbx should pass compile-time schema validation")
+}
+
+func TestValidateAWFConfigJSON_AllowsGVisorContainerRuntime(t *testing.T) {
+	err := validateAWFConfigJSON(`{"container":{"containerRuntime":"gvisor"}}`)
+	require.NoError(t, err, "container.containerRuntime=gvisor should pass compile-time schema validation")
+}
+
+func TestValidateAWFConfigJSON_RejectsUnknownContainerRuntime(t *testing.T) {
+	err := validateAWFConfigJSON(`{"container":{"containerRuntime":"runc"}}`)
+	require.Error(t, err, "container.containerRuntime must only accept enum values; unknown runtime \"runc\" should be rejected")
+}
+
+func TestValidateAWFConfigJSON_AllowsDefaultAiCreditsPricing(t *testing.T) {
+	err := validateAWFConfigJSON(`{"apiProxy":{"enabled":true,"maxRuns":500,"defaultAiCreditsPricing":{"input":0,"output":0}}}`)
+	require.NoError(t, err, "apiProxy.defaultAiCreditsPricing with zero rates should pass AWF config schema validation")
+}
+
+func TestValidateAWFConfigJSON_AllowsDefaultAiCreditsPricingNonZero(t *testing.T) {
+	err := validateAWFConfigJSON(`{"apiProxy":{"enabled":true,"maxRuns":500,"defaultAiCreditsPricing":{"input":3,"output":15}}}`)
+	require.NoError(t, err, "apiProxy.defaultAiCreditsPricing with non-zero rates should pass AWF config schema validation")
+}
+
+func TestValidateAWFConfigJSON_AllowsDefaultAiCreditsPricingCachedFields(t *testing.T) {
+	err := validateAWFConfigJSON(`{"apiProxy":{"enabled":true,"maxRuns":500,"defaultAiCreditsPricing":{"input":3,"output":15,"cachedInput":0.3,"cacheWrite":3}}}`)
+	require.NoError(t, err, "apiProxy.defaultAiCreditsPricing should allow cachedInput and cacheWrite fields")
 }
 
 // TestBuildAWFConfigJSON_ValidateFlag verifies that schema validation runs when
@@ -1364,16 +1882,25 @@ func TestBuildAWFCommand_ResolvesMaxAICreditsFromEnv(t *testing.T) {
 	tests := []struct {
 		name          string
 		isDetection   bool
+		isEvals       bool
 		defaultBudget int64
 	}{
 		{
 			name:          "agent run uses agent fallback",
 			isDetection:   false,
+			isEvals:       false,
 			defaultBudget: constants.DefaultMaxAICredits,
 		},
 		{
 			name:          "detection run uses detection fallback",
 			isDetection:   true,
+			isEvals:       false,
+			defaultBudget: constants.DefaultDetectionMaxAICredits,
+		},
+		{
+			name:          "evals run uses evals fallback",
+			isDetection:   false,
+			isEvals:       true,
 			defaultBudget: constants.DefaultDetectionMaxAICredits,
 		},
 	}
@@ -1388,6 +1915,7 @@ func TestBuildAWFCommand_ResolvesMaxAICreditsFromEnv(t *testing.T) {
 				ResolveMaxAICreditsFromEnv: true,
 				WorkflowData: &WorkflowData{
 					IsDetectionRun: tt.isDetection,
+					IsEvalsRun:     tt.isEvals,
 					EngineConfig:   &EngineConfig{ID: "copilot"},
 					NetworkPermissions: &NetworkPermissions{
 						Firewall: &FirewallConfig{Enabled: true},
@@ -1401,33 +1929,6 @@ func TestBuildAWFCommand_ResolvesMaxAICreditsFromEnv(t *testing.T) {
 			assert.NotContains(t, command, "vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS")
 		})
 	}
-}
-
-func TestBuildAWFCommand_ModelMultipliersInlineInConfigJSON(t *testing.T) {
-	config := AWFCommandConfig{
-		EngineName:    "copilot",
-		EngineCommand: "copilot --prompt-file /tmp/prompt.txt",
-		LogFile:       "/tmp/gh-aw/agent-stdio.log",
-		WorkflowData: &WorkflowData{
-			EngineConfig: &EngineConfig{
-				ID: "copilot",
-				TokenWeights: &types.TokenWeights{
-					Multipliers: map[string]float64{
-						"my-custom-model": 2.5,
-					},
-				},
-			},
-			NetworkPermissions: &NetworkPermissions{
-				Firewall: &FirewallConfig{Enabled: true},
-			},
-		},
-	}
-
-	command := BuildAWFCommand(config)
-
-	assert.Contains(t, command, "modelMultipliers", "expected model multipliers key in inline AWF config JSON")
-	assert.Contains(t, command, "my-custom-model", "expected custom model multiplier to be embedded in inline AWF config JSON")
-	assert.NotContains(t, command, "merge_awf_model_multipliers.cjs", "expected no runtime model multiplier merger script")
 }
 
 func TestBuildAWFCommand_PreservesGitHubExpressionOperatorsInConfigJSON(t *testing.T) {
@@ -1505,7 +2006,7 @@ func TestBuildAWFCommand_ConfigFileWithPathSetup(t *testing.T) {
 	pathSetupIdx := strings.Index(command, "GH_AW_NODE_BIN")
 	configWriteIdx := strings.Index(command, "awf-config.json")
 	modelsPathIdx := strings.Index(command, "GH_AW_MODELS_JSON_PATH")
-	awfIdx := strings.Index(command, "sudo -E awf")
+	awfIdx := strings.Index(command, "awf ")
 
 	assert.GreaterOrEqual(t, pathSetupIdx, 0, "path setup should appear in command")
 	assert.GreaterOrEqual(t, configWriteIdx, 0, "config file write should appear in command")
@@ -1610,7 +2111,7 @@ func TestBuildAWFCommand_WritesAgentCLIStartTimestamp(t *testing.T) {
 			// The timestamp write must appear before the AWF invocation so it captures
 			// the step start time rather than the time after AWF container setup.
 			tsIdx := strings.Index(command, AgentCLIStartMsPath)
-			awfIdx := strings.Index(command, "sudo -E awf")
+			awfIdx := strings.Index(command, "awf ")
 			assert.Less(t, tsIdx, awfIdx,
 				"timestamp write must appear before AWF invocation")
 

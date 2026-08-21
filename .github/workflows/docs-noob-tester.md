@@ -11,13 +11,11 @@ permissions:
   pull-requests: read
   copilot-requests: write
 
-sandbox:
-  agent:
-    sudo: false
 
 engine:
   id: copilot
   copilot-sdk: true
+max-tool-denials: 3
 timeout-minutes: 30
 runtimes:
   node:
@@ -48,19 +46,28 @@ imports:
   - shared/keep-it-short.md
   - shared/otlp.md
 pre-agent-steps:
+  - name: Install docs dependencies
+    env:
+      EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
+    run: |
+      cd "$EXPR_GITHUB_WORKSPACE/docs" || exit 1
+      npm ci
   - name: Start docs server
     env:
       EXPR_GITHUB_WORKSPACE: ${{ github.workspace }}
     run: |
-      cd "$EXPR_GITHUB_WORKSPACE"
-      nohup make dev-docs > /tmp/gh-aw/agent/preview.log 2>&1 &
+      mkdir -p /tmp/gh-aw/agent
+      cd "$EXPR_GITHUB_WORKSPACE/docs" || exit 1
+      nohup npm run dev -- --host 127.0.0.1 --port 4321 > /tmp/gh-aw/agent/preview.log 2>&1 &
       PID=$!
       echo $PID > /tmp/gh-aw/agent/server.pid
       echo "Server PID: $PID"
   - name: Wait for server readiness
+    # runner-guard:ignore RGS-012 -- loopback-only port/readiness checks for the docs server started above; no external traffic or secrets are sent.
     run: |
       MAX_WAIT=135  # 45 attempts × 3s = 135s max wait
       WAITED=0
+      # runner-guard:ignore RGS-012 -- loopback-only port probe for the docs server started above; no external traffic is sent.
       until (echo > /dev/tcp/127.0.0.1/4321) > /dev/null 2>&1; do
         # Check if the server process has already died
         if [ -f /tmp/gh-aw/agent/server.pid ] && ! kill -0 "$(cat /tmp/gh-aw/agent/server.pid)" 2>/dev/null; then
@@ -78,6 +85,7 @@ pre-agent-steps:
         sleep 3
       done
       WAITED=0
+      # runner-guard:ignore RGS-012 -- loopback-only readiness request to the docs server started above; no secrets are sent.
       until curl -sf http://localhost:4321/gh-aw/ > /dev/null 2>&1; do
         # Check if the server process has already died
         if [ -f /tmp/gh-aw/agent/server.pid ] && ! kill -0 "$(cat /tmp/gh-aw/agent/server.pid)" 2>/dev/null; then
@@ -102,6 +110,16 @@ pre-agent-steps:
       echo "Server URL: http://localhost:4321/gh-aw/"
 features:
   gh-aw-detection: true
+evals:
+  - id: findings-reported
+    question: Did the agent report documentation testing findings (via asset upload or report)?
+  - id: confusing-steps-identified
+    question: Does the agent output identify at least one confusing, broken, or unclear step in the documentation?
+  - id: user-perspective-maintained
+    question: Does the agent output reflect the perspective of a new user rather than an expert reviewer?
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
 
 # Documentation Noob Testing

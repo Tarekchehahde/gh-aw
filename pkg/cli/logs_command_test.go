@@ -13,6 +13,7 @@ import (
 )
 
 func TestNewLogsCommand(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 
 	require.NotNil(t, cmd, "NewLogsCommand should not return nil")
@@ -40,7 +41,7 @@ func TestNewLogsCommand(t *testing.T) {
 	// Check engine flag
 	engineFlag := flags.Lookup("engine")
 	assert.NotNil(t, engineFlag, "Should have 'engine' flag")
-	assert.Empty(t, engineFlag.Shorthand, "Engine filter flag should not have shorthand")
+	assert.Equal(t, "e", engineFlag.Shorthand, "Engine filter flag should have shorthand '-e'")
 
 	// Check firewall flags
 	firewallFlag := flags.Lookup("firewall")
@@ -87,6 +88,7 @@ func TestNewLogsCommand(t *testing.T) {
 	assert.NotNil(t, cacheBeforeFlag, "Should have 'cache-before' flag")
 	assert.Contains(t, cacheBeforeFlag.Usage, "-1d", "cache-before flag should document day deltas")
 	assert.Contains(t, cacheBeforeFlag.Usage, "-30d", "cache-before flag should document explicit day-count deltas")
+	assert.Contains(t, cacheBeforeFlag.Usage, "(Cache eviction)", "cache-before flag usage should retain cache-eviction prefix text")
 
 	// Backward-compatible alias should remain registered but hidden from help output
 	afterAliasFlag := flags.Lookup("after")
@@ -95,6 +97,7 @@ func TestNewLogsCommand(t *testing.T) {
 }
 
 func TestLogsCommandFlagDefaults(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -123,6 +126,7 @@ func TestLogsCommandFlagDefaults(t *testing.T) {
 }
 
 func TestLogsCommandBooleanFlags(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -138,6 +142,7 @@ func TestLogsCommandBooleanFlags(t *testing.T) {
 }
 
 func TestLogsCommandStructure(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		commandCreator func() any
@@ -159,6 +164,7 @@ func TestLogsCommandStructure(t *testing.T) {
 }
 
 func TestLogsCommandArgs(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 
 	// Logs command accepts 0 or 1 argument (workflow is optional)
@@ -175,6 +181,7 @@ func TestLogsCommandArgs(t *testing.T) {
 }
 
 func TestLogsCommandMutuallyExclusiveFlags(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -191,6 +198,7 @@ func TestLogsCommandMutuallyExclusiveFlags(t *testing.T) {
 }
 
 func TestLogsCommandCountFlag(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -205,6 +213,7 @@ func TestLogsCommandCountFlag(t *testing.T) {
 }
 
 func TestLogsCommandDateFlags(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -226,6 +235,7 @@ func TestLogsCommandDateFlags(t *testing.T) {
 }
 
 func TestLogsCommandRunIDFilters(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -246,6 +256,7 @@ func TestLogsCommandRunIDFilters(t *testing.T) {
 }
 
 func TestLogsCommandOutputFlag(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -263,6 +274,7 @@ func TestLogsCommandOutputFlag(t *testing.T) {
 }
 
 func TestLogsCommandHelpText(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 
 	// Verify long description contains expected sections
@@ -296,6 +308,7 @@ func TestLogsCommandHelpText(t *testing.T) {
 }
 
 func TestLogsCommandStdinFlag(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	flags := cmd.Flags()
 
@@ -307,6 +320,7 @@ func TestLogsCommandStdinFlag(t *testing.T) {
 }
 
 func TestLogsCommandStdinRejectsPositionalArgs(t *testing.T) {
+	t.Parallel()
 	cmd := NewLogsCommand()
 	cmd.SetArgs([]string{"my-workflow", "--stdin"})
 	// Suppress output so test output stays clean
@@ -314,7 +328,7 @@ func TestLogsCommandStdinRejectsPositionalArgs(t *testing.T) {
 	cmd.SetErr(nil)
 	err := cmd.Execute()
 	require.Error(t, err, "logs --stdin with a positional arg should return an error")
-	assert.Contains(t, err.Error(), "positional arguments are not allowed with --stdin", "error message should explain the conflict")
+	require.ErrorContains(t, err, "positional arguments are not allowed with --stdin", "error message should explain the conflict")
 }
 
 // TestLogsCommand_RepoBypassesLocalWorkflowResolution verifies that specifying

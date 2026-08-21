@@ -22,14 +22,15 @@ const { parseBoolTemplatable } = require("./templatable.cjs");
  * @param {string} options.itemsField - Field name in the message containing the items array
  * @param {string} options.templatePath - Absolute path to the issue body template file
  * @param {string} options.templateListKey - Template variable name for the rendered items list
- * @param {function(string): string[]} options.buildCommentHeader - Returns header lines for the comment body given runUrl
- * @param {function(Object, number): string[]} options.renderCommentItem - Renders a single item for an existing-issue comment
- * @param {function(Object, number): string[]} options.renderIssueItem - Renders a single item for a new-issue body
+ * @param {(runUrl: string) => string[]} options.buildCommentHeader - Returns header lines for the comment body given runUrl
+ * @param {(item: any, index: number) => string[]} options.renderCommentItem - Renders a single item for an existing-issue comment
+ * @param {(item: any, index: number) => string[]} options.renderIssueItem - Renders a single item for a new-issue body
  * @param {string[]} [options.defaultLabels] - Labels always applied to created issues (merged with config.labels)
+ * @param {(message: any) => Array<any> | null | undefined} [options.fallbackItems] - Optional fallback item builder used when the message items array is missing/empty
  * @returns {HandlerFactoryFunction}
  */
 function buildMissingIssueHandler(options) {
-  const { handlerType, defaultTitlePrefix, itemsField, templatePath, templateListKey, buildCommentHeader, renderCommentItem, renderIssueItem, defaultLabels = [] } = options;
+  const { handlerType, defaultTitlePrefix, itemsField, templatePath, templateListKey, buildCommentHeader, renderCommentItem, renderIssueItem, defaultLabels = [], fallbackItems } = options;
 
   return async function main(config = {}) {
     // Extract configuration
@@ -195,8 +196,17 @@ function buildMissingIssueHandler(options) {
 
       processedCount++;
 
+      // Resolve fields from message, falling back to environment variables for fields
+      // that the agent may not know (e.g. workflow_name is not part of the agent's context).
+      const workflowName = message.workflow_name || process.env.GH_AW_WORKFLOW_NAME || "";
+      const workflowSource = message.workflow_source || "";
+      const workflowSourceURL = message.workflow_source_url || process.env.GH_AW_WORKFLOW_SOURCE_URL || "";
+      const runUrl =
+        message.run_url || (process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}` : "");
+      let items = message[itemsField];
+
       // Validate required fields
-      if (!message.workflow_name) {
+      if (!workflowName) {
         core.warning(`Missing required field: workflow_name`);
         return {
           success: false,
@@ -204,20 +214,17 @@ function buildMissingIssueHandler(options) {
         };
       }
 
-      if (!message[itemsField] || !Array.isArray(message[itemsField]) || message[itemsField].length === 0) {
+      if ((!items || !Array.isArray(items) || items.length === 0) && typeof fallbackItems === "function") {
+        items = fallbackItems(message);
+      }
+
+      if (!items || !Array.isArray(items) || items.length === 0) {
         core.warning(`Missing or empty ${itemsField} array`);
         return {
           success: false,
           error: `Missing or empty ${itemsField} array`,
         };
       }
-
-      // Extract fields from message
-      const workflowName = message.workflow_name;
-      const workflowSource = message.workflow_source || "";
-      const workflowSourceURL = message.workflow_source_url || "";
-      const runUrl = message.run_url || "";
-      const items = message[itemsField];
 
       // Create or update the issue
       const result = await createOrUpdateIssue(workflowName, workflowSource, workflowSourceURL, runUrl, items);

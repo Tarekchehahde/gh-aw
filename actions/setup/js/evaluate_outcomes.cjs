@@ -1,4 +1,5 @@
 // @ts-check
+require("./shim.cjs");
 
 /**
  * evaluate_outcomes.cjs
@@ -28,6 +29,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
+const { getSetupTimeoutMs } = require("./child_process_timeouts.cjs");
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -47,6 +49,7 @@ const CLOSING_COMMENT_KEYWORDS = ["not planned", "won't fix", "wontfix", "duplic
 
 const DEFAULT_ISSUE_IMMEDIATE_CLOSE_WINDOW_SEC = 60 * 60;
 const DEFAULT_LABEL_RETENTION_WINDOW_SEC = 24 * 60 * 60;
+const GH_COMMAND_TIMEOUT_MS = getSetupTimeoutMs("outcomeGh");
 
 const POSITIVE_REACTIONS = ["+1", "heart", "hooray", "rocket"];
 const NEGATIVE_REACTIONS = ["-1", "confused"];
@@ -78,7 +81,7 @@ const LABEL_RETENTION_WINDOW_SEC = getEnvPositiveIntOrDefault("OUTCOME_LABEL_RET
  */
 function gh(args) {
   try {
-    return execFileSync("gh", args, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    return execFileSync("gh", args, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: GH_COMMAND_TIMEOUT_MS }).trim();
   } catch {
     return null;
   }
@@ -88,7 +91,7 @@ function gh(args) {
  * Run a `gh api` call, returning parsed JSON.
  * Returns null on failure.
  * @param {string} endpoint
- * @returns {object | null}
+ * @returns {any | null}
  */
 function ghAPI(endpoint) {
   const raw = gh(["api", endpoint]);
@@ -117,7 +120,7 @@ function readJSON(filePath, fallback) {
 /**
  * Read a JSONL file, returning an array of parsed objects.
  * @param {string} filePath
- * @returns {object[]}
+ * @returns {any[]}
  */
 function readJSONL(filePath) {
   try {
@@ -145,8 +148,16 @@ function readJSONL(filePath) {
  */
 function writeJSONAtomic(filePath, data) {
   const tmp = filePath + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
-  fs.renameSync(tmp, filePath);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
+  } catch (err) {
+    throw new Error(`Failed to write file ${tmp}: ${String(err)}`, { cause: err });
+  }
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    throw new Error(`Failed to rename file ${tmp} to ${filePath}: ${String(err)}`, { cause: err });
+  }
 }
 
 /**
@@ -261,7 +272,7 @@ function hasIssueReactions(issue) {
 
 /**
  * Evaluate `create_issue`.
- * @param {object} item
+ * @param {any} item
  * @param {string} itemRepo
  * @param {string} timestamp
  * @param {EvalResult} out
@@ -371,7 +382,7 @@ function evaluateCreateIssue(item, itemRepo, timestamp, out, apiGet, nowMs) {
 
 /**
  * Evaluate `add_comment`.
- * @param {object} item
+ * @param {any} item
  * @param {string} itemRepo
  * @param {string} timestamp
  * @param {EvalResult} out
@@ -446,7 +457,7 @@ function evaluateAddComment(item, itemRepo, timestamp, out, apiGet, nowMs) {
 
 /**
  * Evaluate `add_labels`.
- * @param {object} item
+ * @param {any} item
  * @param {string} itemRepo
  * @param {string} timestamp
  * @param {EvalResult} out
@@ -537,7 +548,7 @@ function evaluateAddLabels(item, itemRepo, timestamp, out, apiGet, nowMs) {
 
 /**
  * Evaluate `close_issue`.
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @param {number} nowMs
@@ -609,7 +620,7 @@ function evaluateCloseIssue(item, defaultRepo, api = ghAPI, nowMs = Date.now()) 
 
 /**
  * Evaluate `close_pull_request`.
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @param {number} nowMs
@@ -696,6 +707,168 @@ function evaluateClosePullRequest(item, defaultRepo, api = ghAPI, nowMs = Date.n
   out.evidence_strength = "strong";
   out.signal = "not_closed";
   out.detail = "not_closed";
+  return out;
+}
+
+/**
+ * Evaluate `close_discussion`.
+ * @param {any} item
+ * @param {string} defaultRepo
+ * @param {(endpoint: string) => any} api
+ * @param {number} nowMs
+ * @returns {EvalResult}
+ */
+function evaluateCloseDiscussion(item, defaultRepo, api = ghAPI, nowMs = Date.now()) {
+  const repo = getItemRepo(item, defaultRepo);
+  const number = getItemNumber(item);
+  const timestamp = item.timestamp || "";
+  /** @type {EvalResult} */
+  const out = {
+    result: "unknown",
+    outcome_status: "unknown",
+    evidence_strength: "weak",
+    signal: "unknown",
+    detail: "",
+    resolution_sec: null,
+    pending_age_sec: null,
+    review_comments: null,
+    changed_files: null,
+    additions: null,
+    deletions: null,
+    reactions_total: null,
+    reactions_positive: null,
+    reactions_negative: null,
+    comments: null,
+    zero_touch: false,
+  };
+
+  if (!repo || !number) {
+    out.detail = "missing discussion reference";
+    return out;
+  }
+
+  const discussion = api(`repos/${repo}/discussions/${number}`);
+  if (!discussion || (typeof discussion.state !== "string" && typeof discussion.closed !== "boolean")) {
+    out.detail = "api error";
+    setPendingAge(out, timestamp, nowMs);
+    return out;
+  }
+
+  out.comments = typeof discussion.comments === "number" ? discussion.comments : null;
+  if (discussion.reactions && typeof discussion.reactions === "object") {
+    const summary = summarizeReactions(discussion.reactions);
+    out.reactions_total = summary.total;
+    out.reactions_positive = summary.positive;
+    out.reactions_negative = summary.negative;
+  }
+
+  const isClosed = discussion.closed === true || String(discussion.state || "").toLowerCase() === "closed";
+  if (isClosed) {
+    out.result = "accepted";
+    out.outcome_status = "accepted";
+    out.evidence_strength = "strong";
+    out.signal = "closed";
+    out.detail = "closed";
+    if (discussion.created_at && discussion.closed_at) {
+      out.resolution_sec = secondsBetween(discussion.created_at, discussion.closed_at);
+    }
+    return out;
+  }
+
+  out.result = "rejected";
+  out.outcome_status = "rejected";
+  out.evidence_strength = "strong";
+  out.signal = "not_closed";
+  out.detail = "not_closed";
+  return out;
+}
+
+/**
+ * Evaluate `create_discussion`.
+ * @param {any} item
+ * @param {string} defaultRepo
+ * @param {(endpoint: string) => any} api
+ * @param {number} nowMs
+ * @returns {EvalResult}
+ */
+function evaluateCreateDiscussion(item, defaultRepo, api = ghAPI, nowMs = Date.now()) {
+  const repo = getItemRepo(item, defaultRepo);
+  const number = getItemNumber(item);
+  const timestamp = item.timestamp || "";
+  /** @type {EvalResult} */
+  const out = {
+    result: "unknown",
+    outcome_status: "unknown",
+    evidence_strength: "weak",
+    signal: "unknown",
+    detail: "",
+    resolution_sec: null,
+    pending_age_sec: null,
+    review_comments: null,
+    changed_files: null,
+    additions: null,
+    deletions: null,
+    reactions_total: null,
+    reactions_positive: null,
+    reactions_negative: null,
+    comments: null,
+    zero_touch: false,
+  };
+
+  if (!repo || !number) {
+    out.detail = "missing discussion reference";
+    return out;
+  }
+
+  const discussion = api(`repos/${repo}/discussions/${number}`);
+  if (!discussion) {
+    out.detail = "api error";
+    setPendingAge(out, timestamp, nowMs);
+    return out;
+  }
+
+  out.comments = typeof discussion.comments === "number" ? discussion.comments : null;
+  if (discussion.reactions && typeof discussion.reactions === "object") {
+    const summary = summarizeReactions(discussion.reactions);
+    out.reactions_total = summary.total;
+    out.reactions_positive = summary.positive;
+    out.reactions_negative = summary.negative;
+  }
+
+  const answered = discussion.answer_chosen_at != null || discussion.answer != null || discussion.answered === true;
+  if (answered) {
+    out.result = "accepted";
+    out.outcome_status = "accepted";
+    out.evidence_strength = "strong";
+    out.signal = "answered";
+    out.detail = "answered";
+    return out;
+  }
+
+  if (discussion.locked === true) {
+    out.result = "rejected";
+    out.outcome_status = "rejected";
+    out.evidence_strength = "strong";
+    out.signal = "locked";
+    out.detail = "locked";
+    return out;
+  }
+
+  if (typeof out.comments === "number" && out.comments > 0) {
+    out.result = "accepted";
+    out.outcome_status = "accepted";
+    out.evidence_strength = "medium";
+    out.signal = "engaged";
+    out.detail = "has replies";
+    return out;
+  }
+
+  out.result = "ignored";
+  out.outcome_status = "ignored";
+  out.evidence_strength = "medium";
+  out.signal = "no_engagement";
+  out.detail = "no replies";
+  setPendingAge(out, timestamp, nowMs);
   return out;
 }
 
@@ -791,19 +964,19 @@ function normalizeOutcome(result, detail) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @returns {number | null}
  */
 function getItemNumber(item) {
   if (typeof item.number === "number" && Number.isFinite(item.number)) return item.number;
   const url = item.url || "";
-  const issueMatch = url.match(/\/(?:issues|pull)\/(\d+)/);
+  const issueMatch = url.match(/\/(?:issues|pull|discussions)\/(\d+)/);
   if (issueMatch) return Number(issueMatch[1]);
   return null;
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @returns {string}
  */
@@ -815,7 +988,7 @@ function getItemRepo(item, defaultRepo) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} key
  * @returns {string[]}
  */
@@ -826,7 +999,7 @@ function getMetadataStringArray(item, key) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} key
  * @returns {number | null}
  */
@@ -956,7 +1129,7 @@ function extractPullRequestUpdateState(pullRequest) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @param {{fields: string[], loadCurrent: (repo: string, number: number) => { currentState: Record<string, any>, merged?: boolean } | null}} options
@@ -1063,7 +1236,7 @@ function isSubmittedReview(review) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @returns {EvalResult}
@@ -1165,7 +1338,7 @@ function evaluateAddReviewer(item, defaultRepo, api = ghAPI) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @returns {EvalResult}
@@ -1182,7 +1355,7 @@ function evaluateUpdateIssue(item, defaultRepo, api = ghAPI) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @returns {EvalResult}
@@ -1202,7 +1375,7 @@ function evaluateUpdatePullRequest(item, defaultRepo, api = ghAPI) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {(endpoint: string) => any} api
  * @returns {EvalResult}
@@ -1316,7 +1489,7 @@ function evaluateSubmitPullRequestReview(item, defaultRepo, api = ghAPI) {
 
 /**
  * Evaluate a single safe-output item against the GitHub API.
- * @param {object} item
+ * @param {any} item
  * @param {string} defaultRepo
  * @param {((endpoint: string) => any) | EvaluateDeps} [apiOrOptions]
  * @returns {EvalResult}
@@ -1369,6 +1542,12 @@ function evaluateItem(item, defaultRepo, apiOrOptions) {
   }
   if (type === "close_pull_request") {
     return evaluateClosePullRequest(item, defaultRepo, ghAPIFn, nowMs);
+  }
+  if (type === "close_discussion") {
+    return evaluateCloseDiscussion(item, defaultRepo, ghAPIFn, nowMs);
+  }
+  if (type === "create_discussion") {
+    return evaluateCreateDiscussion(item, defaultRepo, ghAPIFn, nowMs);
   }
   if (type === "create_issue") {
     return evaluateCreateIssue(item, itemRepo, timestamp, out, ghAPIFn, nowMs);
@@ -1487,7 +1666,7 @@ function evaluateItem(item, defaultRepo, apiOrOptions) {
 
 /**
  * Evaluate outcome for create_pull_request.
- * @param {object} item
+ * @param {any} item
  * @param {string} itemRepo
  * @param {EvalResult} out
  * @param {(endpoint: string) => any} [ghAPIFn]
@@ -1588,7 +1767,7 @@ function evaluateCreatePullRequestOutcome(item, itemRepo, out, ghAPIFn = ghAPI) 
 
 /**
  * Evaluate outcome for push_to_pull_request_branch.
- * @param {object} item
+ * @param {any} item
  * @param {string} itemRepo
  * @param {EvalResult} out
  * @param {(endpoint: string) => any} [ghAPIFn]
@@ -1695,7 +1874,7 @@ function evaluatePushToPullRequestBranchOutcome(item, itemRepo, out, ghAPIFn = g
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @returns {number}
  */
 function resolvePRNumber(item) {
@@ -1743,7 +1922,7 @@ function shaMatches(a, b) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @returns {string[]}
  */
 function extractPushedCommitSHAs(item) {
@@ -1768,7 +1947,7 @@ function extractPushedCommitSHAs(item) {
 }
 
 /**
- * @param {object} item
+ * @param {any} item
  * @returns {string}
  */
 function extractBeforeHeadSHA(item) {
@@ -1784,7 +1963,7 @@ function extractBeforeHeadSHA(item) {
  * @param {string} repo
  * @param {number} number
  * @param {any} prData
- * @param {(endpoint: string) => object | null} ghAPIFn
+ * @param {(endpoint: string) => any} ghAPIFn
  * @returns {boolean}
  */
 function hasClosingSignal(repo, number, prData, ghAPIFn) {
@@ -1807,7 +1986,7 @@ function hasClosingSignal(repo, number, prData, ghAPIFn) {
  * @param {string} repo
  * @param {string} commitSHA
  * @param {string} branchHeadSHA
- * @param {(endpoint: string) => object | null} ghAPIFn
+ * @param {(endpoint: string) => any} ghAPIFn
  * @returns {boolean | null}
  */
 function isCommitInBranchHistory(repo, commitSHA, branchHeadSHA, ghAPIFn) {
@@ -1867,8 +2046,12 @@ function main() {
   }
 
   // Ensure directories exist
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.mkdirSync(OUTCOMES_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.mkdirSync(OUTCOMES_DIR, { recursive: true });
+  } catch (err) {
+    throw new Error(`Failed to create evaluation directories: ${String(err)}`, { cause: err });
+  }
 
   // Load seen-runs cache
   const seenIds = new Set(readJSON(SEEN_FILE, []));
@@ -1877,7 +2060,7 @@ function main() {
   const runsRaw = gh(["run", "list", "--repo", repo, "--limit", "200", "--json", "databaseId,conclusion,workflowName,event", "--jq", '[.[] | select(.conclusion == "success")] | .[0:150]']);
 
   if (!runsRaw || runsRaw === "[]" || runsRaw === "null") {
-    console.log("No recent successful runs found");
+    core.info("No recent successful runs found");
     writeJSONAtomic(SUMMARY_PATH, { runs_checked: 0, total_outcomes: 0 });
     process.exit(0);
   }
@@ -1909,7 +2092,11 @@ function main() {
   const resolutionTimes = [];
 
   // Clear the evaluations file
-  fs.writeFileSync(EVAL_JSONL, "");
+  try {
+    fs.writeFileSync(EVAL_JSONL, "");
+  } catch (err) {
+    throw new Error(`Failed to write file ${EVAL_JSONL}: ${String(err)}`, { cause: err });
+  }
 
   /** @type {number[]} */
   const evaluatedIds = [];
@@ -1943,30 +2130,34 @@ function main() {
 
     noop += runNoops;
 
-    console.log(`Run ${runId} (${workflow}): ${runItems} item(s), ${runNoops} noop(s) [trigger: ${event}]`);
+    core.info(`Run ${runId} (${workflow}): ${runItems} item(s), ${runNoops} noop(s) [trigger: ${event}]`);
     checked++;
     total += runItems;
 
     // Write noop entries
     for (const n of noops) {
       const normalized = normalizeOutcome("noop", n.type || "");
-      fs.appendFileSync(
-        EVAL_JSONL,
-        JSON.stringify({
-          type: n.type,
-          url: "",
-          repo,
-          result: "noop",
-          outcome_status: normalized.outcome_status,
-          evidence_strength: normalized.evidence_strength,
-          signal: normalized.signal,
-          detail: n.type,
-          workflow,
-          run_id: runId,
-          timestamp: "",
-          event,
-        }) + "\n"
-      );
+      try {
+        fs.appendFileSync(
+          EVAL_JSONL,
+          JSON.stringify({
+            type: n.type,
+            url: "",
+            repo,
+            result: "noop",
+            outcome_status: normalized.outcome_status,
+            evidence_strength: normalized.evidence_strength,
+            signal: normalized.signal,
+            detail: n.type,
+            workflow,
+            run_id: runId,
+            timestamp: "",
+            event,
+          }) + "\n"
+        );
+      } catch (err) {
+        throw new Error(`Failed to append to file ${EVAL_JSONL}: ${String(err)}`, { cause: err });
+      }
     }
 
     if (runItems === 0) {
@@ -2022,34 +2213,38 @@ function main() {
         resolutionTimes.push(evalResult.resolution_sec);
       }
 
-      fs.appendFileSync(
-        EVAL_JSONL,
-        JSON.stringify({
-          type: item.type || "",
-          url: item.url || "",
-          repo: item.repo || repo,
-          result: evalResult.result,
-          outcome_status: normalized.outcome_status,
-          evidence_strength: normalized.evidence_strength,
-          signal: normalized.signal,
-          detail: evalResult.detail,
-          workflow,
-          run_id: runId,
-          timestamp: item.timestamp || "",
-          event,
-          resolution_sec: evalResult.resolution_sec,
-          pending_age_sec: evalResult.pending_age_sec,
-          review_comments: evalResult.review_comments,
-          changed_files: evalResult.changed_files,
-          additions: evalResult.additions,
-          deletions: evalResult.deletions,
-          reactions_total: evalResult.reactions_total,
-          reactions_positive: evalResult.reactions_positive,
-          reactions_negative: evalResult.reactions_negative,
-          comments: evalResult.comments,
-          zero_touch: evalResult.zero_touch || false,
-        }) + "\n"
-      );
+      try {
+        fs.appendFileSync(
+          EVAL_JSONL,
+          JSON.stringify({
+            type: item.type || "",
+            url: item.url || "",
+            repo: item.repo || repo,
+            result: evalResult.result,
+            outcome_status: normalized.outcome_status,
+            evidence_strength: normalized.evidence_strength,
+            signal: normalized.signal,
+            detail: evalResult.detail,
+            workflow,
+            run_id: runId,
+            timestamp: item.timestamp || "",
+            event,
+            resolution_sec: evalResult.resolution_sec,
+            pending_age_sec: evalResult.pending_age_sec,
+            review_comments: evalResult.review_comments,
+            changed_files: evalResult.changed_files,
+            additions: evalResult.additions,
+            deletions: evalResult.deletions,
+            reactions_total: evalResult.reactions_total,
+            reactions_positive: evalResult.reactions_positive,
+            reactions_negative: evalResult.reactions_negative,
+            comments: evalResult.comments,
+            zero_touch: evalResult.zero_touch || false,
+          }) + "\n"
+        );
+      } catch (err) {
+        throw new Error(`Failed to append to file ${EVAL_JSONL}: ${String(err)}`, { cause: err });
+      }
     }
 
     // Save per-run data
@@ -2073,6 +2268,7 @@ function main() {
   // Economics: zero-touch rate and median time-to-outcome
   const zeroTouchRate = accepted > 0 ? zeroTouchCount / accepted : 0;
   resolutionTimes.sort((a, b) => a - b);
+  /** @type {any} */
   let medianResolutionSec = null;
   if (resolutionTimes.length > 0) {
     const mid = Math.floor(resolutionTimes.length / 2);
@@ -2104,10 +2300,10 @@ function main() {
   const merged = [...new Set([...seenIds, ...evaluatedIds])].sort((a, b) => a - b).slice(-500);
   writeJSONAtomic(SEEN_FILE, merged);
 
-  console.log(`✓ Checked ${checked} runs, ${total} outcomes`);
-  console.log(`  Accepted: ${accepted}, Rejected: ${rejected}, Ignored: ${ignored}, Pending: ${pending}, Noop: ${noop}`);
-  console.log(`  Acceptance rate: ${acceptanceRate.toFixed(4)}`);
-  console.log(JSON.stringify(readJSON(SUMMARY_PATH, {}), null, 2));
+  core.info(`✓ Checked ${checked} runs, ${total} outcomes`);
+  core.info(`  Accepted: ${accepted}, Rejected: ${rejected}, Ignored: ${ignored}, Pending: ${pending}, Noop: ${noop}`);
+  core.info(`  Acceptance rate: ${acceptanceRate.toFixed(4)}`);
+  core.info(JSON.stringify(readJSON(SUMMARY_PATH, {}), null, 2));
 }
 
 if (require.main === module) {
@@ -2126,6 +2322,8 @@ module.exports = {
   evaluateAddLabels,
   evaluateCloseIssue,
   evaluateClosePullRequest,
+  evaluateCloseDiscussion,
+  evaluateCreateDiscussion,
   evaluateCreatePullRequestOutcome,
   evaluatePushToPullRequestBranchOutcome,
   normalizeOutcome,

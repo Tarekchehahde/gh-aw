@@ -22,6 +22,9 @@ EOF
   cat > "$repo_dir/.github/workflows/example.lock.yml" <<'EOF'
 lock: original
 EOF
+  cat > "$repo_dir/.github/workflows/agentic_commands.yml" <<'EOF'
+commands: original
+EOF
 }
 
 create_fake_binary() {
@@ -41,6 +44,9 @@ case "${FAKE_COMPILE_MODE:-stable}" in
   mutate)
     cat > .github/workflows/example.lock.yml <<'OUT'
 lock: mutated
+OUT
+    cat > .github/workflows/agentic_commands.yml <<'OUT'
+commands: mutated
 OUT
     ;;
   fail)
@@ -64,6 +70,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 TEST1_OUTPUT="$TMP_ROOT/test1-output.txt"
 TEST2_OUTPUT="$TMP_ROOT/test2-output.txt"
 TEST3_OUTPUT="$TMP_ROOT/test3-output.txt"
+TEST4_OUTPUT="$TMP_ROOT/test4-output.txt"
 
 # Test 1: matching lock file exits 0.
 echo "Test 1: matching lock file exits 0..."
@@ -86,11 +93,14 @@ create_fake_binary "$TEST_REPO/fake-gh-aw"
 if (cd "$TEST_REPO" && FAKE_COMPILE_MODE=mutate bash "$DRIFT_SCRIPT" "$TEST_REPO/fake-gh-aw" >"$TEST2_OUTPUT" 2>&1); then
   fail "drift should exit 1" "$(cat "$TEST2_OUTPUT")"
 elif grep -q ".github/workflows/example.lock.yml" "$TEST2_OUTPUT" \
+  && grep -Fq ".github/workflows/*.md" "$TEST2_OUTPUT" \
+  && grep -q "make recompile" "$TEST2_OUTPUT" \
   && grep -q "report_progress" "$TEST2_OUTPUT" \
-  && grep -q "^lock: original$" "$TEST_REPO/.github/workflows/example.lock.yml"; then
-  pass "drift is reported and the original file is restored"
+  && grep -q "^lock: original$" "$TEST_REPO/.github/workflows/example.lock.yml" \
+  && grep -q "^commands: original$" "$TEST_REPO/.github/workflows/agentic_commands.yml"; then
+  pass "drift is reported and all generated files are restored"
 else
-  fail "drift output or restoration was incorrect" "$(cat "$TEST2_OUTPUT"; echo; cat "$TEST_REPO/.github/workflows/example.lock.yml")"
+  fail "drift output or restoration was incorrect" "$(cat "$TEST2_OUTPUT"; echo; cat "$TEST_REPO/.github/workflows/example.lock.yml"; cat "$TEST_REPO/.github/workflows/agentic_commands.yml")"
 fi
 
 # Test 3: missing binary gets a targeted error.
@@ -104,6 +114,21 @@ elif grep -q "binary not found" "$TEST3_OUTPUT"; then
   pass "missing binary reports a targeted error"
 else
   fail "missing binary error message was incorrect" "$(cat "$TEST3_OUTPUT")"
+fi
+
+# Test 4: compile failures include the workflow markdown reminder.
+echo "Test 4: compile failures remind contributors to run make recompile..."
+TEST_REPO="$TMP_ROOT/compile-fail"
+mkdir -p "$TEST_REPO"
+create_fixture_repo "$TEST_REPO"
+create_fake_binary "$TEST_REPO/fake-gh-aw"
+if (cd "$TEST_REPO" && FAKE_COMPILE_MODE=fail bash "$DRIFT_SCRIPT" "$TEST_REPO/fake-gh-aw" >"$TEST4_OUTPUT" 2>&1); then
+  fail "compile failure should exit 1" "$(cat "$TEST4_OUTPUT")"
+elif grep -Fq ".github/workflows/*.md" "$TEST4_OUTPUT" \
+  && grep -q "make recompile" "$TEST4_OUTPUT"; then
+  pass "compile failures include the workflow markdown reminder"
+else
+  fail "compile failure reminder was incorrect" "$(cat "$TEST4_OUTPUT")"
 fi
 
 echo

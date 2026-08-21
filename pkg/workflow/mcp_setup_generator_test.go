@@ -569,13 +569,51 @@ tools:
 		"Docker command should add supplementary group before mounting the Docker socket")
 }
 
+func TestMCPGatewaySetupCopiesGitHubEventPayloadForSafeOutputs(t *testing.T) {
+	frontmatter := `---
+on: workflow_dispatch
+engine: copilot
+tools:
+  github:
+    mode: remote
+    toolsets: [repos]
+---
+
+# Test event payload forwarding
+`
+
+	compiler := NewCompiler()
+
+	tmpDir := t.TempDir()
+	inputFile := filepath.Join(tmpDir, "test.md")
+
+	err := os.WriteFile(inputFile, []byte(frontmatter), 0644)
+	require.NoError(t, err, "Failed to write test input file")
+
+	err = compiler.CompileWorkflow(inputFile)
+	require.NoError(t, err, "Compilation should succeed")
+
+	outputFile := stringutil.MarkdownToLockFile(inputFile)
+	content, err := os.ReadFile(outputFile)
+	require.NoError(t, err, "Failed to read output file")
+	yamlStr := string(content)
+
+	require.Contains(t, yamlStr, `if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -r "${GITHUB_EVENT_PATH}" ]; then`,
+		"Start MCP Gateway should conditionally copy the GitHub event payload when available")
+	require.Contains(t, yamlStr, `GH_AW_SAFEOUTPUTS_EVENT_PATH="${RUNNER_TEMP}/gh-aw/safeoutputs/github_event.json"`,
+		"Start MCP Gateway should write the copied payload under the safeoutputs mount")
+	require.Contains(t, yamlStr, `cp "${GITHUB_EVENT_PATH}" "${GH_AW_SAFEOUTPUTS_EVENT_PATH}"`,
+		"Start MCP Gateway should copy the GitHub event payload into the safeoutputs directory")
+	require.Contains(t, yamlStr, `export GITHUB_EVENT_PATH="${GH_AW_SAFEOUTPUTS_EVENT_PATH}"`,
+		"Start MCP Gateway should repoint GITHUB_EVENT_PATH to the mounted payload copy")
+}
+
 func TestMCPGatewayDockerCommandUsesBridgeInNetworkIsolationMode(t *testing.T) {
 	frontmatter := `---
 on: workflow_dispatch
 engine: copilot
 sandbox:
   agent:
-    sudo: false
 tools:
   github:
     mode: remote
@@ -617,6 +655,95 @@ tools:
 		"MCP gateway host domain should be localhost in network isolation mode so host-side clients can connect")
 }
 
+// TestMCPGatewayDockerCommandGeminiNetworkIsolationUsesTopologyHostname verifies that
+// the Gemini engine uses the topology hostname (awmg-mcpg) as MCP_GATEWAY_HOST_DOMAIN
+// under network isolation, instead of localhost. The Gemini CLI honors HTTP_PROXY but
+// ignores NO_PROXY, so routing localhost:8080 through the squid proxy would be denied.
+func TestMCPGatewayDockerCommandGeminiNetworkIsolationUsesTopologyHostname(t *testing.T) {
+	frontmatter := `---
+on: workflow_dispatch
+engine: gemini
+sandbox:
+  agent:
+tools:
+  github:
+    mode: remote
+    toolsets: [repos]
+---
+
+# Test Gemini MCP Gateway Topology Hostname
+`
+
+	compiler := NewCompiler()
+
+	tmpDir := t.TempDir()
+	inputFile := filepath.Join(tmpDir, "test.md")
+
+	err := os.WriteFile(inputFile, []byte(frontmatter), 0644)
+	require.NoError(t, err, "Failed to write test input file")
+
+	err = compiler.CompileWorkflow(inputFile)
+	require.NoError(t, err, "Compilation should succeed")
+
+	outputFile := stringutil.MarkdownToLockFile(inputFile)
+	content, err := os.ReadFile(outputFile)
+	require.NoError(t, err, "Failed to read output file")
+	yamlStr := string(content)
+
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_DOMAIN="awmg-mcpg"`,
+		"MCP gateway domain should use the topology container name in network isolation mode")
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_HOST_DOMAIN="awmg-mcpg"`,
+		"Gemini MCP_GATEWAY_HOST_DOMAIN must use awmg-mcpg under network isolation so the Gemini CLI does not tunnel localhost through the squid egress proxy")
+	require.NotContains(t, yamlStr, `export MCP_GATEWAY_HOST_DOMAIN="localhost"`,
+		"Gemini MCP_GATEWAY_HOST_DOMAIN must not be localhost under network isolation")
+}
+
+// TestMCPGatewayDockerCommandUsesDockerSbxGatewayRouting verifies that docker-sbx workflows
+// publish the gateway on 0.0.0.0 and export host.docker.internal for both container-side and
+// microVM-side clients.
+func TestMCPGatewayDockerCommandUsesDockerSbxGatewayRouting(t *testing.T) {
+	frontmatter := `---
+on: workflow_dispatch
+engine: copilot
+sandbox:
+  agent:
+    runtime: docker-sbx
+    version: v0.28.0
+tools:
+  github:
+    mode: remote
+    toolsets: [repos]
+---
+
+# Test Docker SBX MCP Routing
+`
+
+	compiler := NewCompiler()
+
+	tmpDir := t.TempDir()
+	inputFile := filepath.Join(tmpDir, "test.md")
+
+	err := os.WriteFile(inputFile, []byte(frontmatter), 0644)
+	require.NoError(t, err, "Failed to write test input file")
+
+	err = compiler.CompileWorkflow(inputFile)
+	require.NoError(t, err, "Compilation should succeed")
+
+	outputFile := stringutil.MarkdownToLockFile(inputFile)
+	content, err := os.ReadFile(outputFile)
+	require.NoError(t, err, "Failed to read output file")
+	yamlStr := string(content)
+
+	require.Contains(t, yamlStr, `docker run -i --rm --network bridge`,
+		"Docker command should use bridge networking in docker-sbx mode")
+	require.Contains(t, yamlStr, `-p 0.0.0.0:`,
+		"Docker command should publish the gateway to 0.0.0.0 for docker-sbx")
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_DOMAIN="host.docker.internal"`,
+		"MCP gateway domain should use host.docker.internal in docker-sbx mode")
+	require.Contains(t, yamlStr, `export MCP_GATEWAY_HOST_DOMAIN="host.docker.internal"`,
+		"MCP gateway host domain should use host.docker.internal in docker-sbx mode")
+}
+
 // TestMCPGatewayDockerCommandAddsHostGatewayForMCPScriptsInBridgeMode verifies that when
 // mcp-scripts are configured in network-isolation (bridge) mode, the gateway container command
 // includes --add-host host.docker.internal:host-gateway so the gateway can reach the
@@ -627,7 +754,6 @@ on: workflow_dispatch
 engine: copilot
 sandbox:
   agent:
-    sudo: false
 tools:
   github:
     mode: remote
@@ -681,7 +807,6 @@ on: workflow_dispatch
 engine: copilot
 sandbox:
   agent:
-    sudo: false
 tools:
   github:
     mode: remote
@@ -887,6 +1012,14 @@ Test that OIDC env vars are forwarded to the MCP gateway container.
 		"ACTIONS_ID_TOKEN_REQUEST_URL should be passed to gateway container via -e flag")
 	assert.Contains(t, yamlStr, "-e ACTIONS_ID_TOKEN_REQUEST_TOKEN",
 		"ACTIONS_ID_TOKEN_REQUEST_TOKEN should be passed to gateway container via -e flag")
+	assert.NotContains(t, yamlStr, "-e ACTIONS_ID_TOKEN_REQUEST_URL=",
+		"ACTIONS_ID_TOKEN_REQUEST_URL must be forwarded without embedding its value")
+	assert.NotContains(t, yamlStr, "-e ACTIONS_ID_TOKEN_REQUEST_TOKEN=",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN must be forwarded without embedding its value")
+	assert.Contains(t, yamlStr, "--exclude-env ACTIONS_ID_TOKEN_REQUEST_URL",
+		"ACTIONS_ID_TOKEN_REQUEST_URL must be excluded from the AWF agent")
+	assert.Contains(t, yamlStr, "--exclude-env ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN must be excluded from the AWF agent")
 
 	// Verify the docker command includes both -e flags before the container image
 	dockerCmdPatternURL := `docker run.*-e ACTIONS_ID_TOKEN_REQUEST_URL.*ghcr\.io/github/gh-aw-mcpg`
@@ -897,12 +1030,22 @@ Test that OIDC env vars are forwarded to the MCP gateway container.
 		"Docker command should include -e ACTIONS_ID_TOKEN_REQUEST_TOKEN before the container image")
 }
 
-// TestOIDCEnvVarsNotPassedWithoutOIDCAuth verifies that OIDC env vars are NOT added to the
-// docker command when no HTTP MCP server uses auth.type: "github-oidc".
-func TestOIDCEnvVarsNotPassedWithoutOIDCAuth(t *testing.T) {
+// TestOIDCEnvVarsNotPassedForEngineOIDCAuth verifies that engine WIF does not add OIDC env vars
+// to the gateway command, while the AWF agent excludes them.
+func TestOIDCEnvVarsNotPassedForEngineOIDCAuth(t *testing.T) {
 	frontmatter := `---
 on: workflow_dispatch
-engine: copilot
+engine:
+  id: claude
+  auth:
+    type: github-oidc
+    provider: anthropic
+    federation-rule-id: fr_01ABC
+    organization-id: org_01XYZ
+    service-account-id: sa_01DEF
+    workspace-id: ws_01GHI
+permissions:
+  id-token: write
 tools:
   github:
     mode: remote
@@ -916,9 +1059,9 @@ mcp-servers:
     allowed: ["*"]
 ---
 
-# Test No OIDC
+# Test Engine OIDC
 
-Test that OIDC env vars are NOT added when no server uses github-oidc auth.
+Test that only HTTP MCP OIDC adds OIDC env vars to the gateway.
 `
 
 	compiler := NewCompiler()
@@ -939,9 +1082,13 @@ Test that OIDC env vars are NOT added when no server uses github-oidc auth.
 
 	// Verify OIDC env vars are NOT in the docker command
 	assert.NotContains(t, yamlStr, "-e ACTIONS_ID_TOKEN_REQUEST_URL",
-		"ACTIONS_ID_TOKEN_REQUEST_URL should NOT be in docker command without github-oidc auth")
+		"ACTIONS_ID_TOKEN_REQUEST_URL should NOT be in docker command without HTTP MCP github-oidc auth")
 	assert.NotContains(t, yamlStr, "-e ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-		"ACTIONS_ID_TOKEN_REQUEST_TOKEN should NOT be in docker command without github-oidc auth")
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN should NOT be in docker command without HTTP MCP github-oidc auth")
+	assert.Contains(t, yamlStr, "--exclude-env ACTIONS_ID_TOKEN_REQUEST_URL",
+		"ACTIONS_ID_TOKEN_REQUEST_URL must always be excluded from the AWF agent")
+	assert.Contains(t, yamlStr, "--exclude-env ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+		"ACTIONS_ID_TOKEN_REQUEST_TOKEN must always be excluded from the AWF agent")
 }
 
 // TestOTLPHeadersEnvVarPassedToGatewayContainer verifies that OTEL_EXPORTER_OTLP_HEADERS is

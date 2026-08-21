@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '23 4 * * 1'
+  push:
+    branches:
+      - main
+    paths:
+      - 'actions/setup/js/Dockerfile.safe-outputs-mcp'
 
 permissions:
   contents: read
@@ -41,13 +46,20 @@ jobs:
           metadata=$(curl -fsSL "$METADATA_URL")
           echo "Metadata fetched successfully"
 
-          digest=$(printf '%s' "$metadata" | jq -r '.images[] | select(.os == "linux" and .architecture == "amd64") | .digest' | head -n 1)
+          digest=$(printf '%s' "$metadata" | jq -r '.digest')
+          amd64_digest=$(printf '%s' "$metadata" | jq -r '.images[] | select(.os == "linux" and .architecture == "amd64") | .digest' | head -n 1)
+          arm64_digest=$(printf '%s' "$metadata" | jq -r '.images[] | select(.os == "linux" and .architecture == "arm64") | .digest' | head -n 1)
           last_updated=$(printf '%s' "$metadata" | jq -r '.last_updated')
 
-          echo "Resolved linux/amd64 digest: ${digest}"
+          echo "Resolved multi-platform digest: ${digest}"
+          echo "Resolved linux/amd64 digest: ${amd64_digest}"
+          echo "Resolved linux/arm64 digest: ${arm64_digest}"
           echo "Upstream last_updated: ${last_updated}"
 
-          if [ -z "$digest" ] || [ "$digest" = "null" ] || [ -z "$last_updated" ] || [ "$last_updated" = "null" ]; then
+          if [ -z "$digest" ] || [ "$digest" = "null" ] \
+            || [ -z "$amd64_digest" ] || [ "$amd64_digest" = "null" ] \
+            || [ -z "$arm64_digest" ] || [ "$arm64_digest" = "null" ] \
+            || [ -z "$last_updated" ] || [ "$last_updated" = "null" ]; then
             echo "Failed to resolve node:lts-alpine metadata"
             exit 1
           fi
@@ -184,17 +196,21 @@ jobs:
           echo "should_push=$should_push" >> "$GITHUB_OUTPUT"
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
 
+      - name: Set up QEMU
+        if: steps.decision.outputs.should_push == 'true'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
       - name: Set up Docker Buildx
         if: steps.decision.outputs.should_push == 'true'
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Build and push gh-aw-node
         if: steps.decision.outputs.should_push == 'true'
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: actions/setup/js/Dockerfile.safe-outputs-mcp
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           pull: true
           push: true
           build-args: |

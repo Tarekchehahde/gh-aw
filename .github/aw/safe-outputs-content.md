@@ -22,6 +22,7 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
       close-older-key: "my-key"       # Optional: explicit deduplication key for close-older matching (uses gh-aw-close-key marker)
       deduplicate-by-title: true      # Optional: skip creating an issue when one with the same title exists; integer N allows fuzzy matches up to edit distance N (default: off)
       normalize-closing-keywords: true # Optional: strip backticks around recognized issue-closing keywords in body text
+      # create_issue output may set blocked_by to an issue reference or list of references
       footer: false                   # Optional: omit AI-generated footer while preserving XML markers (default: true)
       target-repo: "owner/repo"       # Optional: cross-repository
       allowed-repos: [owner/other]    # Optional: additional repos agent can target (agent uses `repo` field in output)
@@ -29,7 +30,7 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
 
   `create_issue` output validation requires:
   - `body` minimum length: **20** characters
-  - `body` maximum length: **65536** characters
+  - `body` maximum length: **65000** characters
 
   **Auto-Expiration**: The `expires` field auto-closes issues after a time period. Supports integers (days) or relative formats (2h, 7d, 2w, 1m, 1y). Generates `agentics-maintenance.yml` workflow that runs at minimum required frequency based on shortest expiration time: 1 day or less → every 2 hours, 2 days → every 6 hours, 3-4 days → every 12 hours, 5+ days → daily.
   **Deduplication for Scheduled Workflows**: When `schedule:` is combined with `create-issue`, use `skip-if-match:` in the `on:` block to prevent opening a duplicate issue every run. Pair with `expires:` to clean up stale issues:
@@ -54,6 +55,8 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
   {"type": "create_issue", "parent": "aw_abc123", "title": "Sub-task", "body": "References #aw_abc123"}
   ```
 
+  **Blocked-By Dependencies:** Set `blocked_by` in `create_issue` output to an issue number, temporary ID, `owner/repo#number` reference, GitHub issue URL, or a list of references. Temporary IDs are resolved before the issue is created, allowing dependent output to be emitted in any order. Attaching a dependency is best-effort: if the dependency API call fails the issue is still reported as created and the failure is logged as a warning.
+
   **Setting Issue Fields on Creation**: Agents can include a `fields` array in the `create_issue` output to set custom field values immediately after creation. Each item is `{"name": <field-display-name>, "value": <string-or-number>}`. Use a number for numeric fields; string for single-select, iteration title, date `YYYY-MM-DD`, or text. Restrict allowed names with `allowed-fields:`.
 
   ```json
@@ -69,11 +72,13 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
       required-labels: [automated]      # Optional: only close if ALL these labels are present
       required-title-prefix: "[bot]"    # Optional: only close matching prefix
       max: 20                           # Optional: max closures (default: 1)
-      state-reason: "not_planned"       # Optional: "completed" (default), "not_planned", "duplicate"
+      state-reason: "not_planned"       # Optional: scalar fixes the reason; list lets the agent choose a subset; omit to let the agent choose any of "completed", "not_planned", "duplicate"
       allow-body: false                 # Optional: when false, any body the agent emits is dropped (warning logged) and the issue closes without a comment; defaults to true
       target-repo: "owner/repo"         # Optional: cross-repository
       allowed-repos: [owner/other]      # Optional: additional repos agent can close issues in
   ```
+
+  `state-reason` has three config modes: **scalar** (`state-reason: not_planned`) fixes the reason; **list** (`state-reason: [not_planned, duplicate]`) restricts the agent to that subset; **omitted** lets the agent choose any of `completed`, `not_planned`, `duplicate`. In list/omitted modes a `state_reason` enum is injected into the `close_issue` tool schema and the agent's choice is validated at runtime.
 
   Set `allow-body: false` to guarantee a clean close with no comment — useful when an earlier `add-comment` step already posted the summary and you want to prevent the agent from duplicating it.
 
@@ -101,6 +106,8 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
   `category` accepts name (e.g., "General"), slug (e.g., "general"), or ID (e.g., "DIC_kwDOGFsHUM4BsUn3"); defaults to the first category. Resolution tries ID, then name, then slug.
 
   `close-older-discussions: true` closes up to 10 older discussions matching the same title prefix or labels as "OUTDATED" with a comment linking to the new one. Requires `title-prefix` or `labels`.
+
+  `create_discussion` output validation requires `body` minimum length: **64** characters.
 
 - `close-discussion:` - Close discussions with comment and resolution
 
@@ -175,7 +182,7 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
       if-no-changes: "warn"           # Optional: "warn" (default), "error", or "ignore"
       allow-empty: false              # Optional: create PR with empty branch, no changes required (default: false)
       expires: 7                      # Optional: auto-close after 7 days (supports: 2h, 7d, 2w, 1m, 1y; min: 2h)
-      auto-merge: false               # Optional: enable auto-merge when checks pass (default: false)
+      auto-merge: squash             # Optional: false (default), true, or merge method: squash|merge|rebase
       base-branch: "vnext"            # Optional: base branch for PR (defaults to workflow's branch)
       preserve-branch-name: true      # Optional: skip random salt suffix on agent-specified branch names (default: false)
       recreate-ref: false             # Optional: force-recreate existing remote branch when preserve-branch-name is true (default: false)
@@ -202,6 +209,7 @@ description: Safe-output reference for issue, discussion, comment, and pull requ
         - "main"
       max-patch-size: 2048            # Optional: per-output cap on git patch size in KB (overrides global; default: 4096 KB, max: 10240)
       max-patch-files: 50             # Optional: per-output cap on unique files in the patch (overrides global; default: 100)
+      stacked: true                   # Optional: allow PRs based on another PR branch from the same run (default: true; set false on GHES without stacked-PR support)
   ```
 
   **Dynamic Base Branch**: When `allowed-base-branches` is set, the agent can provide a `base` field in its output to override the default base branch for a single run — but only if the value matches one of the configured glob patterns. Without `allowed-base-branches`, only the static `base-branch:` is used. Accepts a literal array or a GitHub Actions expression resolving to a comma-separated list (e.g. `${{ inputs.allowed-base-branches }}`).

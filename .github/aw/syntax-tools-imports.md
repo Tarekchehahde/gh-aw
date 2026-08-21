@@ -85,7 +85,8 @@ The `tools:` field configures which tools the coding agent may use.
 - `blocked-users:` - Usernames whose content is unconditionally blocked (array or GitHub Actions expression); these users receive integrity below `none` and are always denied
 - `approval-labels:` - Label names that elevate a content item's integrity to `approved` when present (array or GitHub Actions expression); does not override `blocked-users`
 - `trusted-users:` - Usernames elevated to `approved` integrity regardless of `author_association` (array or GitHub Actions expression); takes precedence over `min-integrity` but not over `blocked-users`; requires `min-integrity` to be set
-- `toolsets:` - Enable specific GitHub toolset groups (array only)
+- `private-to-public-flows:` - Opt out of MCP Gateway cross-visibility protections (which block private-repo data from reaching public sinks). `allow` disables `forcePublicRepos` and sink-visibility enforcement for all servers (**not compatible with strict mode**); an array of MCP server IDs (e.g. `[github, my-server]`) exempts only those servers from sink-visibility enforcement (strict-mode compatible, keeps `forcePublicRepos`). Security-sensitive — only use when private→public flows are intended.
+- `toolsets:` - Enable specific GitHub toolset groups (single name string or array; a string is shorthand for a one-element array)
   - **Default toolsets** (when unspecified): `context`, `repos`, `issues`, `pull_requests` (excludes `users` as GitHub Actions tokens don't support user operations)
   - **Group aliases**: `default` (recommended action-friendly set), `action-friendly` (action-safe toolsets, excludes `users`), `all` (everything)
   - **Individual toolsets**: `context`, `repos`, `issues`, `pull_requests`, `actions`, `code_security`, `dependabot`, `discussions`, `experiments`, `gists`, `labels`, `notifications`, `orgs`, `projects`, `secret_protection`, `security_advisories`, `stargazers`, `users`, `search`
@@ -126,7 +127,7 @@ The `tools:` field configures which tools the coding agent may use.
       mode: cli          # recommended: token-efficient CLI mode
       version: "0.1.11"  # optional: @playwright/cli npm package version
   ```
-- `timeout:` - Per-operation timeout in seconds for all tool and MCP calls (integer or expression). Defaults vary by engine (Claude: 60 s, Codex: 120 s).
+- `timeout:` - Per-operation timeout in seconds for all tool and MCP calls (integer or expression, default: 60 s for all engines).
 - `startup-timeout:` - Timeout in seconds for MCP server initialization (integer or expression, default: 120).
 - `cli-proxy:` - Mount each user-facing MCP server as a standalone CLI tool on `PATH` (boolean, default: `false`). When enabled, the agent can call MCP servers via shell (e.g. `github issue_read --method get ...`).
 
@@ -169,6 +170,28 @@ mcp-servers:
 ```
 
 `auth.type: github-oidc` uses GitHub Actions OIDC tokens for secure server-to-server authentication without static credentials. The `audience` field defaults to the server URL when omitted.
+
+- `required:` - Whether a stdio or HTTP MCP server must pass its startup connectivity check (boolean, default: `true`). Set `false` for an optional server so a failed startup check only logs a warning and the workflow continues without it, instead of failing the run.
+
+## Agent Plugins (`plugins:`)
+
+:::caution[Experimental]
+Compiling a workflow that uses `plugins:` emits a warning; the interface may change.
+:::
+
+Installs [Agent Plugins](https://agent-plugins.org) through the selected engine (top-level field, distinct from Pi's `engine.extensions`):
+
+```yaml
+plugins:
+  - octo-org/agent-plugin@v1
+  - octo-org/agent-plugins/plugins/example@main
+```
+
+- Entries use `owner/repository[/path]@ref`; `ref` is required (branch, tag, or 40-char commit SHA).
+- The compiler resolves every branch/tag to a commit SHA at compile time; unresolvable refs fail compilation, so generated workflows never install from a moving ref.
+- Supported by `copilot`, `claude`, and `codex` (each installs plugins its own way — see [syntax-engine.md](syntax-engine.md)); `gemini` and `pi` reject `plugins:` at compile time. Imported engine definitions opt in via `engine.behaviors.plugins` (see [configure-agentic-engine.md](configure-agentic-engine.md)).
+- Plugin repositories must be public — the checkout step uses the workflow's default `github.token` and does not support per-entry `github-token`/`github-app`, unlike `skills:`.
+- Merge behavior across imports: see the imports merge list above.
 
 ### Engine Network Permissions
 
@@ -239,8 +262,9 @@ The following frontmatter fields in imported files are merged into the importing
 - `steps:` - Steps appended in import order
 - `pre-agent-steps:` - Steps appended in import order
 - `post-steps:` - Steps appended in import order
-- `jobs.<job-id>.setup-steps` and `jobs.<job-id>.pre-steps` - Merged per job with imported steps first, then main workflow steps. Execution order is `setup-steps` before `pre-steps`.
+- `jobs.<job-id>.setup-steps`, `jobs.<job-id>.pre-steps`, and `jobs.activation.steps` - Merged per job with imported steps first, then main workflow steps. Execution order is `setup-steps` before `pre-steps`; `jobs.activation.steps` run later in the activation job before the activation artifact is staged.
 - `runtimes:`, `network:`, `permissions:`, `services:`, `cache:`, `features:`, `mcp-servers:`
+- `plugins:` - Union by plugin path; identical refs dedupe, compatible semantic versions select the highest, incompatible majors/non-semver conflicts fail compilation
 
 Example import file:
 

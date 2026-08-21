@@ -32,38 +32,29 @@ func (v Version) IsValid() bool {
 type ModelName string
 
 // DefaultClaudeCodeVersion is the default version of the Claude Code CLI.
-const DefaultClaudeCodeVersion Version = "2.1.201"
+const DefaultClaudeCodeVersion Version = "2.1.237"
 
 // DefaultCopilotVersion is the default version of the GitHub Copilot CLI.
 //
 // When unpinning or upgrading this version, verify:
 //   - MCPs are not blocked from loading (tools.mcp configuration still works end-to-end)
 //   - /models does not silently fail on PATs (check that model listing works with PAT auth)
-const DefaultCopilotVersion Version = "1.0.68"
+const DefaultCopilotVersion Version = "1.0.80"
 
 // DefaultCopilotSDKVersion is the default version of the @github/copilot-sdk package.
-const DefaultCopilotSDKVersion Version = "1.0.5"
+const DefaultCopilotSDKVersion Version = "1.0.11"
 
 // DefaultCodexVersion is the default version of the OpenAI Codex CLI
-const DefaultCodexVersion Version = "0.142.5"
+const DefaultCodexVersion Version = "0.148.0"
 
 // DefaultGeminiVersion is the default version of the Google Gemini CLI
-const DefaultGeminiVersion Version = "0.39.1"
-
-// DefaultAntigravityVersion is the default version of the Antigravity CLI
-const DefaultAntigravityVersion Version = "1.0.2-6113393518706688"
-
-// DefaultCrushVersion is the default version of the Crush CLI
-const DefaultCrushVersion Version = "0.59.0"
+const DefaultGeminiVersion Version = "0.55.1"
 
 // DefaultPiVersion is the default version of the Pi CLI
-const DefaultPiVersion Version = "0.80.3"
-
-// DefaultOpenCodeVersion is the default version of the OpenCode CLI
-const DefaultOpenCodeVersion Version = "1.2.14"
+const DefaultPiVersion Version = "0.84.2"
 
 // DefaultGitHubMCPServerVersion is the default version of the GitHub MCP server Docker image
-const DefaultGitHubMCPServerVersion Version = "v1.5.0"
+const DefaultGitHubMCPServerVersion Version = "v1.10.0"
 
 // DefaultFirewallVersion is the default version of the gh-aw-firewall (AWF) binary
 //
@@ -73,7 +64,7 @@ const DefaultGitHubMCPServerVersion Version = "v1.5.0"
 //
 // The first recompile regenerates all lock files using the new version; the second recompile
 // refreshes the container SHA pins that were resolved during the first pass.
-const DefaultFirewallVersion Version = "v0.27.29"
+const DefaultFirewallVersion Version = "v0.28.3"
 
 // AWFExcludeEnvMinVersion is the minimum AWF version that supports the --exclude-env flag.
 // Workflows pinning an older AWF version must not emit --exclude-env flags or the run will fail.
@@ -112,10 +103,33 @@ const AWFArcDindMinVersion Version = "v0.27.20"
 
 // AWFContainerRuntimeMinVersion is the minimum AWF version that supports the
 // containerRuntime field in the container config (gh-aw-firewall#6093).
-// TODO: update this constant to the actual release version once gh-aw-firewall#6093 lands.
-// Until then, no released AWF binary accepts containerRuntime, so the compiler must not
-// emit the field for workflows pinned to any currently-available version.
-const AWFContainerRuntimeMinVersion Version = "v0.28.0"
+const AWFContainerRuntimeMinVersion Version = "v0.27.30"
+
+// AWFCloudHypervisorMinVersion is the minimum AWF version that supports the
+// cloud-hypervisor preview runtime and its release assets.
+const AWFCloudHypervisorMinVersion Version = "v0.28.1"
+
+// AWFLegacySecurityMinVersion is the minimum AWF version that supports the
+// --legacy-security flag and unconditional API proxy (gh-aw-firewall#6207).
+// Workflows pinning an older AWF version must use the old --security-mode compat behavior.
+const AWFLegacySecurityMinVersion Version = "v0.27.32"
+
+// AWFDefaultAiCreditsPricingMinVersion is the minimum AWF version where
+// apiProxy.defaultAiCreditsPricing survives config resolution and reaches the
+// api-proxy container as AWF_DEFAULT_AI_CREDITS_PRICING.
+const AWFDefaultAiCreditsPricingMinVersion Version = "v0.27.43"
+
+// AWFAPIProxyProvidersMinVersion is the minimum AWF version that supports
+// apiProxy.providers in awf-config.json.
+// Workflows pinning an older AWF version must not emit this field because older
+// AWF strict config validation rejects unknown apiProxy properties.
+// v0.27.43 adds apiProxy.providers to awf-config-schema.json.
+const AWFAPIProxyProvidersMinVersion Version = "v0.27.43"
+
+// AWFBoundedQueriesMinVersion is the minimum AWF version that supports
+// the boundedQueries section in awf-config.json.
+// Workflows pinning an older AWF version must not emit this section.
+const AWFBoundedQueriesMinVersion Version = "v0.27.44"
 
 // DefaultGVisorVersion is the pinned gVisor release used by the compiler-generated
 // install step. A specific dated release name is used instead of "latest" to ensure
@@ -123,7 +137,7 @@ const AWFContainerRuntimeMinVersion Version = "v0.28.0"
 // integrity verification before the binaries are installed with root privileges.
 // Bump this constant after reviewing the release notes at
 // https://github.com/google/gvisor/releases.
-const DefaultGVisorVersion = "20250623.0"
+const DefaultGVisorVersion = "20250707.0"
 
 // CopilotNoAskUserMinVersion is the minimum Copilot CLI version that supports the --no-ask-user
 // flag, which enables fully autonomous agentic runs by suppressing interactive prompts.
@@ -138,35 +152,35 @@ const CopilotNoAskUserMinVersion Version = "1.0.19"
 //
 // The first recompile regenerates all lock files using the new version; the second recompile
 // refreshes the container SHA pins that were resolved during the first pass.
-const DefaultMCPGatewayVersion Version = "v0.4.1"
+const DefaultMCPGatewayVersion Version = "v0.4.10"
 
 // MCPGIntegrityReactionsMinVersion is the minimum MCPG version that supports
 // endorsement-reactions and disapproval-reactions in the allow-only policy.
 const MCPGIntegrityReactionsMinVersion Version = "v0.2.18"
 
 // DefaultPlaywrightMCPVersion is the default version of the @playwright/mcp package
-const DefaultPlaywrightMCPVersion Version = "0.0.77"
+const DefaultPlaywrightMCPVersion Version = "0.0.79"
 
 // DefaultPlaywrightCLIVersion is the default version of the @playwright/cli package.
 // Used when tools.playwright.mode is "cli" to install the CLI tool instead of the MCP server.
 // Keep this version outside the default 3-day npm release-age cooldown window enforced by
 // generated Playwright CLI install steps. See TestDefaultPlaywrightCLIVersionOutsideCooldownWindow.
-const DefaultPlaywrightCLIVersion Version = "0.1.15"
+const DefaultPlaywrightCLIVersion Version = "0.1.18"
 
 // DefaultPlaywrightBrowserVersion is the default version of the Playwright browser Docker image
-const DefaultPlaywrightBrowserVersion Version = "v1.61.1"
+const DefaultPlaywrightBrowserVersion Version = "v1.62.1"
 
 // DefaultMCPSDKVersion is the default version of the @modelcontextprotocol/sdk package
-const DefaultMCPSDKVersion Version = "1.24.0"
+const DefaultMCPSDKVersion Version = "1.30.0"
 
 // DefaultGitHubScriptVersion is the default version of the actions/github-script action
 const DefaultGitHubScriptVersion Version = "v9"
 
-// DefaultThreatDetectVersion is the default version of the gh-aw-threat-detection binary.
-// This version is downloaded from GitHub Releases when `features: gh-aw-detection: true`
-// is set in the workflow frontmatter, enabling the external threat-detect binary path instead
-// of the inline engine execution path.
-const DefaultThreatDetectVersion Version = "v0.2.2"
+// DefaultThreatDetectVersion is the version of the gh-aw-threat-detection binary to install.
+// This is used by the default external threat-detection path and when
+// `features: gh-aw-detection: true` is set in the workflow frontmatter, enabling the external
+// threat-detect binary path instead of the inline engine execution path.
+const DefaultThreatDetectVersion Version = "v0.4.11"
 
 // GhSkillsMinVersion is the minimum gh CLI version required for frontmatter skill support
 // (installing gh extensions via `gh extension install`). Workflows that install frontmatter

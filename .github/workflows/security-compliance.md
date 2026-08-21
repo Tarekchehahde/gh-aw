@@ -37,6 +37,7 @@ safe-outputs:
 
 imports:
   - shared/otlp.md
+  - shared/reporting.md
 tools:
   cli-proxy: true
   github:
@@ -47,9 +48,6 @@ tools:
     file-glob: "security-compliance-*/**"
 
 
-sandbox:
-  agent:
-    sudo: false
 ---
 
 # Security Compliance Campaign

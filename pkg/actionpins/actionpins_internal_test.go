@@ -4,6 +4,7 @@ package actionpins
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,7 +14,79 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// countingResolver records how many times ResolveSHA is called, for use in tests
+// that verify whether dynamic resolution is invoked.
+type countingResolver struct {
+	called int
+}
+
+func (r *countingResolver) ResolveSHA(_ context.Context, _, _ string) (string, error) {
+	r.called++
+	return "", nil
+}
+
+type fixedResolver struct {
+	sha    string
+	called int
+}
+
+func (r *fixedResolver) ResolveSHA(_ context.Context, _, _ string) (string, error) {
+	r.called++
+	return r.sha, nil
+}
+
+func TestResolveActionPin_GHESArtifactCompatibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		repo string
+		want string
+	}{
+		{
+			repo: "actions/upload-artifact",
+			want: "actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2",
+		},
+		{
+			repo: "actions/download-artifact",
+			want: "actions/download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59 # v3.1.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.repo, func(t *testing.T) {
+			t.Parallel()
+			resolver := &countingResolver{}
+			got, err := ResolveActionPin(tt.repo, "latest", &PinContext{
+				GHES:     true,
+				Resolver: resolver,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Zero(t, resolver.called, "GHES compatibility pins should not require dynamic resolution")
+		})
+	}
+}
+
+func TestResolveActionPin_GHESMappingTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	resolver := &fixedResolver{sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	got, err := ResolveActionPin("actions/upload-artifact", "v7", &PinContext{
+		GHES:     true,
+		Resolver: resolver,
+		Mappings: map[string]string{
+			"actions/upload-artifact@v7": "enterprise/upload-artifact@v3",
+		},
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, got, "enterprise/upload-artifact@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	assert.NotContains(t, got, "c6a366c94c3e0affe28c06c8df20a878f24da3cf")
+	assert.Equal(t, 1, resolver.called, "mapped enterprise action should use normal resolution")
+}
+
 func TestBuildByRepoIndex_GroupsByRepoAndSortsDescending(t *testing.T) {
+	t.Parallel()
 	pins := []ActionPin{
 		{Repo: "actions/checkout", Version: "v4.0.0", SHA: "sha-v4"},
 		{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"},
@@ -24,15 +97,16 @@ func TestBuildByRepoIndex_GroupsByRepoAndSortsDescending(t *testing.T) {
 	byRepo := buildByRepoIndex(pins)
 
 	require.Len(t, byRepo["actions/checkout"], 2, "Expected checkout pins to be grouped")
-	assert.Equal(t, "v5.0.0", byRepo["actions/checkout"][0].Version, "Expected checkout pins sorted by newest version first")
-	assert.Equal(t, "v4.0.0", byRepo["actions/checkout"][1].Version, "Expected checkout pins sorted by newest version first")
+	require.Equal(t, "v5.0.0", byRepo["actions/checkout"][0].Version, "Expected v5.0.0 as newest checkout pin")
+	require.Equal(t, "v4.0.0", byRepo["actions/checkout"][1].Version, "Expected v4.0.0 as second checkout pin")
 
 	require.Len(t, byRepo["actions/setup-go"], 2, "Expected setup-go pins to be grouped")
-	assert.Equal(t, "v5.1.0", byRepo["actions/setup-go"][0].Version, "Expected setup-go pins sorted by newest version first")
-	assert.Equal(t, "v5.0.0", byRepo["actions/setup-go"][1].Version, "Expected setup-go pins sorted by newest version first")
+	require.Equal(t, "v5.1.0", byRepo["actions/setup-go"][0].Version, "Expected v5.1.0 as newest setup-go pin")
+	require.Equal(t, "v5.0.0", byRepo["actions/setup-go"][1].Version, "Expected v5.0.0 as second setup-go pin")
 }
 
 func TestCountPinKeyMismatches_ReturnsOnlyVersionMismatches(t *testing.T) {
+	t.Parallel()
 	t.Run("returns zero for empty entries", func(t *testing.T) {
 		assert.Zero(t, countPinKeyMismatches(map[string]ActionPin{}), "Expected empty input to produce zero mismatches")
 	})
@@ -62,34 +136,138 @@ func TestCountPinKeyMismatches_ReturnsOnlyVersionMismatches(t *testing.T) {
 	})
 }
 
-func TestInitWarnings_InitializesAndPreservesMap(t *testing.T) {
-	t.Run("initializes nil warnings map", func(t *testing.T) {
-		ctx := &PinContext{}
-
-		initWarnings(ctx)
-
-		require.NotNil(t, ctx.Warnings, "Expected warnings map to be initialized")
-		assert.Empty(t, ctx.Warnings, "Expected initialized warnings map to be empty")
+func TestCollectEntriesWithEmptySHA_ReturnsOnlyEmptySHAEntries(t *testing.T) {
+	t.Parallel()
+	t.Run("returns empty slice for empty entries", func(t *testing.T) {
+		assert.Empty(t, collectEntriesWithEmptySHA(map[string]ActionPin{}), "Expected empty input to produce empty result")
 	})
 
-	t.Run("preserves existing warnings map", func(t *testing.T) {
-		existing := map[string]struct{}{"actions/checkout@v5": {}}
-		ctx := &PinContext{Warnings: make(map[string]bool, len(existing))}
-		for warning := range existing {
-			ctx.Warnings[warning] = true
+	t.Run("returns empty slice when all entries have non-empty SHAs", func(t *testing.T) {
+		entries := map[string]ActionPin{
+			"actions/checkout@v5": {Repo: "actions/checkout", Version: "v5", SHA: "abc123"},
+			"actions/setup-go@v4": {Repo: "actions/setup-go", Version: "v4", SHA: "def456"},
 		}
+		assert.Empty(t, collectEntriesWithEmptySHA(entries), "Expected empty result when all SHAs are populated")
+	})
 
-		initWarnings(ctx)
-
-		require.NotNil(t, ctx.Warnings, "Expected warnings map to remain initialized")
-		assert.Len(t, ctx.Warnings, len(existing), "Expected existing warnings entries to be preserved")
-		for warning := range existing {
-			assert.True(t, ctx.Warnings[warning], "Expected warning %q to be preserved", warning)
+	t.Run("returns key of entry with empty SHA", func(t *testing.T) {
+		entries := map[string]ActionPin{
+			"actions/checkout@v5":      {Repo: "actions/checkout", Version: "v5", SHA: "abc123"},
+			"ruby/setup-ruby@v1.319.0": {Repo: "ruby/setup-ruby", Version: "v1.319.0", SHA: ""},
 		}
+		assert.Equal(t, []string{"ruby/setup-ruby@v1.319.0"}, collectEntriesWithEmptySHA(entries), "Expected the empty-SHA entry key to be returned")
+	})
+
+	t.Run("returns sorted keys of multiple entries with empty SHA", func(t *testing.T) {
+		entries := map[string]ActionPin{
+			"actions/checkout@v5":      {Repo: "actions/checkout", Version: "v5", SHA: "abc123"},
+			"ruby/setup-ruby@v1.319.0": {Repo: "ruby/setup-ruby", Version: "v1.319.0", SHA: ""},
+			"owner/repo@v2":            {Repo: "owner/repo", Version: "v2", SHA: ""},
+		}
+		assert.Equal(t, []string{"owner/repo@v2", "ruby/setup-ruby@v1.319.0"}, collectEntriesWithEmptySHA(entries), "Expected sorted keys of empty-SHA entries")
 	})
 }
 
+func TestLoadActionPinsData_PanicsWhenEntrySHAIsEmpty(t *testing.T) {
+	t.Parallel()
+	fixture := []byte(`{
+		"entries": {
+			"ruby/setup-ruby@v1.319.0": {
+				"repo": "ruby/setup-ruby",
+				"version": "v1.319.0",
+				"sha": ""
+			}
+		}
+	}`)
+
+	assert.PanicsWithValue(t,
+		"action_pins.json has 1 entries with empty SHA [ruby/setup-ruby@v1.319.0] — these would produce invalid workflow YAML (e.g. 'owner/repo@ # version'); remove or fix these entries before releasing",
+		func() {
+			loadActionPinsData(fixture)
+		}, "Expected loadActionPinsData to panic with specific message when embedded pin data contains an empty SHA")
+}
+
+func TestLoadActionPinsData_LoadsContainerPins(t *testing.T) {
+	t.Parallel()
+	fixture := []byte(`{
+		"entries": {
+			"actions/checkout@v5": {
+				"repo": "actions/checkout",
+				"version": "v5",
+				"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}
+		},
+		"containers": {
+			"node:lts-alpine": {
+				"image": "node:lts-alpine",
+				"digest": "sha256:deadbeef",
+				"pinned_image": "node:lts-alpine@sha256:deadbeef"
+			}
+		}
+	}`)
+
+	data := loadActionPinsData(fixture)
+
+	require.Contains(t, data.Containers, "node:lts-alpine", "Expected container pin key to be loaded")
+	assert.Equal(t, "node:lts-alpine", data.Containers["node:lts-alpine"].Image)
+	assert.Equal(t, "sha256:deadbeef", data.Containers["node:lts-alpine"].Digest)
+	assert.Equal(t, "node:lts-alpine@sha256:deadbeef", data.Containers["node:lts-alpine"].PinnedImage)
+}
+
+func TestEmbeddedContainerPins_DoNotIncludeVulnerableAstGrepImage(t *testing.T) {
+	t.Parallel()
+
+	_, ok := GetContainerPin("mcp/ast-grep:latest")
+
+	assert.False(t, ok, "mcp/ast-grep:latest should not be embedded as a pinned container image")
+}
+
+func TestEmbeddedContainerPins_DoNotIncludeVulnerableAWFAPIProxy02744(t *testing.T) {
+	t.Parallel()
+
+	_, ok := GetContainerPin("ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44")
+
+	assert.False(t, ok, "ghcr.io/github/gh-aw-firewall/api-proxy:0.27.44 should not be embedded as a pinned container image")
+}
+
+func TestEmbeddedContainerPins_DoNotIncludeVulnerableAWFCliProxy02744(t *testing.T) {
+	t.Parallel()
+
+	_, ok := GetContainerPin("ghcr.io/github/gh-aw-firewall/cli-proxy:0.27.44")
+
+	assert.False(t, ok, "ghcr.io/github/gh-aw-firewall/cli-proxy:0.27.44 should not be embedded as a pinned container image")
+}
+
+func TestFormatPinnedActionReference_PanicsWhenSHAIsEmpty(t *testing.T) {
+	t.Parallel()
+	assert.PanicsWithValue(t,
+		"FormatPinnedActionReference called with empty SHA for repo=ruby/setup-ruby version=v1.319.0 — this would produce invalid workflow YAML",
+		func() {
+			FormatPinnedActionReference("ruby/setup-ruby", "", "v1.319.0")
+		}, "Expected FormatPinnedActionReference to panic with specific message when SHA is empty")
+}
+
+func TestPinContextEmitOnce_InitializesAndDeduplicates(t *testing.T) {
+	// Not parallel: CaptureStderr swaps the global os.Stderr and is not safe
+	// to run concurrently with other tests that write to stderr.
+
+	ctx := &PinContext{}
+
+	stderrOutput := testutil.CaptureStderr(t, func() {
+		ctx.emitOnce("new", "first", func(message string) string {
+			return "formatted: " + message
+		})
+		ctx.emitOnce("new", "second", func(message string) string {
+			return "formatted: " + message
+		})
+	})
+
+	assert.Equal(t, map[string]bool{"new": true}, ctx.Warnings)
+	assert.Equal(t, "formatted: first\n", stderrOutput)
+}
+
 func TestFormatPinnedActionWithResolution_ConsistentVersionComment(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		repo            string
@@ -122,10 +300,19 @@ func TestFormatPinnedActionWithResolution_ConsistentVersionComment(t *testing.T)
 			resolvedVersion: "v4.1.2",
 			expected:        "actions/checkout@abc123 # v4.1.2 (source v4)",
 		},
+		{
+			name:            "shows resolved version without source suffix when sourceVersion is empty",
+			repo:            "actions/checkout",
+			sha:             "abc123",
+			sourceVersion:   "",
+			resolvedVersion: "v5.2.0",
+			expected:        "actions/checkout@abc123 # v5.2.0",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := formatPinnedActionWithResolution(tt.repo, tt.sha, tt.sourceVersion, tt.resolvedVersion)
 			assert.Equal(t, tt.expected, result)
 		})
@@ -133,6 +320,7 @@ func TestFormatPinnedActionWithResolution_ConsistentVersionComment(t *testing.T)
 }
 
 func TestFindCompatiblePin_SemverFallback(t *testing.T) {
+	t.Parallel()
 	pins := []ActionPin{
 		{Repo: "actions/checkout", Version: "v5.2.0", SHA: "sha-v5-2"},
 		{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5-0"},
@@ -219,8 +407,9 @@ func TestFindCompatiblePin_SemverFallback(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			pin, found := findCompatiblePin(tt.availablePins, tt.version)
-			assert.Equal(t, tt.wantFound, found)
+			require.Equal(t, tt.wantFound, found)
 			if tt.wantFound {
 				assert.Equal(t, tt.wantVersion, pin.Version)
 			} else {
@@ -231,6 +420,7 @@ func TestFindCompatiblePin_SemverFallback(t *testing.T) {
 }
 
 func TestFindVersionBySHA_ReturnsVersionForKnownSHA(t *testing.T) {
+	t.Parallel()
 	t.Run("returns version for a known SHA in embedded data", func(t *testing.T) {
 		pins := GetActionPinsByRepo("actions/checkout")
 		require.NotEmpty(t, pins, "prerequisite: embedded pins must exist for actions/checkout")
@@ -240,18 +430,52 @@ func TestFindVersionBySHA_ReturnsVersionForKnownSHA(t *testing.T) {
 		assert.Equal(t, knownPin.Version, version, "should return the version for a known SHA")
 	})
 
-	t.Run("returns empty string for unknown SHA", func(t *testing.T) {
-		version := findVersionBySHA("actions/checkout", "0000000000000000000000000000000000000000")
-		assert.Empty(t, version, "should return empty string for unknown SHA")
+	tests := []struct {
+		name string
+		repo string
+		sha  string
+		want string
+	}{
+		{
+			name: "returns empty string for unknown SHA",
+			repo: "actions/checkout",
+			sha:  "0000000000000000000000000000000000000000",
+			want: "",
+		},
+		{
+			name: "returns empty string for unknown repo",
+			repo: "does-not-exist/unknown",
+			sha:  "abc123",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version := findVersionBySHA(tt.repo, tt.sha)
+			assert.Equal(t, tt.want, version, "should return empty string when version is not found")
+		})
+	}
+}
+
+func TestGetLatestActionPinReference_ReturnsFormattedReferenceOrEmpty(t *testing.T) {
+	t.Parallel()
+	t.Run("returns formatted reference for known repo", func(t *testing.T) {
+		t.Parallel()
+		pins := GetActionPinsByRepo("actions/checkout")
+		require.NotEmpty(t, pins, "prerequisite: embedded pins must exist for actions/checkout")
+
+		result := getLatestActionPinReference("actions/checkout")
+		assert.Equal(t, FormatPinnedActionReference("actions/checkout", pins[0].SHA, pins[0].Version), result)
 	})
 
 	t.Run("returns empty string for unknown repo", func(t *testing.T) {
-		version := findVersionBySHA("does-not-exist/unknown", "abc123")
-		assert.Empty(t, version, "should return empty string for unknown repo")
+		t.Parallel()
+		assert.Empty(t, getLatestActionPinReference("does-not-exist/unknown"))
 	})
 }
 
 func TestGetContainerPin_ReturnsPinnedImage(t *testing.T) {
+	t.Parallel()
 	pin, ok := GetContainerPin("node:lts-alpine")
 	require.True(t, ok, "Expected embedded container pin for node:lts-alpine")
 	assert.Equal(t, "node:lts-alpine", pin.Image, "Expected image name to match key")
@@ -260,59 +484,71 @@ func TestGetContainerPin_ReturnsPinnedImage(t *testing.T) {
 }
 
 func TestGetContainerPin_MCPGatewayVersionsArePinned(t *testing.T) {
-	tests := []struct {
-		name   string
-		image  string
-		digest string
-	}{
-		{
-			name:   "v0.3.6",
-			image:  "ghcr.io/github/gh-aw-mcpg:v0.3.6",
-			digest: "sha256:2bb8eef86006a4c5963c55616a9c51c32f27bfdecb023b8aa6f91f6718d9171c",
-		},
-		{
-			name:   "v0.3.9",
-			image:  "ghcr.io/github/gh-aw-mcpg:v0.3.9",
-			digest: "sha256:64828b42a4482f58fab16509d7f8f495a6d97c972a98a68aff20543531ac0388",
-		},
+	t.Parallel()
+	var mcpgImages []string
+	for image := range getCachedActionPins().containers {
+		if strings.HasPrefix(image, "ghcr.io/github/gh-aw-mcpg:") {
+			mcpgImages = append(mcpgImages, image)
+		}
 	}
+	require.NotEmpty(t, mcpgImages, "Expected at least one embedded MCP Gateway container pin")
+	slices.Sort(mcpgImages)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pin, ok := GetContainerPin(tt.image)
-			require.True(t, ok, "Expected embedded container pin for %s", tt.image)
-			assert.Equal(t, tt.image, pin.Image, "Expected image name to match key")
-			assert.Equal(t, tt.digest, pin.Digest, "Expected digest to match for %s", tt.image)
-			assert.Equal(t, tt.image+"@"+tt.digest, pin.PinnedImage, "Expected pinned image to include digest for %s", tt.image)
+	for _, image := range mcpgImages {
+		image := image
+		t.Run(image, func(t *testing.T) {
+			t.Parallel()
+			pin, ok := GetContainerPin(image)
+			require.True(t, ok, "Expected embedded container pin for %s", image)
+			assert.Equal(t, image, pin.Image, "Expected image name to match key")
+			assert.NotEmpty(t, pin.Digest, "Expected digest to be populated for %s", image)
+			assert.Equal(t, image+"@"+pin.Digest, pin.PinnedImage, "Expected pinned image to include digest for %s", image)
 		})
 	}
 }
 
 func TestGetContainerPin_DefaultMCPImagesArePinned(t *testing.T) {
+	t.Parallel()
 	images := []string{
 		constants.DefaultMCPGatewayContainer + ":" + string(constants.DefaultMCPGatewayVersion),
 		"ghcr.io/github/github-mcp-server:" + string(constants.DefaultGitHubMCPServerVersion),
 	}
 
 	for _, image := range images {
-		pin, ok := GetContainerPin(image)
-		require.True(t, ok, "Expected embedded container pin for %s", image)
-		assert.Equal(t, image, pin.Image, "Expected image name to match key")
-		assert.NotEmpty(t, pin.Digest, "Expected digest to be populated for %s", image)
-		assert.Equal(t, image+"@"+pin.Digest, pin.PinnedImage, "Expected pinned image to include digest for %s", image)
+		image := image
+		t.Run(image, func(t *testing.T) {
+			t.Parallel()
+			pin, ok := GetContainerPin(image)
+			require.True(t, ok, "Expected embedded container pin for %s", image)
+			assert.Equal(t, image, pin.Image, "Expected image name to match key")
+			assert.NotEmpty(t, pin.Digest, "Expected digest to be populated for %s", image)
+			assert.Equal(t, image+"@"+pin.Digest, pin.PinnedImage, "Expected pinned image to include digest for %s", image)
+		})
 	}
 }
 
-type countingResolver struct {
-	called int
+func TestGetActionPins_CacheCorrectnessOnRepeatedCalls(t *testing.T) {
+	t.Parallel()
+	first := getActionPins()
+	second := getActionPins()
+
+	require.NotEmpty(t, first, "Expected at least one action pin in embedded data")
+	assert.Equal(t, first, second, "Expected repeated calls to getActionPins() to return equal data (cache correctness)")
 }
 
-func (r *countingResolver) ResolveSHA(_ context.Context, _, _ string) (string, error) {
-	r.called++
-	return "", nil
+func TestGetCachedActionPins_InitializesCache(t *testing.T) {
+	t.Parallel()
+	cache := getCachedActionPins()
+
+	require.NotNil(t, cache, "Expected cache accessor to return initialized data")
+	assert.NotEmpty(t, cache.pins, "Expected cached action pins")
+	assert.NotNil(t, cache.byRepo, "Expected cached action pins by repository")
+	assert.NotNil(t, cache.containers, "Expected cached container pins")
+	assert.Same(t, cache, getCachedActionPins(), "Expected repeated cache access to return the same cache")
 }
 
 func TestResolveActionPinDynamically_SkipsForSHAInput(t *testing.T) {
+	t.Parallel()
 	resolver := &countingResolver{}
 	ctx := &PinContext{Resolver: resolver}
 
@@ -328,53 +564,148 @@ func TestResolveActionPinDynamically_SkipsForSHAInput(t *testing.T) {
 	assert.Zero(t, resolver.called, "Expected resolver not to be called for SHA input")
 }
 
+func TestLogDynamicResolutionSkipped_NoResolverBranch(t *testing.T) {
+	t.Parallel()
+	assert.NotPanics(t, func() {
+		logDynamicResolutionSkipped(false, false)
+	}, "Expected no-resolver branch to be safe")
+}
+
+func TestRecordPinResolutionFailure_NilSafety(t *testing.T) {
+	t.Parallel()
+	t.Run("nil context is safe", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			recordPinResolutionFailure(nil, "actions/checkout", "v4", ResolutionErrorTypePinNotFound)
+		})
+	})
+
+	t.Run("nil callback is safe", func(t *testing.T) {
+		ctx := &PinContext{}
+		assert.NotPanics(t, func() {
+			recordPinResolutionFailure(ctx, "actions/checkout", "v4", ResolutionErrorTypePinNotFound)
+		})
+	})
+
+	t.Run("records failure when callback is configured", func(t *testing.T) {
+		var got []ResolutionFailure
+		ctx := &PinContext{
+			RecordResolutionFailure: func(f ResolutionFailure) {
+				got = append(got, f)
+			},
+		}
+
+		recordPinResolutionFailure(ctx, "actions/checkout", "v4", ResolutionErrorTypeDynamicResolutionFailed)
+
+		require.Len(t, got, 1, "Expected one resolution failure record")
+		assert.Equal(t, ResolutionFailure{
+			Repo:      "actions/checkout",
+			Ref:       "v4",
+			ErrorType: ResolutionErrorTypeDynamicResolutionFailed,
+		}, got[0])
+	})
+}
+
 func TestResolveActionPinFromHardcodedPins_StrictModeNoFallback(t *testing.T) {
-	ctx := &PinContext{StrictMode: true, Warnings: make(map[string]bool)}
+	t.Parallel()
+	t.Run("strict mode does not fall back when no exact match", func(t *testing.T) {
+		t.Parallel()
+		ctx := &PinContext{StrictMode: true, Warnings: make(map[string]bool)}
 
-	result, ok := resolveActionPinFromHardcodedPins("actions/checkout", "v999", false, ctx)
+		result, ok := resolveActionPinFromHardcodedPins("actions/checkout", "v999", false, ctx)
 
-	assert.False(t, ok, "Expected strict mode not to fall back to any other hardcoded version")
-	assert.Empty(t, result, "Expected no pinned result in strict mode without exact match")
+		assert.False(t, ok, "Expected strict mode not to fall back to any other hardcoded version")
+		assert.Empty(t, result, "Expected no pinned result in strict mode without exact match")
+	})
+
+	t.Run("strict mode resolves exact version match", func(t *testing.T) {
+		t.Parallel()
+		latestPin, ok := GetLatestActionPinByRepo("actions/checkout")
+		require.True(t, ok, "prerequisite: embedded pin must exist for actions/checkout")
+
+		ctx := &PinContext{StrictMode: true, Warnings: make(map[string]bool)}
+
+		result, resolved := resolveActionPinFromHardcodedPins("actions/checkout", latestPin.Version, false, ctx)
+
+		require.True(t, resolved, "Expected exact version match to resolve in strict mode")
+		assert.Contains(t, result, latestPin.SHA, "Expected result to include matched SHA")
+		assert.Contains(t, result, latestPin.Version, "Expected result to include matched version")
+	})
 }
 
-func TestResolveExactHardcodedPin_BySHA(t *testing.T) {
-	pins := []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}}
+// --- resolveExactHardcodedPin ---
 
-	result, ok := resolveExactHardcodedPin("actions/checkout", "sha-v5", true, pins)
+func TestResolveExactHardcodedPin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		pins         []ActionPin
+		repo         string
+		version      string
+		isSHA        bool
+		wantOK       bool
+		wantContains []string
+	}{
+		{
+			name:         "SHA input matches by SHA field",
+			pins:         []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}},
+			repo:         "actions/checkout",
+			version:      "sha-v5",
+			isSHA:        true,
+			wantOK:       true,
+			wantContains: []string{"sha-v5"},
+		},
+		{
+			name:         "version input matches by Version field",
+			pins:         []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}},
+			repo:         "actions/checkout",
+			version:      "v5.0.0",
+			isSHA:        false,
+			wantOK:       true,
+			wantContains: []string{"sha-v5", "v5.0.0"},
+		},
+		{
+			name:    "no match returns false",
+			pins:    []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}},
+			repo:    "actions/checkout",
+			version: "v4.0.0",
+			isSHA:   false,
+			wantOK:  false,
+		},
+		{
+			// Verify that the version-match loop runs before the SHA-match loop:
+			// both pin[0] (Version=="sha-token") and pin[1] (SHA=="sha-token") would
+			// satisfy a match, but their outputs differ. With isSHA=true the SHA loop
+			// is eligible, yet the version loop must win and return pin[0]'s SHA.
+			name: "version-match path takes precedence over SHA path when isAlreadySHA=true",
+			pins: []ActionPin{
+				{Repo: "actions/checkout", Version: "sha-token", SHA: "real-sha-version-match"},
+				{Repo: "actions/checkout", Version: "v4.0.0", SHA: "sha-token"},
+			},
+			repo:         "actions/checkout",
+			version:      "sha-token",
+			isSHA:        true,
+			wantOK:       true,
+			wantContains: []string{"real-sha-version-match"},
+		},
+	}
 
-	require.True(t, ok, "Expected exact SHA match to resolve")
-	assert.Contains(t, result, "sha-v5", "Expected result to include matched SHA")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result, ok := resolveExactHardcodedPin(tt.repo, tt.version, tt.isSHA, tt.pins)
+			assert.Equal(t, tt.wantOK, ok, "ok should match expected")
+			if tt.wantOK {
+				for _, want := range tt.wantContains {
+					assert.Contains(t, result, want, "result should contain %q", want)
+				}
+			} else {
+				assert.Empty(t, result, "Expected empty result when no exact match is found")
+			}
+		})
+	}
 }
 
-func TestResolveExactHardcodedPin_ByVersion(t *testing.T) {
-	pins := []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}}
-
-	result, ok := resolveExactHardcodedPin("actions/checkout", "v5.0.0", false, pins)
-
-	require.True(t, ok, "Expected exact version match to resolve")
-	assert.Contains(t, result, "sha-v5", "Expected result to include matched SHA")
-	assert.Contains(t, result, "v5.0.0", "Expected result to include matched version")
-}
-
-func TestResolveExactHardcodedPin_NoMatch(t *testing.T) {
-	pins := []ActionPin{{Repo: "actions/checkout", Version: "v5.0.0", SHA: "sha-v5"}}
-
-	result, ok := resolveExactHardcodedPin("actions/checkout", "v4.0.0", false, pins)
-
-	assert.False(t, ok, "Expected no resolution when version does not match and input is not SHA")
-	assert.Empty(t, result, "Expected empty result when no exact match is found")
-}
-
-func TestResolveExactHardcodedPin_VersionTakesPrecedenceOverSHA(t *testing.T) {
-	// When isAlreadySHA=false, only the version-match path runs; the SHA-match loop is
-	// skipped entirely. This test uses a pin whose Version and SHA fields are identical
-	// to make the path selection explicit: the version loop matches and returns before
-	// the SHA loop would ever execute.
-	pins := []ActionPin{{Repo: "actions/checkout", Version: "sha-v5", SHA: "sha-v5"}}
-	result, ok := resolveExactHardcodedPin("actions/checkout", "sha-v5", false, pins)
-	require.True(t, ok, "Expected version-match path to resolve when isAlreadySHA=false")
-	assert.Contains(t, result, "sha-v5", "Expected result to include the matched pin's SHA/version")
-}
+// --- resolveNonStrictHardcodedPin ---
 
 func TestResolveNonStrictHardcodedPin_SelectsHighestCompatible(t *testing.T) {
 	pins := []ActionPin{
@@ -407,7 +738,7 @@ func TestResolveNonStrictHardcodedPin_SelectsHighestCompatible(t *testing.T) {
 
 		assert.Equal(t, 1, strings.Count(stderrOutput, "using hardcoded pin for actions/checkout@v5.2.0"),
 			"Expected warning emitted exactly once for repeated compatible resolution")
-		assert.Len(t, ctx.Warnings, 1)
+		require.Len(t, ctx.Warnings, 1, "Expected exactly one warning key after deduplication")
 	})
 }
 
@@ -435,99 +766,312 @@ func TestResolveNonStrictHardcodedPin_FallsBackToHighestWhenNoCompatible(t *test
 }
 
 func TestResolveActionPinFromHardcodedPins_SkipHardcodedFallback(t *testing.T) {
-	t.Run("returns false immediately when SkipHardcodedFallback is set", func(t *testing.T) {
+	t.Parallel()
+	t.Run("returns false immediately when SkipHardcodedFallback is set and version is a tag", func(t *testing.T) {
+		t.Parallel()
 		ctx := &PinContext{SkipHardcodedFallback: true, Warnings: make(map[string]bool)}
 
-		// actions/checkout has hardcoded pins, but SkipHardcodedFallback should prevent use
+		// actions/checkout has hardcoded pins, but SkipHardcodedFallback should prevent version→SHA lookup
 		result, ok := resolveActionPinFromHardcodedPins("actions/checkout", "v4", false, ctx)
 
-		assert.False(t, ok, "Expected SkipHardcodedFallback to prevent hardcoded pin lookup")
-		assert.Empty(t, result, "Expected no pinned result when SkipHardcodedFallback is set")
+		assert.False(t, ok, "Expected SkipHardcodedFallback to prevent version→SHA hardcoded pin lookup")
+		assert.Empty(t, result, "Expected no pinned result when SkipHardcodedFallback is set for version tag")
+	})
+
+	t.Run("allows SHA→version lookup even when SkipHardcodedFallback is set", func(t *testing.T) {
+		t.Parallel()
+		// This is the regression test for the non-deterministic pinning bug.
+		// When a workflow already pins an action with a SHA (e.g. @9c091bb... # v7.0.0)
+		// and SkipHardcodedFallback is true (e.g. because GH_HOST is a non-github.com host),
+		// the SHA→version lookup must still succeed to preserve the human-readable version comment.
+		// Without the fix, the fallback would emit FormatPinnedActionReference(repo, sha, sha),
+		// producing "# 9c091bb..." instead of "# v7.0.0".
+		latestPin, ok := GetLatestActionPinByRepo("actions/checkout")
+		require.True(t, ok, "expected embedded pin for actions/checkout")
+
+		ctx := &PinContext{SkipHardcodedFallback: true, Warnings: make(map[string]bool)}
+
+		result, found := resolveActionPinFromHardcodedPins("actions/checkout", latestPin.SHA, true, ctx)
+
+		require.True(t, found, "Expected SHA→version lookup to succeed even with SkipHardcodedFallback=true")
+		assert.Equal(t, FormatPinnedActionReference("actions/checkout", latestPin.SHA, latestPin.Version), result,
+			"Expected version comment to use tag, not SHA")
 	})
 
 	t.Run("allows hardcoded pins when SkipHardcodedFallback is not set", func(t *testing.T) {
+		t.Parallel()
 		ctx := &PinContext{SkipHardcodedFallback: false, Warnings: make(map[string]bool)}
 
 		// actions/checkout has hardcoded pins and should resolve
 		result, ok := resolveActionPinFromHardcodedPins("actions/checkout", "v4", false, ctx)
 
-		assert.True(t, ok, "Expected hardcoded pins to be consulted when SkipHardcodedFallback is false")
-		assert.NotEmpty(t, result, "Expected a pinned result when SkipHardcodedFallback is not set")
+		require.True(t, ok, "Expected hardcoded pins to be consulted when SkipHardcodedFallback is false")
+		require.NotEmpty(t, result, "Expected a pinned result when SkipHardcodedFallback is not set")
 	})
 }
 
-func TestApplyActionPinMapping_NoMapping(t *testing.T) {
-	ctx := &PinContext{Warnings: make(map[string]bool)}
-
-	repo, version := applyActionPinMapping("actions/checkout", "v4", ctx)
-
-	assert.Equal(t, "actions/checkout", repo, "repo should be unchanged when no mapping exists")
-	assert.Equal(t, "v4", version, "version should be unchanged when no mapping exists")
-}
-
-func TestApplyActionPinMapping_AppliesMapping(t *testing.T) {
-	ctx := &PinContext{
-		Warnings: make(map[string]bool),
-		Mappings: map[string]string{
-			"actions/checkout@v4": "acme-corp/checkout@v4",
+func TestApplyActionPinMapping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                    string
+		actionRepo              string
+		version                 string
+		mappings                map[string]string
+		repeat                  int
+		wantRepo                string
+		wantVersion             string
+		wantMappingNotification bool
+		wantMapNotificationKeys int
+	}{
+		{
+			name:                    "no mapping",
+			actionRepo:              "actions/checkout",
+			version:                 "v4",
+			wantRepo:                "actions/checkout",
+			wantVersion:             "v4",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:       "applies exact mapping",
+			actionRepo: "actions/checkout",
+			version:    "v4",
+			mappings: map[string]string{
+				"actions/checkout@v4": "acme-corp/checkout@v4",
+			},
+			wantRepo:                "acme-corp/checkout",
+			wantVersion:             "v4",
+			wantMappingNotification: true,
+			wantMapNotificationKeys: 1,
+		},
+		{
+			name:       "does not match different version",
+			actionRepo: "actions/checkout",
+			version:    "v5",
+			mappings: map[string]string{
+				"actions/checkout@v4": "acme-corp/checkout@v4",
+			},
+			wantRepo:                "actions/checkout",
+			wantVersion:             "v5",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:       "deduplicates notification for repeated mapping",
+			actionRepo: "actions/checkout",
+			version:    "v4",
+			mappings: map[string]string{
+				"actions/checkout@v4": "acme-corp/checkout@v4",
+			},
+			repeat:                  2,
+			wantRepo:                "acme-corp/checkout",
+			wantVersion:             "v4",
+			wantMappingNotification: true,
+			wantMapNotificationKeys: 1,
+		},
+		{
+			name:       "skips invalid mapping value",
+			actionRepo: "actions/checkout",
+			version:    "v4",
+			mappings: map[string]string{
+				"actions/checkout@v4": "no-at-sign",
+			},
+			wantRepo:                "actions/checkout",
+			wantVersion:             "v4",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:       "skips mapping target without ref separator",
+			actionRepo: "actions/checkout",
+			version:    "v4",
+			mappings: map[string]string{
+				"actions/checkout@v4": "acme-corp/checkout",
+			},
+			wantRepo:                "actions/checkout",
+			wantVersion:             "v4",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
 		},
 	}
 
-	repo, version := applyActionPinMapping("actions/checkout", "v4", ctx)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := &PinContext{
+				Warnings: make(map[string]bool),
+				Mappings: tt.mappings,
+			}
+			repeat := max(tt.repeat, 1)
 
-	assert.Equal(t, "acme-corp/checkout", repo, "repo should be replaced by mapping")
-	assert.Equal(t, "v4", version, "version should be replaced by mapping")
+			var gotRepo, gotVersion string
+			for range repeat {
+				gotRepo, gotVersion = applyActionPinMapping(tt.actionRepo, tt.version, ctx)
+			}
+
+			assert.Equal(t, tt.wantRepo, gotRepo, "repo should match expected mapping outcome")
+			assert.Equal(t, tt.wantVersion, gotVersion, "version should match expected mapping outcome")
+
+			notifyKey := "map:" + FormatCacheKey(tt.actionRepo, tt.version)
+			assert.Equal(t, tt.wantMappingNotification, ctx.Warnings[notifyKey], "mapping notification flag should match expected state")
+
+			mapNotifications := 0
+			for k := range ctx.Warnings {
+				if strings.HasPrefix(k, "map:") {
+					mapNotifications++
+				}
+			}
+			assert.Equal(t, tt.wantMapNotificationKeys, mapNotifications, "unexpected number of mapping notification keys")
+		})
+	}
 }
 
-func TestApplyActionPinMapping_OnlyMatchesExact(t *testing.T) {
-	ctx := &PinContext{
-		Warnings: make(map[string]bool),
-		Mappings: map[string]string{
-			"actions/checkout@v4": "acme-corp/checkout@v4",
+// TestApplyContainerPinMapping verifies the redirect, miss, invalid-value, and
+// deduplication behaviour of ApplyContainerPinMapping.
+func TestApplyContainerPinMapping(t *testing.T) {
+	t.Parallel()
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name                    string
+		image                   string
+		mappings                map[string]string
+		repeat                  int    // call count for deduplication tests (0 → 1)
+		nilCtx                  bool   // when true, pass a nil *PinContext to trigger nil-safety path
+		wantImage               string // expected return value
+		wantMappingNotification bool   // should Warnings contain the notify key?
+		wantMapNotificationKeys int    // total number of "container-map:" keys in Warnings
+	}{
+		{
+			name:                    "miss - no mapping for image",
+			image:                   "ghcr.io/owner/image:latest",
+			mappings:                map[string]string{"other.registry.io/image:latest": "registry.acme.com/image:latest@sha256:" + digest},
+			wantImage:               "ghcr.io/owner/image:latest",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "hit - mapping applied",
+			image:                   "ghcr.io/github/gh-aw-firewall:0.27.22",
+			mappings:                map[string]string{"ghcr.io/github/gh-aw-firewall:0.27.22": "registry.acme.com/gh-aw-firewall:0.27.22@sha256:" + digest},
+			wantImage:               "registry.acme.com/gh-aw-firewall:0.27.22@sha256:" + digest,
+			wantMappingNotification: true,
+			wantMapNotificationKeys: 1,
+		},
+		{
+			name:                    "digest-pinned replacement value",
+			image:                   "node:lts-alpine",
+			mappings:                map[string]string{"node:lts-alpine": "registry.acme.com/node:lts-alpine@sha256:" + digest},
+			wantImage:               "registry.acme.com/node:lts-alpine@sha256:" + digest,
+			wantMappingNotification: true,
+			wantMapNotificationKeys: 1,
+		},
+		{
+			name:                    "empty value - mapping skipped",
+			image:                   "ghcr.io/owner/image:v1",
+			mappings:                map[string]string{"ghcr.io/owner/image:v1": ""},
+			wantImage:               "ghcr.io/owner/image:v1",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "tag-only value - mapping skipped",
+			image:                   "ghcr.io/owner/image:v1",
+			mappings:                map[string]string{"ghcr.io/owner/image:v1": "registry.acme.com/image:v1"},
+			wantImage:               "ghcr.io/owner/image:v1",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "short digest - mapping skipped",
+			image:                   "ghcr.io/owner/image:v1",
+			mappings:                map[string]string{"ghcr.io/owner/image:v1": "registry.acme.com/image:v1@sha256:abc123"},
+			wantImage:               "ghcr.io/owner/image:v1",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "nil mappings - image returned unchanged",
+			image:                   "ghcr.io/owner/image:v1",
+			mappings:                nil,
+			wantImage:               "ghcr.io/owner/image:v1",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "nil context - image returned unchanged",
+			image:                   "ghcr.io/owner/image:v1",
+			mappings:                nil,
+			nilCtx:                  true,
+			wantImage:               "ghcr.io/owner/image:v1",
+			wantMappingNotification: false,
+			wantMapNotificationKeys: 0,
+		},
+		{
+			name:                    "deduplication - notification emitted only once",
+			image:                   "ghcr.io/github/gh-aw-firewall:0.27.22",
+			mappings:                map[string]string{"ghcr.io/github/gh-aw-firewall:0.27.22": "registry.acme.com/gh-aw-firewall:0.27.22@sha256:" + digest},
+			repeat:                  3,
+			wantImage:               "registry.acme.com/gh-aw-firewall:0.27.22@sha256:" + digest,
+			wantMappingNotification: true,
+			wantMapNotificationKeys: 1,
 		},
 	}
 
-	// Different version — should not match.
-	repo, version := applyActionPinMapping("actions/checkout", "v5", ctx)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var ctx *PinContext
+			if tt.nilCtx {
+				ctx = nil
+			} else {
+				ctx = &PinContext{
+					Warnings:          make(map[string]bool),
+					ContainerMappings: tt.mappings,
+				}
+			}
 
-	assert.Equal(t, "actions/checkout", repo, "repo should be unchanged when version does not match")
-	assert.Equal(t, "v5", version, "version should be unchanged when version does not match")
+			repeat := max(tt.repeat, 1)
+			var got string
+			for range repeat {
+				got = ApplyContainerPinMapping(tt.image, ctx)
+			}
+
+			assert.Equal(t, tt.wantImage, got, "mapped image should match expected")
+
+			if ctx != nil {
+				notifyKey := "container-map:" + tt.image
+				assert.Equal(t, tt.wantMappingNotification, ctx.Warnings[notifyKey],
+					"mapping notification flag in Warnings should match")
+
+				mapNotifications := 0
+				for k := range ctx.Warnings {
+					if strings.HasPrefix(k, "container-map:") {
+						mapNotifications++
+					}
+				}
+
+				assert.Equal(t, tt.wantMapNotificationKeys, mapNotifications,
+					"number of container-map: warning keys should match")
+			}
+		})
+	}
 }
 
-func TestApplyActionPinMapping_DeduplicatesInfoMessage(t *testing.T) {
+func TestApplyContainerPinMapping_DeduplicatesInvalidWarnings(t *testing.T) {
+	// Not parallel: CaptureStderr swaps the global os.Stderr and is not safe
+	// to run concurrently with other tests that write to stderr.
+
 	ctx := &PinContext{
-		Warnings: make(map[string]bool),
-		Mappings: map[string]string{
-			"actions/checkout@v4": "acme-corp/checkout@v4",
+		ContainerMappings: map[string]string{
+			"ghcr.io/owner/image:latest": "registry.acme.com/image:latest",
 		},
 	}
 
-	applyActionPinMapping("actions/checkout", "v4", ctx)
-	applyActionPinMapping("actions/checkout", "v4", ctx)
+	stderrOutput := testutil.CaptureStderr(t, func() {
+		ApplyContainerPinMapping("ghcr.io/owner/image:latest", ctx)
+		ApplyContainerPinMapping("ghcr.io/owner/image:latest", ctx)
+	})
 
-	notifyKey := "map:actions/checkout@v4"
-	assert.True(t, ctx.Warnings[notifyKey], "Expected notification key to be marked as seen")
-	// Count should be exactly one entry (deduplication).
-	mapNotifications := 0
-	for k := range ctx.Warnings {
-		if strings.HasPrefix(k, "map:") {
-			mapNotifications++
-		}
-	}
-	assert.Equal(t, 1, mapNotifications, "Expected exactly one deduplicated mapping notification")
-}
-
-func TestApplyActionPinMapping_InvalidMappingValueSkipped(t *testing.T) {
-	ctx := &PinContext{
-		Warnings: make(map[string]bool),
-		Mappings: map[string]string{
-			"actions/checkout@v4": "no-at-sign", // invalid: missing at sign and version
-		},
-	}
-
-	repo, version := applyActionPinMapping("actions/checkout", "v4", ctx)
-
-	// Invalid value should be silently skipped.
-	assert.Equal(t, "actions/checkout", repo, "repo should be unchanged for invalid mapping value")
-	assert.Equal(t, "v4", version, "version should be unchanged for invalid mapping value")
+	assert.Equal(t, 1, strings.Count(stderrOutput, "invalid replacement value"))
+	assert.True(t, ctx.Warnings["container-invalid:ghcr.io/owner/image:latest"])
 }

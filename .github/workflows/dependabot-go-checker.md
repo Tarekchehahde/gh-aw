@@ -18,14 +18,14 @@ permissions:
   security-events: read
   vulnerability-alerts: read
 
-sandbox:
-  agent:
-    sudo: false
 
 network:
   allowed:
     - defaults
     - go
+    # Required for the Playwright MCP npm version check (registry.npmjs.org).
+    # Engine defaults no longer grant package registry access implicitly.
+    - node
 
 safe-outputs:
   close-issue:
@@ -69,7 +69,18 @@ experiments:
     start_date: "2026-05-27"
     analysis_type: mann_whitney
     tags: [prompt-engineering, cost-optimization, dependabot]
+evals:
+  - id: deps_analyzed
+    question: Did the agent analyze open Dependabot PRs or available dependency updates for the Go modules?
+  - id: issue_created_or_noop
+    question: Was an issue created for dependency updates, or was noop used when no actionable updates were found?
+features:
+  gh-aw-detection: true
+sandbox:
+  agent:
+    runtime: cloud-hypervisor
 ---
+
 # Dependabot Dependency Checker
 
 ## Objective

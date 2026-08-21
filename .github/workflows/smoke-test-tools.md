@@ -52,8 +52,13 @@ timeout-minutes: 5
 imports:
   - shared/otlp.md
   - shared/token-telemetry-check.md
+  - shared/reporting.md
 features:
   gh-aw-detection: false
+sandbox:
+  agent:
+    id: awf
+    runtime: cloud-hypervisor
 ---
 
 # Smoke Test: Agent Container Tools

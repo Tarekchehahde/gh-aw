@@ -11,7 +11,7 @@ type AssignToAgentConfig struct {
 	BaseSafeOutputConfig      `yaml:",inline"`
 	SafeOutputTargetConfig    `yaml:",inline"`
 	DefaultAgent              string   `yaml:"name,omitempty"`                       // Default agent to assign (e.g., "copilot")
-	DefaultModel              string   `yaml:"model,omitempty"`                      // Default AI model to use (e.g., "claude-opus-4.6")
+	DefaultModel              string   `yaml:"model,omitempty"`                      // Default AI model to use (e.g., "claude-sonnet-5")
 	DefaultCustomAgent        string   `yaml:"custom-agent,omitempty"`               // Default custom agent ID for custom agents
 	DefaultCustomInstructions string   `yaml:"custom-instructions,omitempty"`        // Default custom instructions for the agent
 	Allowed                   []string `yaml:"allowed,omitempty"`                    // Optional list of allowed agent names. If omitted, any agents are allowed.
@@ -37,22 +37,21 @@ func (c *Compiler) parseAssignToAgentConfig(outputMap map[string]any) *AssignToA
 		return nil
 	}
 
-	config := parseConfigScaffold(outputMap, "assign-to-agent", assignToAgentLog, func(err error) *AssignToAgentConfig {
-		assignToAgentLog.Printf("Failed to unmarshal config: %v", err)
-		// Handle null case: create empty config
-		return &AssignToAgentConfig{}
-	})
-	if config == nil {
-		return nil
-	}
+	config := parseConfigScaffoldWithPostProcess(outputMap, "assign-to-agent", assignToAgentLog,
+		func(err error) *AssignToAgentConfig {
+			assignToAgentLog.Printf("Failed to unmarshal config: %v", err)
+			// Handle null case: create empty config
+			return &AssignToAgentConfig{}
+		},
+		func(config *AssignToAgentConfig) {
+			// Set default max if not specified
+			if config.Max == nil {
+				config.Max = defaultIntStr(1)
+			}
 
-	// Set default max if not specified
-	if config.Max == nil {
-		config.Max = defaultIntStr(1)
-	}
-
-	assignToAgentLog.Printf("Parsed assign-to-agent config: default_agent=%s, default_model=%s, default_custom_agent=%s, allowed_count=%d, target=%s, max=%s, pull_request_repo=%s, base_branch=%s",
-		config.DefaultAgent, config.DefaultModel, config.DefaultCustomAgent, len(config.Allowed), config.Target, *config.Max, config.PullRequestRepoSlug, config.BaseBranch)
+			assignToAgentLog.Printf("Parsed assign-to-agent config: default_agent=%s, default_model=%s, default_custom_agent=%s, allowed_count=%d, target=%s, max=%s, pull_request_repo=%s, base_branch=%s",
+				config.DefaultAgent, config.DefaultModel, config.DefaultCustomAgent, len(config.Allowed), config.Target, *config.Max, config.PullRequestRepoSlug, config.BaseBranch)
+		})
 
 	return config
 }

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ func TestUpgradeExtensionIfOutdated_DevBuild(t *testing.T) {
 	// Verify the function exits before making any API calls.
 	// If it did make API calls we'd see a network error in test environments,
 	// but the function must return (false, "", nil) immediately.
-	upgraded, installPath, err := upgradeExtensionIfOutdated(false, false)
+	upgraded, installPath, err := upgradeExtensionIfOutdated(context.Background(), false, false)
 	require.NoError(t, err, "Should not return error for dev builds")
 	assert.False(t, upgraded, "Should not report upgrade for dev builds")
 	assert.Empty(t, installPath, "installPath should be empty for dev builds")
@@ -44,7 +45,7 @@ func TestUpgradeExtensionIfOutdated_SilentFailureOnAPIError(t *testing.T) {
 	// Use a release version so the API call is attempted
 	SetVersionInfo("v0.1.0")
 
-	upgraded, installPath, err := upgradeExtensionIfOutdated(false, false)
+	upgraded, installPath, err := upgradeExtensionIfOutdated(context.Background(), false, false)
 	require.NoError(t, err, "Should fail silently on API errors")
 	assert.False(t, upgraded, "Should not report upgrade when API is unreachable")
 	assert.Empty(t, installPath, "installPath should be empty when API is unreachable")
@@ -107,7 +108,7 @@ func TestRenamePathForUpgrade(t *testing.T) {
 
 	// The backup should exist at the returned path.
 	_, statErr = os.Stat(backupPath)
-	assert.NoError(t, statErr, "Backup file should exist")
+	require.NoError(t, statErr, "Backup file should exist")
 }
 
 func TestRenamePathForUpgrade_NonExistentFile(t *testing.T) {
@@ -365,7 +366,7 @@ func TestParseInstalledVersionOutput(t *testing.T) {
 	t.Run("returns error when no version present", func(t *testing.T) {
 		_, err := parseInstalledVersionOutput("gh-aw version unknown")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "could not parse installed gh-aw version")
+		require.ErrorContains(t, err, "could not parse installed gh-aw version")
 	})
 
 	t.Run("uses first version match when multiple exist", func(t *testing.T) {
@@ -377,7 +378,7 @@ func TestParseInstalledVersionOutput(t *testing.T) {
 	t.Run("returns error for empty output", func(t *testing.T) {
 		_, err := parseInstalledVersionOutput("")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "could not parse installed gh-aw version")
+		require.ErrorContains(t, err, "could not parse installed gh-aw version")
 	})
 }
 

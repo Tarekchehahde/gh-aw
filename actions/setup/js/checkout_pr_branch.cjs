@@ -19,6 +19,11 @@
  *    - Also run in base repository context
  *    - Uses refs/pull/N/head to fetch PR branch
  *
+ * 4. workflow_dispatch with aw_context:
+ *    - When aw_context input contains item_type=="pull_request" and item_number,
+ *      the PR number is extracted and the head is fetched via refs/pull/N/head
+ *    - Mirrors the guard in the compiled workflow's if: condition
+ *
  * NOTE: This handler operates within the PR context from the workflow event
  * and does not support cross-repository operations or target-repo parameters.
  * No allowlist validation (checkAllowedRepo/validateTargetRepo) is needed as
@@ -28,8 +33,50 @@
 const { getErrorMessage } = require("./error_helpers.cjs");
 const { renderTemplateFromFile, getPromptPath } = require("./messages_core.cjs");
 const { detectForkPR } = require("./pr_helpers.cjs");
-const { ERR_API } = require("./error_codes.cjs");
+const { ERR_API, ERR_PERMISSION } = require("./error_codes.cjs");
 const TRUSTED_CHECKOUT_PERMISSIONS = ["write", "maintain", "admin"];
+
+/**
+ * Determine whether the current repository is a shallow clone.
+ *
+ * A `--depth` fetch against an already-complete clone writes `.git/shallow` and
+ * grafts history, silently undoing an explicit `checkout: fetch-depth: 0`. That
+ * breaks later `git merge-base` calls (e.g. patch generation for
+ * create_pull_request). We therefore only pass `--depth` when the repository is
+ * already shallow; a complete clone already has the objects we need.
+ *
+ * @returns {Promise<boolean>} true when the repository is shallow
+ */
+async function isShallowRepository() {
+  try {
+    const result = await exec.getExecOutput("git", ["rev-parse", "--is-shallow-repository"], {
+      silent: true,
+      ignoreReturnCode: true,
+    });
+    if (result.exitCode !== 0) {
+      return false;
+    }
+    return result.stdout.trim() === "true";
+  } catch (e) {
+    core.warning(`Could not determine repository shallowness, assuming complete clone: ${getErrorMessage(e)}`);
+    return false;
+  }
+}
+
+/**
+ * Build the optional `--depth=N` argument for a fetch, omitting it when the
+ * repository is a complete (non-shallow) clone.
+ *
+ * @param {number} fetchDepth
+ * @returns {Promise<string[]>}
+ */
+async function depthArgs(fetchDepth) {
+  if (await isShallowRepository()) {
+    return [`--depth=${fetchDepth}`];
+  }
+  core.info("Repository is not shallow (e.g. fetch-depth: 0), fetching without --depth to preserve full history");
+  return [];
+}
 
 /**
  * Log detailed PR context information for debugging
@@ -69,6 +116,7 @@ function logPRContext(eventName, pullRequest) {
   // Only call detectForkPR when head/base data is present (pull_request and
   // pull_request_target payloads). For minimal PR objects (e.g. issue_comment)
   // fork status is unknown until we fetch full PR details from the API.
+  /** @type {any} */
   let isFork = null;
   if (pullRequest.head?.repo && pullRequest.base?.repo) {
     const { isFork: detected, reason: forkReason } = detectForkPR(pullRequest);
@@ -119,14 +167,14 @@ function logCheckoutStrategy(eventName, strategy, reason) {
 async function assertTrustedCheckoutRuntime() {
   const repository = context.payload.repository;
   if (repository?.fork === true) {
-    throw new Error("Refusing PR checkout in forked repository runtime context");
+    throw new Error(`${ERR_PERMISSION}: ` + "Refusing PR checkout in forked repository runtime context");
   }
 
   // context.actor is preferred when available; sender.login and GITHUB_ACTOR
   // are retained as event/runtime-compatible fallbacks.
   const actor = context.actor || context.payload.sender?.login || process.env.GITHUB_ACTOR;
   if (!actor) {
-    throw new Error("Refusing PR checkout: unable to determine triggering actor");
+    throw new Error(`${ERR_PERMISSION}: ` + "Refusing PR checkout: unable to determine triggering actor");
   }
 
   // Bot and app actors (e.g. Copilot, dependabot[bot]) are not regular GitHub
@@ -149,7 +197,7 @@ async function assertTrustedCheckoutRuntime() {
     const permission = permissionData?.permission || "none";
     const hasWriteOrHigher = TRUSTED_CHECKOUT_PERMISSIONS.includes(permission);
     if (!hasWriteOrHigher) {
-      throw new Error(`Refusing PR checkout: actor '${actor}' has '${permission}' permission (requires write or higher)`);
+      throw new Error(`${ERR_PERMISSION}: Refusing PR checkout: actor '${actor}' has '${permission}' permission (requires write or higher)`);
     }
 
     core.info(`Runtime safety check passed for actor '${actor}' with '${permission}' permission`);
@@ -161,7 +209,7 @@ async function assertTrustedCheckoutRuntime() {
     if (errAny.status === 404) {
       try {
         await github.rest.users.getByUsername({ username: actor });
-        throw new Error(`Refusing PR checkout: actor '${actor}' is not a collaborator (requires write or higher)`);
+        throw new Error(`${ERR_PERMISSION}: Refusing PR checkout: actor '${actor}' is not a collaborator (requires write or higher)`);
       } catch (userErr) {
         const userErrAny = /** @type {any} */ userErr;
         if (userErrAny.status === 404) {
@@ -189,6 +237,39 @@ async function main() {
       state: context.payload.issue.state || "open",
     };
     core.info(`Detected ${eventName} event on PR #${pullRequest.number}, will fetch PR ref`);
+  }
+
+  // Handle workflow_dispatch events with aw_context pointing to a PR
+  if (!pullRequest && eventName === "workflow_dispatch") {
+    const awContextStr = context.payload.inputs?.aw_context;
+    if (awContextStr) {
+      try {
+        const awContext = JSON.parse(awContextStr);
+        const prNumber = Number(awContext.item_number);
+        if (awContext.item_type === "pull_request" && Number.isInteger(prNumber) && prNumber > 0) {
+          if (awContext.repo) {
+            const currentRepo = `${context.repo.owner}/${context.repo.repo}`;
+            if (awContext.repo !== currentRepo) {
+              core.warning(`Cross-repository workflow_dispatch is not supported: aw_context.repo (${awContext.repo}) does not match current repository (${currentRepo}), skipping checkout`);
+            } else {
+              pullRequest = {
+                number: prNumber,
+                state: "open",
+              };
+              core.info(`Detected workflow_dispatch event for PR #${pullRequest.number} via aw_context, will fetch PR ref`);
+            }
+          } else {
+            pullRequest = {
+              number: prNumber,
+              state: "open",
+            };
+            core.info(`Detected workflow_dispatch event for PR #${pullRequest.number} via aw_context, will fetch PR ref`);
+          }
+        }
+      } catch (e) {
+        core.warning(`Failed to parse aw_context: ${getErrorMessage(e)}`);
+      }
+    }
   }
 
   if (!pullRequest) {
@@ -225,7 +306,9 @@ async function main() {
       logCheckoutStrategy(eventName, "git fetch + checkout", "pull_request event runs in merge commit context with PR branch available");
 
       core.info(`Fetching branch: ${branchName} from origin (depth: ${fetchDepth} for ${commitCount} PR commit(s))`);
-      await exec.exec("git", ["fetch", "origin", branchName, `--depth=${fetchDepth}`]);
+      const fetchArgs = await depthArgs(fetchDepth);
+      core.info(fetchArgs.length > 0 ? `Fetching with ${fetchArgs.join(" ")}` : "Fetching without --depth (full history preserved)");
+      await exec.exec("git", ["fetch", "origin", branchName, ...fetchArgs]);
 
       core.info(`Checking out branch: ${branchName}`);
       await exec.exec("git", ["checkout", branchName]);
@@ -265,7 +348,9 @@ async function main() {
       const fetchDepth = (commitCount || 1) + 1; // +1 to include the merge base
 
       core.info(`Fetching PR #${prNumber} head via refs/pull/${prNumber}/head (depth: ${fetchDepth} for ${commitCount} PR commit(s))`);
-      await exec.exec("git", ["fetch", "origin", `+refs/pull/${prNumber}/head:refs/remotes/origin/pr-head`, `--depth=${fetchDepth}`]);
+      const prFetchArgs = await depthArgs(fetchDepth);
+      core.info(prFetchArgs.length > 0 ? `Fetching with ${prFetchArgs.join(" ")}` : "Fetching without --depth (full history preserved)");
+      await exec.exec("git", ["fetch", "origin", `+refs/pull/${prNumber}/head:refs/remotes/origin/pr-head`, ...prFetchArgs]);
 
       const branchName = headRef || `pr-${prNumber}`;
       core.info(`Checking out branch: ${branchName}`);

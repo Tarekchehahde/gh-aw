@@ -15,6 +15,7 @@ const {
   isMissingApiKeyError,
   isServerError,
   isInvalidModelError,
+  isInvalidRequestError,
   isReconnectExhaustedError,
   countPermissionDeniedIssues,
   hasNumerousPermissionDeniedIssues,
@@ -25,8 +26,13 @@ const {
   extractOpenAIProxyBaseURLFromToml,
   getConfiguredOpenAIPortFromReflect,
   validateCodexOpenAIBaseURLFromReflect,
+  configureCodexProviderFromReflect,
   hasNoopInSafeOutputs,
   resolveRetryConfig,
+  resolvePostResultWatchdogIdleTimeoutMs,
+  DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS,
+  MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS,
+  MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS,
 } = require("./codex_harness.cjs");
 const { detectNonRetryableHarnessGuard } = require("./harness_retry_guard.cjs");
 
@@ -206,6 +212,28 @@ describe("codex_harness.cjs", () => {
       expect(extractPortFromURL("not-a-url")).toBeNull();
     });
 
+    describe("configureCodexProviderFromReflect", () => {
+      it("configures OPENAI_BASE_URL from reflected github/copilot endpoint", () => {
+        const tmpDir = makeHarnessTempDir("codex-provider-");
+        const configPath = path.join(tmpDir, "config.toml");
+        const reflectPath = path.join(tmpDir, "awf-reflect.json");
+        fs.writeFileSync(configPath, `[model_providers.openai-proxy]\nbase_url = "http://172.30.0.30:10000"\n`, "utf8");
+        fs.writeFileSync(reflectPath, JSON.stringify({ endpoints: [{ provider: "copilot", configured: true, port: 10002 }] }), "utf8");
+        try {
+          const result = configureCodexProviderFromReflect({
+            codexConfigPath: configPath,
+            reflectPath,
+            provider: "github",
+          });
+          expect(result.configured).toBe(true);
+          expect(result.env.OPENAI_BASE_URL).toBe("http://api-proxy:10002");
+          expect(fs.readFileSync(configPath, "utf8")).toContain(`base_url = "http://api-proxy:10002"`);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+    });
+
     it("extracts openai-proxy base_url from TOML", () => {
       const toml = `
 [history]
@@ -344,6 +372,25 @@ env_key = "OPENAI_API_KEY"
     });
   });
 
+  describe("isInvalidRequestError", () => {
+    it("returns true for a provider invalid_request_error payload", () => {
+      const output = String.raw`{"type":"turn.failed","error":{"message":"{\"error\":{\"message\":\"Provider returned error\",\"code\":400,\"metadata\":{\"raw\":\"{\\\"type\\\": \\\"invalid_request_error\\\",\\n    \\\"param\\\": \\\"messages[4].content\\\",\\n    \\\"code\\\": \\\"empty_array\\\"}\"}}}"}}`;
+      expect(isInvalidRequestError(output)).toBe(true);
+    });
+
+    it("returns true for an unescaped provider error field in a turn.failed event", () => {
+      expect(isInvalidRequestError('{"type":"turn.failed","error":{"type":"invalid_request_error"}}')).toBe(true);
+    });
+
+    it("returns false for unrelated errors and tool transcript content", () => {
+      expect(isInvalidRequestError("rate_limit_exceeded")).toBe(false);
+      expect(isInvalidRequestError("500 Internal Server Error")).toBe(false);
+      expect(isInvalidRequestError("GitHub API responded with 400 Bad Request")).toBe(false);
+      expect(isInvalidRequestError('{"type":"item.completed","item":{"type":"tool_call_output","output":"invalid_request_error"}}')).toBe(false);
+      expect(isInvalidRequestError("")).toBe(false);
+    });
+  });
+
   describe("permission-denied classification helpers", () => {
     it("counts repeated permission-denied signals", () => {
       const output = "permission denied\npermissions denied\nEACCES: permission denied";
@@ -447,6 +494,40 @@ env_key = "OPENAI_API_KEY"
       const isTransient = isRateLimit || isServerError(result.output);
       return attempt < MAX_RETRIES && (result.hasOutput || isTransient);
     }
+
+    it("does not retry a provider invalid_request_error failure", () => {
+      const tempDir = makeHarnessTempDir("codex-invalid-request-error-");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+fs.appendFileSync(process.env.CODEX_HARNESS_STUB_CALLS, "called\\n");
+process.stderr.write(JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "invalid_request_error" } }) } }) + "\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "fix the bug", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_MAX_RETRIES: "1",
+          GH_AW_HARNESS_INITIAL_DELAY_MS: "1",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+
+      expect(fs.readFileSync(callsPath, "utf8").trim().split("\n")).toHaveLength(1);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("isInvalidRequestError=true");
+      expect(result.stderr).toContain("invalid_request_error (HTTP 400) — not retrying");
+    });
 
     it("retries on rate limit error even without output", () => {
       const result = { exitCode: 1, hasOutput: false, output: "rate_limit_exceeded" };
@@ -648,6 +729,254 @@ process.exit(1);`,
       expect(result.status).toBe(0);
       expect(result.stderr).toContain("noop message found in safe-outputs — not retrying");
     });
+
+    it("exits 0 without retrying when the LLM invocation cap is saturated but the expected safe-output was already produced", () => {
+      const tempDir = makeHarnessTempDir("codex-invocation-cap-suppression-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      // Stub writes an expected safe-output then fails with the pooled invocation-cap error.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+const safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+fs.appendFileSync(safeOutputsPath, JSON.stringify({type:"add_comment",body:"ADR reviewed"}) + "\\n");
+process.stderr.write('{"error":{"type":"max_runs_exceeded","message":"Maximum LLM invocations exceeded (20 / 20)."}}\\n');
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "fix the bug", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: { ...process.env, CODEX_HARNESS_STUB_CALLS: callsPath, GH_AW_SAFE_OUTPUTS: safeOutputsPath, CODEX_API_KEY: "fake-key-for-test" },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Only one attempt — invocation cap exhaustion is never retried
+      expect(callCount).toBe(1);
+      // Harness exits 0 because the core work (add_comment) already succeeded
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("invocation cap saturated but safe-outputs already contain expected output");
+    });
+  });
+
+  describe("post-result watchdog suppression when terminal safe-output already produced", () => {
+    it("exits 0 without retrying when a terminal safe-output was produced and the process hangs on exit", () => {
+      const tempDir = makeHarnessTempDir("codex-watchdog-suppression-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      // Stub writes a terminal safe-output, then remains alive until SIGTERM.
+      // This exercises the watchdog-fired path end-to-end.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+const safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+fs.appendFileSync(safeOutputsPath, JSON.stringify({type:"add-labels",labels:["spam"]}) + "\\n");
+process.stdout.write("Label applied. Continuing cleanup...\\n");
+process.on("SIGTERM", () => process.exit(1));
+setInterval(() => {}, 1000);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "moderate the issue", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "100",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Only one attempt — no retries when watchdog suppression applies
+      expect(callCount).toBe(1);
+      // Harness exits 0 because the terminal safe-output was already produced
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("post-result watchdog fired after terminal safe-output was emitted");
+      expect(result.stderr).toContain("late-activity exit suppressed");
+    });
+
+    it("exits 0 without retrying when a noop safe-output was produced and the process hangs on exit", () => {
+      const tempDir = makeHarnessTempDir("codex-watchdog-noop-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      // Stub writes a noop safe-output, then remains alive until SIGTERM.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+const safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+fs.appendFileSync(safeOutputsPath, JSON.stringify({type:"noop",message:"nothing to do"}) + "\\n");
+process.stdout.write("Noop recorded. Waiting...\\n");
+process.on("SIGTERM", () => process.exit(1));
+setInterval(() => {}, 1000);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "moderate the issue", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "100",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      expect(callCount).toBe(1);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("post-result watchdog fired after terminal safe-output was emitted");
+      expect(result.stderr).toContain("late-activity exit suppressed");
+    });
+
+    it("still retries partial_execution when no terminal safe-output was produced (watchdog not armed)", () => {
+      const tempDir = makeHarnessTempDir("codex-watchdog-no-output-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      // Stub produces output but exits 1 without writing any safe-output.
+      // The watchdog cannot fire (no terminal safe-output to arm it), so this
+      // should fall through to the normal partial-execution retry path.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("partial work done\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "moderate the issue", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          // Override retry config to keep the test fast.
+          GH_AW_HARNESS_MAX_RETRIES: "1",
+          GH_AW_HARNESS_INITIAL_DELAY_MS: "1",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Should retry (2 attempts total with max_retries=1)
+      expect(callCount).toBeGreaterThan(1);
+      // Harness exits 1 because retries are exhausted with no output
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain("late-activity exit suppressed");
+    });
+
+    it("does not arm watchdog on retry from terminal output left by a previous attempt", () => {
+      // Attempt 0 writes a terminal safe-output and exits non-zero quickly (no hang).
+      // Attempt 1 should NOT have its watchdog armed by attempt 0's output, and
+      // should NOT be suppressed as a success.
+      const tempDir = makeHarnessTempDir("codex-watchdog-baseline-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      // Attempt 0: writes a terminal safe-output, produces output, then exits 1 (no hang).
+      // Attempt 1+: produces output and exits 1 without writing anything new to safe-outputs.
+      // The watchdog on attempt 1 must NOT arm from attempt 0's output.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+const safeOutputsPath = process.env.GH_AW_SAFE_OUTPUTS;
+const calls = fs.existsSync(callsPath) ? fs.readFileSync(callsPath, "utf8").trim().split("\\n").filter(Boolean).length : 0;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+if (calls === 0) {
+  // First attempt: write terminal output and exit immediately
+  fs.appendFileSync(safeOutputsPath, JSON.stringify({type:"add-labels",labels:["spam"]}) + "\\n");
+}
+// All attempts: produce output (so harness classifies as partial execution and retries)
+process.stdout.write("partial work done\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "moderate the issue", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_MAX_RETRIES: "1",
+          GH_AW_HARNESS_INITIAL_DELAY_MS: "1",
+          GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "100",
+        },
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Should retry: attempt 0's output does not suppress attempt 1
+      expect(callCount).toBeGreaterThan(1);
+      // Harness exits 1: attempt 1 produced no new terminal safe-output
+      expect(result.status).toBe(1);
+      // The watchdog-suppression path must not have fired
+      expect(result.stderr).not.toContain("late-activity exit suppressed");
+    });
+  });
+
+  describe("resolvePostResultWatchdogIdleTimeoutMs", () => {
+    it("uses a 2-minute shared default", () => {
+      expect(DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS).toBe(120000);
+    });
+
+    it("returns the default when no env var is set", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({})).toBe(DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS);
+    });
+
+    it("returns the configured value when GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS is a positive number", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "5000" })).toBe(5000);
+    });
+
+    it("clamps to MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS when configured value is too small", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "1" })).toBe(MIN_POST_RESULT_WATCHDOG_TIMEOUT_MS);
+    });
+
+    it("clamps to MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS when configured value is too large", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: String(MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS + 1) })).toBe(MAX_POST_RESULT_WATCHDOG_TIMEOUT_MS);
+    });
+
+    it("returns the default for non-numeric input", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "not-a-number" })).toBe(DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS);
+    });
+
+    it("returns the default for zero", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "0" })).toBe(DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS);
+    });
+
+    it("returns the default for negative values", () => {
+      expect(resolvePostResultWatchdogIdleTimeoutMs({ GH_AW_HARNESS_WATCHDOG_TIMEOUT_MS: "-100" })).toBe(DEFAULT_POST_RESULT_WATCHDOG_IDLE_TIMEOUT_MS);
+    });
   });
 
   describe("retry configuration", () => {
@@ -706,6 +1035,166 @@ process.exit(1);`,
       );
       expect(retryConfig.maxDelayMs).toBe(30000);
       expect(logs.some(msg => msg.includes("clamping max delay"))).toBe(true);
+    });
+  });
+
+  describe("AI credits budget enforcement exits 0", () => {
+    /**
+     * @param {string} tempDir
+     * @returns {string}
+     */
+    function writeTrustedAICreditsExceededAudit(tempDir) {
+      const auditDir = path.join(tempDir, "sandbox", "firewall", "audit");
+      fs.mkdirSync(auditDir, { recursive: true });
+      fs.writeFileSync(path.join(auditDir, "log.jsonl"), `${JSON.stringify({ max_ai_credits_exceeded: true })}\n`, "utf8");
+      return path.join(tempDir, "agent-output.json");
+    }
+
+    it("exits 0 when the agent outputs max_ai_credits_exceeded and the CLI exits non-zero", () => {
+      const tempDir = makeHarnessTempDir("codex-ai-credits-exceeded-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      // Stub emits the AI-credits-exceeded marker on stdout (as the AWF firewall would)
+      // then exits non-zero.  The harness must detect this, set lastExitCode=0, and exit 0.
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          GH_AW_AGENT_OUTPUT: agentOutputPath,
+          CODEX_API_KEY: "fake-key-for-test",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      // Only one attempt — credit limit is non-retryable
+      expect(callCount).toBe(1);
+      // Harness exits 0: budget enforcement is intentional, not a job failure
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("AI credits budget exceeded");
+      expect(result.stderr).toContain("AI credits budget enforced");
+    });
+
+    it("exits 0 when the agent outputs ai_credits_rate_limit_error and the CLI exits non-zero", () => {
+      const tempDir = makeHarnessTempDir("codex-ai-credits-rate-limit-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: ai_credits_rate_limit_error=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          GH_AW_AGENT_OUTPUT: agentOutputPath,
+          CODEX_API_KEY: "fake-key-for-test",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      const callCount = fs.readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).length;
+      expect(callCount).toBe(1);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain("AI credits budget enforced");
+    });
+
+    it("keeps non-zero exit for auth failure even when AI-credit markers and trusted audit are present", () => {
+      const tempDir = makeHarnessTempDir("codex-auth-failure-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      const agentOutputPath = writeTrustedAICreditsExceededAudit(tempDir);
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.stdout.write("Authentication failed (Request ID: 123)\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          GH_AW_AGENT_OUTPUT: agentOutputPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      // Harness exits 1: normal non-credit failures still fail the job
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain("AI credits budget enforced");
+    });
+
+    it("keeps non-zero exit when AI-credit marker appears without trusted firewall audit evidence", () => {
+      const tempDir = makeHarnessTempDir("codex-ai-credits-untrusted-");
+      const safeOutputsPath = path.join(tempDir, "safe-outputs.jsonl");
+      const stubPath = path.join(tempDir, "stub.cjs");
+      const promptPath = path.join(tempDir, "prompt.txt");
+      const callsPath = path.join(tempDir, "calls.jsonl");
+      fs.writeFileSync(
+        stubPath,
+        `const fs = require("fs");
+const callsPath = process.env.CODEX_HARNESS_STUB_CALLS;
+fs.appendFileSync(callsPath, JSON.stringify({args: process.argv.slice(2)}) + "\\n");
+process.stdout.write("error: max_ai_credits_exceeded=true\\n");
+process.exit(1);`,
+        "utf8"
+      );
+      fs.writeFileSync(promptPath, "do some work", "utf8");
+
+      const result = spawnSync(process.execPath, ["codex_harness.cjs", process.execPath, stubPath, "exec", "--prompt-file", promptPath], {
+        cwd: path.dirname(require.resolve("./codex_harness.cjs")),
+        env: {
+          ...process.env,
+          CODEX_HARNESS_STUB_CALLS: callsPath,
+          GH_AW_SAFE_OUTPUTS: safeOutputsPath,
+          CODEX_API_KEY: "fake-key-for-test",
+          GH_AW_HARNESS_MAX_RETRIES: "0",
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("without trusted firewall audit confirmation");
     });
   });
 });

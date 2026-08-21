@@ -12,6 +12,7 @@ import (
 
 // TestFirewallLogIntegration tests the complete firewall log analysis pipeline
 func TestFirewallLogIntegration(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory for the test
 	tempDir := testutil.TempDir(t, "test-*")
 	runDir := filepath.Join(tempDir, "run-12345")
@@ -139,6 +140,7 @@ func TestFirewallLogIntegration(t *testing.T) {
 
 // TestFirewallLogSummaryBuilding tests the aggregation of firewall logs across multiple runs
 func TestFirewallLogSummaryBuilding(t *testing.T) {
+	t.Parallel()
 	// Create mock processed runs with firewall analysis
 	processedRuns := []ProcessedRun{
 		{
@@ -146,13 +148,15 @@ func TestFirewallLogSummaryBuilding(t *testing.T) {
 				WorkflowName: "workflow-1",
 			},
 			FirewallAnalysis: &FirewallAnalysis{
-				DomainBuckets: DomainBuckets{
-					AllowedDomains: []string{"api.github.com:443", "api.npmjs.org:443"},
-					BlockedDomains: []string{"blocked.example.com:443"},
+				AnalysisBase: AnalysisBase{
+					DomainBuckets: DomainBuckets{
+						AllowedDomains: []string{"api.github.com:443", "api.npmjs.org:443"},
+						BlockedDomains: []string{"blocked.example.com:443"},
+					},
+					TotalRequests:   10,
+					AllowedRequests: 8,
+					BlockedRequests: 2,
 				},
-				TotalRequests:   10,
-				AllowedRequests: 8,
-				BlockedRequests: 2,
 				RequestsByDomain: map[string]DomainRequestStats{
 					"api.github.com:443":      {Allowed: 5, Blocked: 0},
 					"api.npmjs.org:443":       {Allowed: 3, Blocked: 0},
@@ -165,13 +169,15 @@ func TestFirewallLogSummaryBuilding(t *testing.T) {
 				WorkflowName: "workflow-2",
 			},
 			FirewallAnalysis: &FirewallAnalysis{
-				DomainBuckets: DomainBuckets{
-					AllowedDomains: []string{"api.github.com:443"},
-					BlockedDomains: []string{"denied.site:443"},
+				AnalysisBase: AnalysisBase{
+					DomainBuckets: DomainBuckets{
+						AllowedDomains: []string{"api.github.com:443"},
+						BlockedDomains: []string{"denied.site:443"},
+					},
+					TotalRequests:   5,
+					AllowedRequests: 3,
+					BlockedRequests: 2,
 				},
-				TotalRequests:   5,
-				AllowedRequests: 3,
-				BlockedRequests: 2,
 				RequestsByDomain: map[string]DomainRequestStats{
 					"api.github.com:443": {Allowed: 3, Blocked: 0},
 					"denied.site:443":    {Allowed: 0, Blocked: 2},
@@ -241,6 +247,7 @@ func TestFirewallLogSummaryBuilding(t *testing.T) {
 // TestAnalyzeFirewallLogsFromSandboxPath tests that firewall logs can be found
 // in sandbox/firewall/logs/ directory (the path after artifact download)
 func TestAnalyzeFirewallLogsFromSandboxPath(t *testing.T) {
+	t.Parallel()
 	// Create temp directory for test
 	runDir := testutil.TempDir(t, "firewall-test-*")
 
